@@ -201,3 +201,98 @@ test("X Parser — Edge Cases & Fault Tolerance", () => {
   assert.equal(diagNull.valid, false);
   assert.ok(diagNull.errors.length > 0);
 });
+
+test("X Parser — Synthetic current-format sample (synthetic-current-format)", () => {
+  const fixture = loadFixture("synthetic-current-format.json");
+  const items = parseGraphQLBookmarks(fixture);
+
+  // 1. Sıfırdan fazla tweet okunuyor
+  assert.ok(items.length > 0, "Sıfırdan fazla tweet okunabilmeli");
+  assert.equal(items.length, 5, "5 adet tweet başarıyla parse edilmeli");
+
+  // 2. Her birinin kullanıcı adı var
+  for (const item of items) {
+    assert.ok(item.id && item.id.startsWith("x:"), `Her tweet'in geçerli bir id'si olmalı: ${item.id}`);
+    assert.ok(item.creator, `Tweet (${item.id}) creator nesnesine sahip olmalı`);
+    assert.ok(
+      typeof item.creator.handle === "string" && item.creator.handle.length > 1,
+      `Tweet (${item.id}) kullanıcı adına (handle) sahip olmalı`
+    );
+    assert.ok(
+      item.creator.handle.startsWith("@"),
+      `Kullanıcı adı '@' ile başlamalı: ${item.creator.handle}`
+    );
+    assert.ok(
+      typeof item.creator.name === "string" && item.creator.name.length > 0,
+      `Tweet (${item.id}) görüntülenen isme (name) sahip olmalı`
+    );
+    assert.ok(item.url, `Tweet (${item.id}) URL'e sahip olmalı`);
+    assert.ok(typeof item.description === "string" && item.description.length > 0, `Tweet açıklaması olmalı`);
+  }
+
+  // 3. Sayfalama (Pagination cursor) kontrolü
+  const cursor = extractBottomCursor(fixture);
+  assert.ok(cursor, "Sayfalama için bottom cursor bulunabilmeli");
+  assert.equal(cursor, "DAABCgABGek1Z25-real202609cursor_token_xyz");
+
+  // 4. Teşhis (Diagnostic) kontrolü
+  const diag = diagnoseGraphQLResponse(fixture);
+  assert.equal(diag.valid, true);
+  assert.equal(diag.timelineKey, "bookmark_timeline_v2");
+  assert.equal(diag.tweetCount, 5);
+  assert.equal(diag.hasBottomCursor, true);
+  assert.equal(diag.errors.length, 0);
+  assert.equal(diag.warnings.length, 0);
+});
+
+// Picks up any anonymized real-world snapshot(s) dropped into
+// tests/fixtures/real-*.json (produced via `npm run fixture:anonymize`,
+// see tools/anonymize-x-fixture.js). These are not committed by default —
+// each contributor generates their own from their browser — so this test
+// skips cleanly when none exist rather than failing CI.
+test("X Parser — Real-world snapshots (tests/fixtures/real-*.json)", async (t) => {
+  const fixturesDir = path.join(__dirname, "fixtures");
+  const realFixtureFiles = fs
+    .readdirSync(fixturesDir)
+    .filter((f) => /^real-.*\.json$/.test(f));
+
+  if (realFixtureFiles.length === 0) {
+    t.skip("No tests/fixtures/real-*.json snapshots found; run `npm run fixture:anonymize` to generate one.");
+    return;
+  }
+
+  for (const filename of realFixtureFiles) {
+    await t.test(filename, () => {
+      const fixture = loadFixture(filename);
+      const items = parseGraphQLBookmarks(fixture);
+
+      assert.ok(items.length > 0, `${filename}: expected at least one parsed item`);
+
+      for (const item of items) {
+        assert.ok(
+          typeof item.creator.handle === "string" && item.creator.handle.startsWith("@") && item.creator.handle.length > 1,
+          `${filename}: item (${item.id}) should have a valid handle`
+        );
+        assert.ok(
+          typeof item.creator.name === "string" && item.creator.name.length > 0,
+          `${filename}: item (${item.id}) should have a non-empty creator name`
+        );
+        assert.match(
+          item.url,
+          /^https:\/\/x\.com\/[^/]+\/status\/\d+$/,
+          `${filename}: item (${item.id}) should have a well-formed status URL`
+        );
+      }
+
+      const diag = diagnoseGraphQLResponse(fixture);
+      assert.equal(diag.valid, true, `${filename}: diagnostic should report valid`);
+      assert.deepEqual(diag.warnings, [], `${filename}: diagnostic should report no warnings`);
+      assert.equal(
+        diag.tweetCount,
+        diag.tweetEntryCount,
+        `${filename}: every tweet-like entry should have parsed successfully`
+      );
+    });
+  }
+});
+

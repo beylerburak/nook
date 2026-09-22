@@ -11,7 +11,7 @@ let activeDetailItem = null;
 let selectedEmoji = "📁";
 let isLocalServerConnected = false;
 
-const LOCAL_SERVER_URL = "http://localhost:3333";
+const { LOCAL_SERVER_URL, ICONS, createAvatarFallback, formatDate } = NookShared;
 
 // DOM Elements
 const sidebar = document.getElementById("sidebar");
@@ -671,11 +671,7 @@ function createBookmarkCard(item) {
       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1 4-10z"></path>
     </svg>
   `
-    : `
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
-      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-    </svg>
-  `;
+    : ICONS.xLogo(15);
   xLink.addEventListener("click", (e) => e.stopPropagation());
 
   header.append(authorLink, xLink);
@@ -755,31 +751,21 @@ function createBookmarkCard(item) {
   const detailBtn = document.createElement("button");
   detailBtn.className = "action-btn";
   detailBtn.title = "View details, assign list or tags";
-  detailBtn.innerHTML = `
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="10"></circle>
-      <line x1="12" y1="16" x2="12" y2="12"></line>
-      <line x1="12" y1="8" x2="12.01" y2="8"></line>
-    </svg>
-  `;
+  detailBtn.innerHTML = ICONS.info(14);
   detailBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     openDetailModal(item);
   });
 
-  // "Open" Link (X'te Aç or Siteye Git)
+  // "Open" Link (Open on X or Open site)
   const openLink = document.createElement("a");
   openLink.className = "btn-card-open";
   openLink.href = item.url || "#";
   openLink.target = "_blank";
   openLink.rel = "noopener noreferrer";
   openLink.innerHTML = `
-    <span>${isWeb ? "Siteye Git" : "X'te Aç"}</span>
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-      <polyline points="15 3 21 3 21 9"></polyline>
-      <line x1="10" y1="14" x2="21" y2="3"></line>
-    </svg>
+    <span>${isWeb ? "Open site" : "Open on X"}</span>
+    ${ICONS.externalLink(11)}
   `;
   openLink.addEventListener("click", (e) => e.stopPropagation());
 
@@ -787,12 +773,7 @@ function createBookmarkCard(item) {
   const copyBtn = document.createElement("button");
   copyBtn.className = "action-btn";
   copyBtn.title = "Copy link";
-  copyBtn.innerHTML = `
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
-      <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
-    </svg>
-  `;
+  copyBtn.innerHTML = ICONS.copy(14);
   copyBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     if (item.url) {
@@ -805,11 +786,7 @@ function createBookmarkCard(item) {
   const deleteBtn = document.createElement("button");
   deleteBtn.className = "action-btn delete-btn";
   deleteBtn.title = "Delete bookmark";
-  deleteBtn.innerHTML = `
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
-    </svg>
-  `;
+  deleteBtn.innerHTML = ICONS.trash(14);
   deleteBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     deleteBookmark(item.id);
@@ -831,7 +808,7 @@ function createQuoteCard(quote) {
     box.href = quote.url;
     box.target = "_blank";
     box.rel = "noopener noreferrer";
-    box.title = "Alıntılanan gönderiyi X'te aç";
+    box.title = "Open quoted post on X";
     box.addEventListener("click", (e) => e.stopPropagation());
   }
 
@@ -885,15 +862,6 @@ function createQuoteCard(quote) {
   return box;
 }
 
-// Avatar Fallback
-function createAvatarFallback(creator) {
-  const div = document.createElement("div");
-  div.className = "avatar-fallback";
-  const name = creator.name || creator.handle || "X";
-  div.textContent = name.charAt(0).toUpperCase();
-  return div;
-}
-
 // Media Gallery Component
 function createMediaGallery(mediaList) {
   const container = document.createElement("div");
@@ -922,9 +890,7 @@ function createMediaGallery(mediaList) {
       const badge = document.createElement("div");
       badge.className = "video-overlay";
       badge.innerHTML = `
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-          <polygon points="5 3 19 12 5 21 5 3"></polygon>
-        </svg>
+        ${ICONS.play}
         Video
       `;
       wrapper.appendChild(badge);
@@ -960,13 +926,13 @@ function createMediaGallery(mediaList) {
   return container;
 }
 
-// Format Tweet Text — güvenli DOM tabanlı sürüm
-// innerHTML ve regex-replace yerine createElement kullanır;
-// tırnak enjeksiyonu / href-breakout riski yoktur.
+// Format Tweet Text — safe DOM-based version
+// Uses createElement instead of innerHTML/regex-replace;
+// no quote-injection / href-breakout risk.
 function formatTweetText(text) {
   if (!text) return document.createElement("span");
 
-  // Combined tokenizer: URL'leri ve @mention'ları ayır
+  // Combined tokenizer: splits URLs and @mentions
   const TOKEN_RE = /(https?:\/\/[^\s]+)|(@[a-zA-Z0-9_]+)/g;
 
   const fragment = document.createDocumentFragment();
@@ -974,7 +940,7 @@ function formatTweetText(text) {
   let match;
 
   while ((match = TOKEN_RE.exec(text)) !== null) {
-    // Önceki düz metin parçasını ekle
+    // Append the preceding plain-text chunk
     if (match.index > lastIndex) {
       fragment.appendChild(
         document.createTextNode(text.slice(lastIndex, match.index))
@@ -984,11 +950,11 @@ function formatTweetText(text) {
     const a = document.createElement("a");
     a.rel = "noopener noreferrer";
     a.target = "_blank";
-    // CSP uyumlu: onclick attribute değil addEventListener
+    // CSP compliant: addEventListener instead of an onclick attribute
     a.addEventListener("click", (e) => e.stopPropagation());
 
     if (match[1]) {
-      // URL eşleşmesi - sonundaki noktalama işaretlerini ayıkla (örn. "https://site.com." -> link + ".")
+      // URL match - strip trailing punctuation (e.g. "https://site.com." -> link + ".")
       let url = match[1];
       let trailingPunct = "";
       const punctMatch = url.match(/[.,!?:;)"']+$/);
@@ -1005,8 +971,8 @@ function formatTweetText(text) {
         fragment.appendChild(document.createTextNode(trailingPunct));
       }
     } else {
-      // @mention eşleşmesi
-      const handle = match[2].slice(1); // '@' karakterini at
+      // @mention match
+      const handle = match[2].slice(1); // strip the "@" character
       a.href = `https://x.com/${handle}`;
       a.textContent = match[2];
       fragment.appendChild(a);
@@ -1023,31 +989,6 @@ function formatTweetText(text) {
   const wrapper = document.createElement("span");
   wrapper.appendChild(fragment);
   return wrapper;
-}
-
-// Format Date
-function formatDate(dateString) {
-  if (!dateString) return "Saved";
-  try {
-    const date = new Date(dateString);
-    if (isNaN(date.getTime())) return "Saved";
-
-    const now = new Date();
-    const diffSec = Math.floor((now - date) / 1000);
-
-    if (diffSec < 60) return "Just now";
-    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-    if (diffSec < 604800) return `${Math.floor(diffSec / 86400)}d ago`;
-
-    return date.toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      year: date.getFullYear() !== now.getFullYear() ? "numeric" : undefined
-    });
-  } catch (e) {
-    return "Saved";
-  }
 }
 
 // Open Detail Modal
@@ -1105,9 +1046,7 @@ function openDetailModal(item) {
         const badge = document.createElement("div");
         badge.className = "video-overlay";
         badge.innerHTML = `
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="5 3 19 12 5 21 5 3"></polygon>
-          </svg>
+          ${ICONS.play}
           Video Preview
         `;
         mediaBox.appendChild(badge);
@@ -1164,12 +1103,8 @@ function openDetailModal(item) {
     modalBtnOpenX.href = item.url;
     modalBtnOpenX.classList.remove("hidden");
     modalBtnOpenX.innerHTML = `
-      <span>${isWeb ? "Siteye Git" : "Open on X"}</span>
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-        <polyline points="15 3 21 3 21 9"></polyline>
-        <line x1="10" y1="14" x2="21" y2="3"></line>
-      </svg>
+      <span>${isWeb ? "Open site" : "Open on X"}</span>
+      ${ICONS.externalLink(14)}
     `;
   } else {
     modalTweetUrl.textContent = "No URL available";

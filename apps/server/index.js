@@ -74,6 +74,9 @@ function setCorsHeaders(res, origin) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
+// Tracks origins we've already warned about, so rejections don't spam the log
+const warnedOrigins = new Set();
+
 const server = http.createServer((req, res) => {
   const origin = req.headers["origin"];
 
@@ -86,6 +89,13 @@ const server = http.createServer((req, res) => {
 
   // Reject any browser request from untrusted origins (CSRF protection)
   if (origin && !isAllowedOrigin(origin)) {
+    if (!warnedOrigins.has(origin)) {
+      warnedOrigins.add(origin);
+      console.warn(
+        `[Nook Server] Rejected request from origin: ${origin}. If this is your own unpacked ` +
+        `extension, note the ID changes when it is loaded from a different folder — update NOOK_EXTENSION_ID to match.`
+      );
+    }
     res.writeHead(403, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Forbidden: Origin not allowed" }));
     return;
@@ -260,4 +270,9 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`[Nook Server] Running at http://127.0.0.1:${PORT} (localhost only)`);
   console.log(`[Nook Server] Saving bookmarks & lists to: ${DATA_FILE}`);
+  console.log(
+    process.env.NOOK_EXTENSION_ID
+      ? `[Nook Server] Allowed origin: chrome-extension://${process.env.NOOK_EXTENSION_ID}`
+      : `[Nook Server] Allowed origin: any chrome-extension:// (set NOOK_EXTENSION_ID to restrict)`
+  );
 });

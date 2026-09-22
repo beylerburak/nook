@@ -1,3 +1,5 @@
+const { LOCAL_SERVER_URL, ICONS, createAvatarFallback } = NookShared;
+
 async function loadItems() {
   const container = document.querySelector("#items");
   const countBadge = document.querySelector("#popup-count");
@@ -27,7 +29,7 @@ async function loadItems() {
   // If extension was freshly reinstalled and storage is empty, check local server
   if (!items.length) {
     try {
-      const res = await fetch("http://localhost:3333/api/bookmarks");
+      const res = await fetch(`${LOCAL_SERVER_URL}/api/bookmarks`);
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.items) && data.items.length > 0) {
@@ -98,11 +100,7 @@ async function loadItems() {
     const delBtn = document.createElement("button");
     delBtn.className = "btn-del";
     delBtn.title = "Delete";
-    delBtn.innerHTML = `
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
-      </svg>
-    `;
+    delBtn.innerHTML = ICONS.trash(12, { round: false });
     delBtn.onclick = async (e) => {
       e.stopPropagation();
       await deleteItem(item.id);
@@ -181,12 +179,8 @@ async function loadItems() {
     link.target = "_blank";
     link.onclick = (e) => e.stopPropagation();
     link.innerHTML = `
-      <span>${isWeb ? "Siteye Git" : "Open on X"}</span>
-      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-        <polyline points="15 3 21 3 21 9"></polyline>
-        <line x1="10" y1="14" x2="21" y2="3"></line>
-      </svg>
+      <span>${isWeb ? "Open site" : "Open on X"}</span>
+      ${ICONS.externalLink(10)}
     `;
 
     footer.appendChild(link);
@@ -196,19 +190,11 @@ async function loadItems() {
   }
 }
 
-function createAvatarFallback(creator) {
-  const div = document.createElement("div");
-  div.className = "avatar-fallback";
-  const name = creator?.name || creator?.handle || "X";
-  div.textContent = name.charAt(0).toUpperCase();
-  return div;
-}
-
 async function deleteItem(id) {
   const { items = [] } = await chrome.storage.local.get("items");
   const updated = items.filter((item) => item.id !== id);
   await chrome.storage.local.set({ items: updated });
-  fetch(`http://localhost:3333/api/bookmarks/${encodeURIComponent(id)}`, {
+  fetch(`${LOCAL_SERVER_URL}/api/bookmarks/${encodeURIComponent(id)}`, {
     method: "DELETE"
   }).catch(() => {});
   loadItems();

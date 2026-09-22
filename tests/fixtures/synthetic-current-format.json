@@ -1,0 +1,294 @@
+{
+  "data": {
+    "bookmark_timeline_v2": {
+      "timeline": {
+        "instructions": [
+          {
+            "type": "TimelineAddEntries",
+            "entries": [
+              {
+                "entryId": "cursor-top-1726999999000",
+                "sortIndex": "1726999999000",
+                "content": {
+                  "entryType": "TimelineTimelineCursor",
+                  "cursorType": "Top",
+                  "value": "DAACCgACGd123top_cursor_token"
+                }
+              },
+              {
+                "entryId": "tweet-1837500000000000001",
+                "sortIndex": "1726999000000",
+                "content": {
+                  "entryType": "TimelineTimelineItem",
+                  "itemContent": {
+                    "itemType": "TimelineTweet",
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "1837500000000000001",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "__typename": "User",
+                              "id": "VXNlcjoxODAxMDAwMQ==",
+                              "rest_id": "18010001",
+                              "core": {
+                                "name": "Ada Lovelace",
+                                "screen_name": "adalovelace"
+                              },
+                              "avatar": {
+                                "image_url": "https://pbs.twimg.com/profile_images/synthetic_avatar_1.jpg"
+                              }
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Tue Sep 22 10:15:30 +0000 2026",
+                          "full_text": "Announcing the 2026 open-source AI architecture benchmark! Read our findings here: https://t.co/bench123",
+                          "display_text_range": [0, 82],
+                          "entities": {
+                            "media": [
+                              {
+                                "id_str": "1837500000000000010",
+                                "media_url_https": "https://pbs.twimg.com/media/synthetic_chart_1.jpg",
+                                "type": "photo",
+                                "ext_alt_text": "Benchmark chart comparing latency and memory"
+                              }
+                            ]
+                          },
+                          "extended_entities": {
+                            "media": [
+                              {
+                                "id_str": "1837500000000000010",
+                                "media_url_https": "https://pbs.twimg.com/media/synthetic_chart_1.jpg",
+                                "type": "photo",
+                                "ext_alt_text": "Benchmark chart comparing latency and memory"
+                              }
+                            ]
+                          },
+                          "id_str": "1837500000000000001"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "entryId": "tweet-1837500000000000002",
+                "sortIndex": "1726998000000",
+                "content": {
+                  "entryType": "TimelineTimelineItem",
+                  "itemContent": {
+                    "itemType": "TimelineTweet",
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "1837500000000000002",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "__typename": "User",
+                              "id": "VXNlcjoxODAxMDAwMg==",
+                              "rest_id": "18010002",
+                              "core": {
+                                "name": "Alan Turing",
+                                "screen_name": "aturing"
+                              },
+                              "avatar": {
+                                "image_url": "https://pbs.twimg.com/profile_images/synthetic_avatar_2.jpg"
+                              }
+                            }
+                          }
+                        },
+                        "note_tweet": {
+                          "note_tweet_results": {
+                            "result": {
+                              "text": "Deep dive into local vector search for browser extensions:\n\n1. Use IndexedDB with IDBKeyRange for hierarchical indexing.\n2. Store embeddings in typed Float32Arrays for zero-copy memory access.\n3. Implement cosine similarity in a Web Worker to avoid blocking UI frame rates.\n4. Cache frequently retrieved centroid clusters for sub-10ms queries.\n\nFull guide and benchmarks coming next week!"
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Tue Sep 22 11:30:00 +0000 2026",
+                          "full_text": "Deep dive into local vector search for browser extensions:\n\n1. Use IndexedDB... https://t.co/longform123",
+                          "display_text_range": [0, 79],
+                          "id_str": "1837500000000000002"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "entryId": "tweet-1837500000000000003",
+                "sortIndex": "1726997000000",
+                "content": {
+                  "entryType": "TimelineTimelineItem",
+                  "itemContent": {
+                    "itemType": "TimelineTweet",
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "TweetWithVisibilityResults",
+                        "tweet": {
+                          "__typename": "Tweet",
+                          "rest_id": "1837500000000000003",
+                          "core": {
+                            "user_results": {
+                              "result": {
+                                "__typename": "User",
+                                "id": "VXNlcjoxODAxMDAwMw==",
+                                "rest_id": "18010003",
+                                "core": {
+                                  "name": "Grace Hopper",
+                                  "screen_name": "ghopper"
+                                },
+                                "avatar": {
+                                  "image_url": "https://pbs.twimg.com/profile_images/synthetic_avatar_3.jpg"
+                                }
+                              }
+                            }
+                          },
+                          "legacy": {
+                            "created_at": "Tue Sep 22 12:45:15 +0000 2026",
+                            "full_text": "A great reminder that clean interfaces always win. See original context below:",
+                            "display_text_range": [0, 78],
+                            "id_str": "1837500000000000003"
+                          },
+                          "quoted_status_result": {
+                            "result": {
+                              "__typename": "Tweet",
+                              "rest_id": "1837499999999999990",
+                              "core": {
+                                "user_results": {
+                                  "result": {
+                                    "core": {
+                                      "name": "Claude Shannon",
+                                      "screen_name": "cshannon"
+                                    },
+                                    "avatar": {
+                                      "image_url": "https://pbs.twimg.com/profile_images/synthetic_avatar_4.jpg"
+                                    }
+                                  }
+                                }
+                              },
+                              "legacy": {
+                                "created_at": "Tue Sep 22 09:00:00 +0000 2026",
+                                "full_text": "Simplicity is about subtracting the obvious and adding the meaningful.",
+                                "id_str": "1837499999999999990",
+                                "extended_entities": {
+                                  "media": [
+                                    {
+                                      "type": "photo",
+                                      "media_url_https": "https://pbs.twimg.com/media/quote_minimal_design.jpg",
+                                      "ext_alt_text": "Minimal design layout diagram"
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "entryId": "tweet-1837500000000000004",
+                "sortIndex": "1726996000000",
+                "content": {
+                  "entryType": "TimelineTimelineItem",
+                  "itemContent": {
+                    "itemType": "TimelineTweet",
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "1837500000000000004",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "__typename": "User",
+                              "id": "VXNlcjoxODAxMDAwNA==",
+                              "rest_id": "18010004",
+                              "core": {
+                                "name": "Margaret Hamilton",
+                                "screen_name": "mhamilton"
+                              },
+                              "avatar": {
+                                "image_url": "https://pbs.twimg.com/profile_images/synthetic_avatar_5.jpg"
+                              }
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Tue Sep 22 14:10:00 +0000 2026",
+                          "full_text": "Watch this 30-second live demo of zero-lag offline search in action: https://t.co/video999",
+                          "display_text_range": [0, 68],
+                          "id_str": "1837500000000000004",
+                          "extended_entities": {
+                            "media": [
+                              {
+                                "id_str": "1837500000000000040",
+                                "media_url_https": "https://pbs.twimg.com/amplify_video_thumb/1837500000000000040/img/demo_thumb.jpg",
+                                "type": "video",
+                                "ext_alt_text": "Live demonstration of instant search"
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "entryId": "tweet-1837500000000000005",
+                "sortIndex": "1726995000000",
+                "content": {
+                  "entryType": "TimelineTimelineItem",
+                  "itemContent": {
+                    "itemType": "TimelineTweet",
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "1837500000000000005",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "__typename": "User",
+                              "id": "VXNlcjoxODAxMDAwNQ==",
+                              "rest_id": "18010005",
+                              "legacy": {
+                                "name": "Barbara Liskov",
+                                "screen_name": "bliskov",
+                                "profile_image_url_https": "https://pbs.twimg.com/profile_images/synthetic_avatar_6.jpg"
+                              }
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Tue Sep 22 16:20:00 +0000 2026",
+                          "full_text": "Testing &amp; verification for &lt;distributed&gt; state machines: lessons learned over 10 years.",
+                          "display_text_range": [0, 97],
+                          "id_str": "1837500000000000005"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "entryId": "cursor-bottom-1726995000000",
+                "sortIndex": "1726994999000",
+                "content": {
+                  "entryType": "TimelineTimelineCursor",
+                  "cursorType": "Bottom",
+                  "value": "DAABCgABGek1Z25-real202609cursor_token_xyz"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,9 +1,11 @@
 // Nook Background Service Worker
 // Listens for Chrome bookmark creation and captures web pages automatically
 
+importScripts("shared.js");
+
 console.log("[Nook Background] Service Worker initialized");
 
-const LOCAL_SERVER_URL = "http://localhost:3333";
+const { LOCAL_SERVER_URL } = self.NookShared;
 
 // Cached X Bookmarks GraphQL queryId (captured from network by inject.js)
 let _cachedBookmarkQueryId = null;

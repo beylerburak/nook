@@ -18,15 +18,15 @@ document.addEventListener(
 
       if (!(target instanceof Element)) return;
 
-      // Sadece henüz bookmark edilmemiş posttaki bookmark butonu.
-      // Bookmark kaldırma butonu genellikle removeBookmark oluyor.
+      // Only the bookmark button on a post that isn't bookmarked yet.
+      // The "remove bookmark" button is usually removeBookmark.
       const bookmarkButton = target.closest('[data-testid="bookmark"]');
 
       if (!bookmarkButton) return;
 
       if (!isExtensionValid()) {
         console.warn("[Nook] Extension was reloaded. Please refresh the page (F5).");
-        showNotification("Nook güncellendi. Lütfen sayfayı yenileyin (F5) 🔄");
+        showNotification("Nook was updated. Please refresh the page (F5) 🔄");
         return;
       }
 
@@ -356,7 +356,7 @@ function parseTweet(article) {
 async function saveItem(item) {
   if (!isExtensionValid()) {
     console.warn("[Nook] Extension context invalidated. Please refresh the page (F5).");
-    showNotification("Nook güncellendi. Lütfen sayfayı yenileyin (F5) 🔄");
+    showNotification("Nook was updated. Please refresh the page (F5) 🔄");
     return false;
   }
 
@@ -479,8 +479,8 @@ function injectSyncOverlay() {
   el.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.92);backdrop-filter:blur(10px);display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
   el.innerHTML = `
     <div style="font-size:26px;font-weight:700;margin-bottom:10px">🔄 Nook Sync</div>
-    <div style="font-size:14px;opacity:.7;margin-bottom:28px">Tüm yer imleriniz çekiliyor…</div>
-    <div id="nook-sync-log" style="padding:12px 32px;background:#111;border:1px solid #2a2a2a;border-radius:12px;font-family:monospace;font-size:14px;min-width:260px;text-align:center">Başlatılıyor…</div>
+    <div style="font-size:14px;opacity:.7;margin-bottom:28px">Fetching all your bookmarks…</div>
+    <div id="nook-sync-log" style="padding:12px 32px;background:#111;border:1px solid #2a2a2a;border-radius:12px;font-family:monospace;font-size:14px;min-width:260px;text-align:center">Starting…</div>
   `;
   document.body.appendChild(el);
 }
@@ -494,7 +494,7 @@ async function startAutoSync(msgQueryId) {
     window._nookAutoSyncing = false;
     injectSyncOverlay();
     const el = document.getElementById("nook-sync-log");
-    if (el) el.textContent = "Hata: X parser modülü yüklenemedi.";
+    if (el) el.textContent = "Error: the X parser module failed to load.";
     setTimeout(() => chrome.runtime.sendMessage({ type: "CLOSE_CURRENT_TAB" }), 5000);
     return;
   }
@@ -508,10 +508,10 @@ async function startAutoSync(msgQueryId) {
     window._nookAutoSyncing = false;
     const ov = document.getElementById("nook-sync-overlay");
     if (ov) ov.innerHTML = `
-      <div style="font-size:26px;font-weight:700;margin-bottom:10px;color:#4ade80">✓ Tamamlandı</div>
-      <div style="font-size:16px;margin-bottom:6px">${newCount} yeni yer imi Nook'a eklendi.</div>
-      ${updatedCount ? `<div style="font-size:13px;opacity:.7;margin-bottom:6px">${updatedCount} yer imi güncellendi (alıntılar / medya).</div>` : ""}
-      <div style="font-size:12px;opacity:.5">Sekme kapanıyor…</div>
+      <div style="font-size:26px;font-weight:700;margin-bottom:10px;color:#4ade80">✓ Done</div>
+      <div style="font-size:16px;margin-bottom:6px">${newCount} new bookmark${newCount === 1 ? "" : "s"} added to Nook.</div>
+      ${updatedCount ? `<div style="font-size:13px;opacity:.7;margin-bottom:6px">${updatedCount} bookmark${updatedCount === 1 ? "" : "s"} updated (quotes / media).</div>` : ""}
+      <div style="font-size:12px;opacity:.5">Closing tab…</div>
     `;
     setTimeout(() => chrome.runtime.sendMessage({ type: "CLOSE_CURRENT_TAB" }), 2000);
   }
@@ -519,10 +519,10 @@ async function startAutoSync(msgQueryId) {
   try {
     // Step 1: CSRF token
     const csrfToken = getCsrfToken();
-    if (!csrfToken) throw new Error("CSRF token (ct0) bulunamadı. X'e giriş yapılı mı?");
+    if (!csrfToken) throw new Error("CSRF token (ct0) not found. Are you logged in to X?");
 
     // Step 2: queryId resolution — priority: message arg > local > background.js cache
-    updateLog("Query ID alınıyor…");
+    updateLog("Fetching query ID…");
     let queryId = msgQueryId || _nookQueryId;
 
     if (!queryId) {
@@ -535,7 +535,7 @@ async function startAutoSync(msgQueryId) {
     }
 
     if (!queryId) {
-      throw new Error("X Bookmarks API query ID bulunamadı. Lütfen önce x.com/i/bookmarks sayfasını manuel açın, sonra tekrar deneyin.");
+      throw new Error("Could not find the X Bookmarks API query ID. Please open x.com/i/bookmarks manually first, then try again.");
     }
 
     console.log("[Nook] Using queryId:", queryId);
@@ -556,22 +556,22 @@ async function startAutoSync(msgQueryId) {
 
     while (true) {
       page++;
-      updateLog(`Sayfa ${page} çekiliyor… (${totalSynced} yeni)`);
+      updateLog(`Fetching page ${page}… (${totalSynced} new)`);
       console.log("[Nook] Fetching page", page, "cursor:", cursor);
 
       const data = await fetchBookmarkPage(queryId, csrfToken, cursor);
 
       // ── Debug: show top-level keys in overlay on first page ──
       if (page === 1) {
-        const topKeys = Object.keys(data?.data ?? {}).join(", ") || "(boş)";
+        const topKeys = Object.keys(data?.data ?? {}).join(", ") || "(empty)";
         console.log("[Nook] API response top-level data keys:", topKeys);
-        updateLog(`API yanıtı: ${topKeys}`);
+        updateLog(`API response: ${topKeys}`);
         await new Promise(r => setTimeout(r, 1200)); // let user see it
       }
 
       // Check for API errors
       if (data?.errors?.length) {
-        throw new Error(`API Hatası: ${data.errors[0]?.message}`);
+        throw new Error(`API error: ${data.errors[0]?.message}`);
       }
 
       // Parse items from this page
@@ -591,7 +591,7 @@ async function startAutoSync(msgQueryId) {
             ? diag.warnings.join(" | ")
             : (diag.errors.length ? diag.errors.join(" | ") : JSON.stringify(Object.keys(data?.data ?? {})));
           console.error("[Nook] Invalid response on page", page, "— diagnosis:", diag, "Full data:", JSON.stringify(data).slice(0, 500));
-          throw new Error(`X'in yanıt şeması değişmiş olabilir (sayfa ${page}): ${diagMsg}`);
+          throw new Error(`X's response schema may have changed (page ${page}): ${diagMsg}`);
         }
 
         console.log("[Nook] Empty page (cursor-only) on page", page, "— reached the end");
@@ -607,7 +607,7 @@ async function startAutoSync(msgQueryId) {
         });
         totalSynced += result?.count ?? 0;
         totalUpdated += result?.updated ?? 0;
-        updateLog(`Sayfa ${page} — ${totalSynced} yeni, ${totalUpdated} güncellendi`);
+        updateLog(`Page ${page} — ${totalSynced} new, ${totalUpdated} updated`);
 
         if (!fullScan && result?.count === 0 && !result?.updated && cursor !== null) {
           console.log("[Nook] All items on page", page, "already saved — stopping");
@@ -632,9 +632,9 @@ async function startAutoSync(msgQueryId) {
     console.error("[Nook] Auto sync error:", err);
     const ov = document.getElementById("nook-sync-overlay");
     if (ov) ov.innerHTML = `
-      <div style="font-size:22px;font-weight:700;margin-bottom:10px;color:#f87171">✗ Hata</div>
+      <div style="font-size:22px;font-weight:700;margin-bottom:10px;color:#f87171">✗ Error</div>
       <div style="font-size:14px;opacity:.8;max-width:340px;text-align:center">${err.message}</div>
-      <div style="font-size:12px;opacity:.5;margin-top:16px">Sekme kapanıyor…</div>
+      <div style="font-size:12px;opacity:.5;margin-top:16px">Closing tab…</div>
     `;
     window._nookAutoSyncing = false;
     setTimeout(() => chrome.runtime.sendMessage({ type: "CLOSE_CURRENT_TAB" }), 5000);

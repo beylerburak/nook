@@ -3,7 +3,8 @@
   "version": "0.0.1",
   "description": "Save what matters.",
   "scripts": {
-    "server": "node apps/server/index.js",
-    "test": "node --test"
+    "server": "NOOK_EXTENSION_ID=mkcbkpmloadihnhdaokpmichnapgiejc node apps/server/index.js",
+    "test": "node --test",
+    "fixture:anonymize": "node tools/anonymize-x-fixture.js"
   }
 }
