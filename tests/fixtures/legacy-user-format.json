@@ -1,0 +1,44 @@
+{
+  "data": {
+    "bookmark_timeline": {
+      "timeline": {
+        "instructions": [
+          {
+            "type": "TimelineAddEntries",
+            "entries": [
+              {
+                "entryId": "tweet-1122334455667788990",
+                "content": {
+                  "itemContent": {
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "1122334455667788990",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "legacy": {
+                                "name": "Old School User",
+                                "screen_name": "oldschool",
+                                "profile_image_url_https": "https://pbs.twimg.com/profile_images/old.jpg"
+                              }
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Sun Jan 01 12:00:00 +0000 2023",
+                          "full_text": "Testing with user data under legacy object &amp; HTML entities &lt;b&gt;bold&lt;/b&gt;",
+                          "id_str": "1122334455667788990"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

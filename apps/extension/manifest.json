@@ -35,7 +35,7 @@
         "https://x.com/*",
         "https://twitter.com/*"
       ],
-      "js": ["content.js"],
+      "js": ["x-parser.js", "content.js"],
       "run_at": "document_idle"
     }
   ],

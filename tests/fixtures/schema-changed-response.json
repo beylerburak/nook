@@ -1,0 +1,91 @@
+{
+  "data": {
+    "bookmark_timeline_v2": {
+      "timeline": {
+        "instructions": [
+          {
+            "type": "TimelineAddEntries",
+            "entries": [
+              {
+                "entryId": "cursor-top-000000000000",
+                "content": {
+                  "entryType": "TimelineTimelineCursor",
+                  "cursorType": "Top",
+                  "value": "TOP_CURSOR"
+                }
+              },
+              {
+                "entryId": "tweet-1111111111111111111",
+                "content": {
+                  "entryType": "TimelineTimelineItem",
+                  "itemContent": {
+                    "itemType": "TimelineTweet",
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "1111111111111111111",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "__typename": "User",
+                              "id": "VXNlcjox",
+                              "rest_id": "111"
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Mon Sep 21 11:39:13 +0000 2026",
+                          "full_text": "This tweet has no user.core / user.legacy screen_name.",
+                          "display_text_range": [0, 55],
+                          "id_str": "1111111111111111111"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "entryId": "tweet-2222222222222222222",
+                "content": {
+                  "entryType": "TimelineTimelineItem",
+                  "itemContent": {
+                    "itemType": "TimelineTweet",
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "2222222222222222222",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "__typename": "User",
+                              "id": "VXNlcjoy",
+                              "rest_id": "222"
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Mon Sep 21 11:40:13 +0000 2026",
+                          "full_text": "Same problem here — schema changed, no screen_name anywhere.",
+                          "display_text_range": [0, 62],
+                          "id_str": "2222222222222222222"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "entryId": "cursor-bottom-000000000000",
+                "content": {
+                  "entryType": "TimelineTimelineCursor",
+                  "cursorType": "Bottom",
+                  "value": "BOTTOM_CURSOR"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

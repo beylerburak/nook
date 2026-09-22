@@ -1,0 +1,86 @@
+{
+  "data": {
+    "bookmark_timeline_v2": {
+      "timeline": {
+        "instructions": [
+          {
+            "type": "TimelineAddEntries",
+            "entries": [
+              {
+                "entryId": "tweet-2102000000000000001",
+                "content": {
+                  "itemContent": {
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "TweetWithVisibilityResults",
+                        "tweet": {
+                          "__typename": "Tweet",
+                          "rest_id": "2102000000000000001",
+                          "core": {
+                            "user_results": {
+                              "result": {
+                                "core": {
+                                  "name": "Sarah Connor",
+                                  "screen_name": "sconnor"
+                                },
+                                "avatar": {
+                                  "image_url": "https://pbs.twimg.com/avatar/sconnor.jpg"
+                                }
+                              }
+                            }
+                          },
+                          "legacy": {
+                            "created_at": "Mon Sep 21 15:00:00 +0000 2026",
+                            "full_text": "This is an incredible breakthrough! Check out the quote below 👇",
+                            "display_text_range": [0, 64],
+                            "id_str": "2102000000000000001"
+                          },
+                          "quoted_status_result": {
+                            "result": {
+                              "__typename": "TweetWithVisibilityResults",
+                              "tweet": {
+                                "__typename": "Tweet",
+                                "rest_id": "2101999999999999999",
+                                "core": {
+                                  "user_results": {
+                                    "result": {
+                                      "core": {
+                                        "name": "Original Author",
+                                        "screen_name": "orig_author"
+                                      },
+                                      "avatar": {
+                                        "image_url": "https://pbs.twimg.com/avatar/orig.jpg"
+                                      }
+                                    }
+                                  }
+                                },
+                                "legacy": {
+                                  "created_at": "Mon Sep 21 14:00:00 +0000 2026",
+                                  "full_text": "Here is the original announcement about our AI model.",
+                                  "id_str": "2101999999999999999",
+                                  "extended_entities": {
+                                    "media": [
+                                      {
+                                        "type": "photo",
+                                        "media_url_https": "https://pbs.twimg.com/media/quote_img.jpg",
+                                        "ext_alt_text": "Model benchmark"
+                                      }
+                                    ]
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

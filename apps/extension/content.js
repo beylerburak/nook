@@ -1,5 +1,11 @@
 console.log("[Nook] Running");
 
+const {
+  parseGraphQLBookmarks,
+  extractBottomCursor,
+  diagnoseGraphQLResponse
+} = (typeof globalThis !== "undefined" && globalThis.NookXParser) || {};
+
 function isExtensionValid() {
   return typeof chrome !== "undefined" && Boolean(chrome.runtime?.id);
 }
@@ -374,145 +380,8 @@ async function saveItem(item) {
 
 
 
-// Handle TweetWithVisibilityResults wrapper
-function unwrapTweetResult(result) {
-  if (!result) return null;
-  return result.__typename === "TweetWithVisibilityResults" ? result.tweet : result;
-}
+// Note: GraphQL parsing is handled by NookXParser (apps/extension/x-parser.js)
 
-// Parse a single GraphQL tweet result (used for both bookmarked and quoted tweets)
-function parseGraphQLTweet(result) {
-  const tweet = unwrapTweetResult(result);
-  if (!tweet?.legacy) return null;
-
-  // X moved name/screen_name to user.core and avatar to user.avatar;
-  // older responses keep them under user.legacy.
-  const userResult = tweet.core?.user_results?.result;
-  if (!userResult) return null;
-  const userCore   = userResult.core ?? {};
-  const userLegacy = userResult.legacy ?? {};
-  const legacy     = tweet.legacy;
-
-  const screenName = userCore.screen_name || userLegacy.screen_name;
-  const statusId   = tweet.rest_id || legacy.id_str;
-  if (!screenName || !statusId) return null;
-
-  // full_text ends with t.co links for attached media / quoted tweet;
-  // display_text_range marks the visible part (in code points).
-  let text = tweet.note_tweet?.note_tweet_results?.result?.text || "";
-  if (!text) {
-    text = legacy.full_text || legacy.text || "";
-    const range = legacy.display_text_range;
-    if (Array.isArray(range) && range.length === 2) {
-      text = Array.from(text).slice(range[0], range[1]).join("");
-    }
-  }
-  text = text.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").trim();
-
-  const media = [];
-  const mediaEntities = legacy.extended_entities?.media || legacy.entities?.media || [];
-  for (const m of mediaEntities) {
-    if (m.type === "photo") {
-      media.push({ type: "image", url: m.media_url_https, alt: m.ext_alt_text || "" });
-    } else if (m.type === "video" || m.type === "animated_gif") {
-      media.push({ type: "video", url: m.media_url_https, alt: m.ext_alt_text || "Video" });
-    }
-  }
-
-  return {
-    statusId,
-    text,
-    media,
-    url: `https://x.com/${screenName}/status/${statusId}`,
-    creator: {
-      name: userCore.name || userLegacy.name || screenName,
-      handle: `@${screenName}`,
-      avatar: userResult.avatar?.image_url || userLegacy.profile_image_url_https || null
-    },
-    createdAt: legacy.created_at ? new Date(legacy.created_at).toISOString() : null
-  };
-}
-
-function parseGraphQLBookmarks(data) {
-  const parsedItems = [];
-  try {
-    // ── Try all known response paths X has used ──────────────────────
-    const timeline =
-      data?.data?.bookmark_timeline_v2?.timeline ||   // current
-      data?.data?.bookmark_timeline?.timeline ||       // older
-      data?.data?.bookmarks?.timeline ||              // variant
-      null;
-
-    if (!timeline) {
-      console.warn("[Nook] parseGraphQLBookmarks: could not find timeline in response. Keys:", Object.keys(data?.data ?? {}));
-      return parsedItems;
-    }
-
-    const instructions = timeline.instructions || [];
-
-    // Collect all entries across all instruction types
-    const allEntries = [];
-    for (const inst of instructions) {
-      if (inst.entries) allEntries.push(...inst.entries);
-      if (inst.entry)  allEntries.push(inst.entry);
-    }
-
-    console.log("[Nook] Total entries found:", allEntries.length);
-
-    for (const entry of allEntries) {
-      // Skip cursor entries
-      const entryId = entry.entryId ?? "";
-      if (!entryId.startsWith("tweet-") && !entryId.includes("bookmark")) continue;
-
-      // Navigate to tweet result — handle both flat and nested content
-      const content = entry.content ?? entry.item?.content;
-      if (!content) continue;
-
-      // tweet can be nested in itemContent or directly in content
-      const itemContent = content.itemContent ?? content;
-      const tweetResult = itemContent?.tweet_results?.result;
-      if (!tweetResult) continue;
-
-      const tweet = parseGraphQLTweet(tweetResult);
-      if (!tweet) continue;
-
-      // Quoted tweet (e.g. "Omg so cool!" quoting a post with a video)
-      const quotedResult = unwrapTweetResult(tweetResult)?.quoted_status_result?.result;
-      const quote = quotedResult ? parseGraphQLTweet(quotedResult) : null;
-
-      parsedItems.push({
-        id: `x:${tweet.statusId}`,
-        source: "x",
-        title: `${tweet.creator.handle}: ${tweet.text.slice(0, 100)}`,
-        shortDescription: tweet.text.slice(0, 180),
-        description: tweet.text,
-        category: null,
-        tags: [],
-        media: tweet.media,
-        attachments: tweet.media,
-        urls: [tweet.url],
-        url: tweet.url,
-        creator: tweet.creator,
-        quote: quote
-          ? {
-              id: `x:${quote.statusId}`,
-              url: quote.url,
-              text: quote.text,
-              creator: quote.creator,
-              media: quote.media,
-              createdAt: quote.createdAt
-            }
-          : null,
-        createdAt: tweet.createdAt,
-        savedAt: new Date().toISOString()
-      });
-    }
-  } catch (err) {
-    console.error("[Nook] Error in parseGraphQLBookmarks:", err);
-  }
-  console.log("[Nook] parseGraphQLBookmarks result count:", parsedItems.length);
-  return parsedItems;
-}
 
 
 // ─────────────────────────────────────────────
@@ -579,30 +448,8 @@ function getCsrfToken() {
   return match ? match[1] : null;
 }
 
-function extractBottomCursor(data) {
-  try {
-    const instructions = data?.data?.bookmark_timeline_v2?.timeline?.instructions || [];
-    for (const inst of instructions) {
-      const entries = inst.entries || [];
-      for (const entry of entries) {
-        const content = entry.content;
-        if (content?.entryType === "TimelineTimelineCursor" && content?.cursorType === "Bottom") {
-          return content.value;
-        }
-        // Nested cursor inside TimelineTimelineModule
-        if (content?.items) {
-          for (const item of content.items) {
-            const ic = item.item?.itemContent;
-            if (ic?.itemType === "TimelineTimelineCursor" && ic?.cursorType === "Bottom") {
-              return ic.value;
-            }
-          }
-        }
-      }
-    }
-  } catch (_) {}
-  return null;
-}
+// Note: extractBottomCursor is provided by NookXParser
+
 
 async function fetchBookmarkPage(queryId, csrfToken, cursor) {
   const variables = { count: 100, includePromotedContent: false };
@@ -641,6 +488,16 @@ function injectSyncOverlay() {
 async function startAutoSync(msgQueryId) {
   if (window._nookAutoSyncing) return;
   window._nookAutoSyncing = true;
+
+  if (typeof parseGraphQLBookmarks !== "function" || typeof diagnoseGraphQLResponse !== "function") {
+    console.error("[Nook] NookXParser is missing — x-parser.js failed to load");
+    window._nookAutoSyncing = false;
+    injectSyncOverlay();
+    const el = document.getElementById("nook-sync-log");
+    if (el) el.textContent = "Hata: X parser modülü yüklenemedi.";
+    setTimeout(() => chrome.runtime.sendMessage({ type: "CLOSE_CURRENT_TAB" }), 5000);
+    return;
+  }
 
   console.log("[Nook] Auto sync started (direct API mode)");
   injectSyncOverlay();
@@ -689,7 +546,6 @@ async function startAutoSync(msgQueryId) {
     let page = 0;
     let totalSynced = 0;
     let totalUpdated = 0;
-    let consecutiveEmpty = 0;
 
     // Bumped when the parser starts extracting new data (v2: quoted tweets).
     // Until a full pass completes, don't stop early on already-saved pages so
@@ -723,22 +579,29 @@ async function startAutoSync(msgQueryId) {
       console.log("[Nook] Page", page, "parsed", items.length, "tweets from response");
 
       if (items.length === 0) {
-        consecutiveEmpty++;
-        console.warn("[Nook] Empty parse on page", page, "— empty count:", consecutiveEmpty);
-        // X returns an empty page with a bottom cursor at the end of the list
-        if (page > 1) {
-          console.log("[Nook] Empty page after results — reached the end");
-          break;
+        // An empty page can mean two very different things: a normal
+        // end-of-list (cursor-only page, nothing to parse) or a schema
+        // change that silently broke parsing (tweet-like entries present
+        // but none could be turned into items). Diagnose to tell them apart
+        // instead of always treating "0 items" as "reached the end".
+        const diag = diagnoseGraphQLResponse(data);
+
+        if (!diag.valid) {
+          const diagMsg = diag.warnings.length
+            ? diag.warnings.join(" | ")
+            : (diag.errors.length ? diag.errors.join(" | ") : JSON.stringify(Object.keys(data?.data ?? {})));
+          console.error("[Nook] Invalid response on page", page, "— diagnosis:", diag, "Full data:", JSON.stringify(data).slice(0, 500));
+          throw new Error(`X'in yanıt şeması değişmiş olabilir (sayfa ${page}): ${diagMsg}`);
         }
-        if (consecutiveEmpty >= 2) {
-          // Try to show why it's empty
-          const dataKeys = JSON.stringify(Object.keys(data?.data ?? {}));
-          updateLog(`Parse edilemedi. data.keys=${dataKeys}`);
-          console.warn("[Nook] Stopping — consistently empty parse. Full data:", JSON.stringify(data).slice(0, 500));
-          break;
-        }
+
+        console.log("[Nook] Empty page (cursor-only) on page", page, "— reached the end");
+        break;
       } else {
-        consecutiveEmpty = 0;
+        const partialWarning = diagnoseGraphQLResponse(data).warnings.find(w => w.includes("could be parsed"));
+        if (partialWarning) {
+          console.warn("[Nook] Partial parse on page", page, "—", partialWarning);
+        }
+
         const result = await new Promise((resolve) => {
           chrome.runtime.sendMessage({ type: "SYNC_ITEMS_BATCH", items }, resolve);
         });

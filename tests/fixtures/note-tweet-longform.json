@@ -1,0 +1,54 @@
+{
+  "data": {
+    "bookmark_timeline_v2": {
+      "timeline": {
+        "instructions": [
+          {
+            "type": "TimelineAddEntries",
+            "entries": [
+              {
+                "entryId": "tweet-2101983343113884084",
+                "content": {
+                  "itemContent": {
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "2101983343113884084",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "core": {
+                                "name": "AIVersePlay",
+                                "screen_name": "AIVersePlay"
+                              },
+                              "avatar": {
+                                "image_url": "https://pbs.twimg.com/profile_images/2058143936405753856/fkwX7SAC_x96.jpg"
+                              }
+                            }
+                          }
+                        },
+                        "note_tweet": {
+                          "note_tweet_results": {
+                            "result": {
+                              "text": "Icerik ureten arkadaslarim bizler icin en cok sorun yasanan yerlerden biri kurgu. Dun gece Github da dolasirken karsima bir repo cikti dedim bende suna bir bakayim gercekten dogrulugu ne kadar var ne kadar yok diye. Hem ucretsiz yapmislar hem de acik kaynak vermisler soklar icindeyim :)\nClaude code ile beraber calisiyor. Video ve dosyalari bir araya birakiyorsunuz, sistem tikir tikir isliyor."
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Mon Sep 21 10:34:16 +0000 2026",
+                          "full_text": "Icerik ureten arkadaslarim bizler icin en cok sorun yasanan yerlerden biri kurgu... https://t.co/truncated",
+                          "display_text_range": [0, 80],
+                          "id_str": "2101983343113884084"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

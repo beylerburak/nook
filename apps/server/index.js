@@ -42,14 +42,56 @@ function writeData(data) {
   }
 }
 
-function setCorsHeaders(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+function isAllowedOrigin(origin) {
+  // Only allow requests from Chrome extensions
+  if (typeof origin !== "string") return false;
+  if (process.env.NOOK_EXTENSION_ID) {
+    // Restrict to a single, known extension id when configured
+    return origin === `chrome-extension://${process.env.NOOK_EXTENSION_ID}`;
+  }
+  return origin.startsWith("chrome-extension://");
+}
+
+function isAllowedHost(host) {
+  // Only allow requests addressed directly to this loopback server.
+  // Prevents DNS-rebinding attacks where a public domain resolves to
+  // 127.0.0.1 and the browser sends no Origin header (e.g. plain GETs).
+  const port = String(PORT);
+  const allowedHosts = new Set([
+    `127.0.0.1:${port}`,
+    `localhost:${port}`,
+    `[::1]:${port}`
+  ]);
+  return typeof host === "string" && allowedHosts.has(host);
+}
+
+function setCorsHeaders(res, origin) {
+  if (origin && isAllowedOrigin(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
 const server = http.createServer((req, res) => {
-  setCorsHeaders(res);
+  const origin = req.headers["origin"];
+
+  // Reject requests not addressed to this loopback server (DNS-rebinding protection)
+  if (!isAllowedHost(req.headers["host"])) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Forbidden: Host not allowed" }));
+    return;
+  }
+
+  // Reject any browser request from untrusted origins (CSRF protection)
+  if (origin && !isAllowedOrigin(origin)) {
+    res.writeHead(403, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Forbidden: Origin not allowed" }));
+    return;
+  }
+
+  setCorsHeaders(res, origin);
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
@@ -215,7 +257,7 @@ const server = http.createServer((req, res) => {
   res.end(JSON.stringify({ error: "Not Found" }));
 });
 
-server.listen(PORT, () => {
-  console.log(`[Nook Server] Running at http://localhost:${PORT}`);
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`[Nook Server] Running at http://127.0.0.1:${PORT} (localhost only)`);
   console.log(`[Nook Server] Saving bookmarks & lists to: ${DATA_FILE}`);
 });

@@ -1,0 +1,13 @@
+{
+  "errors": [
+    {
+      "message": "Rate limit exceeded",
+      "code": 88
+    }
+  ],
+  "data": {
+    "some_new_unsupported_key": {
+      "different_structure": true
+    }
+  }
+}

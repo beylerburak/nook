@@ -723,7 +723,7 @@ function createBookmarkCard(item) {
 
     const textEl = document.createElement("div");
     textEl.className = "tweet-text";
-    textEl.innerHTML = formatTweetText(item.description);
+    textEl.replaceChildren(formatTweetText(item.description));
 
     body.appendChild(textEl);
     card.appendChild(body);
@@ -960,30 +960,69 @@ function createMediaGallery(mediaList) {
   return container;
 }
 
-// Format Tweet Text
+// Format Tweet Text — güvenli DOM tabanlı sürüm
+// innerHTML ve regex-replace yerine createElement kullanır;
+// tırnak enjeksiyonu / href-breakout riski yoktur.
 function formatTweetText(text) {
-  if (!text) return "";
-  const escapeHtml = (str) =>
-    str
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
+  if (!text) return document.createElement("span");
 
-  let safe = escapeHtml(text);
+  // Combined tokenizer: URL'leri ve @mention'ları ayır
+  const TOKEN_RE = /(https?:\/\/[^\s]+)|(@[a-zA-Z0-9_]+)/g;
 
-  // Linkify URLs
-  safe = safe.replace(
-    /(https?:\/\/[^\s]+)/g,
-    '<a href="$1" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">$1</a>'
-  );
+  const fragment = document.createDocumentFragment();
+  let lastIndex = 0;
+  let match;
 
-  // Linkify @mentions
-  safe = safe.replace(
-    /@([a-zA-Z0-9_]+)/g,
-    '<a href="https://x.com/$1" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">@$1</a>'
-  );
+  while ((match = TOKEN_RE.exec(text)) !== null) {
+    // Önceki düz metin parçasını ekle
+    if (match.index > lastIndex) {
+      fragment.appendChild(
+        document.createTextNode(text.slice(lastIndex, match.index))
+      );
+    }
 
-  return safe;
+    const a = document.createElement("a");
+    a.rel = "noopener noreferrer";
+    a.target = "_blank";
+    // CSP uyumlu: onclick attribute değil addEventListener
+    a.addEventListener("click", (e) => e.stopPropagation());
+
+    if (match[1]) {
+      // URL eşleşmesi - sonundaki noktalama işaretlerini ayıkla (örn. "https://site.com." -> link + ".")
+      let url = match[1];
+      let trailingPunct = "";
+      const punctMatch = url.match(/[.,!?:;)"']+$/);
+      if (punctMatch) {
+        trailingPunct = punctMatch[0];
+        url = url.slice(0, -trailingPunct.length);
+      }
+
+      a.href = url;
+      a.textContent = url;
+      fragment.appendChild(a);
+
+      if (trailingPunct) {
+        fragment.appendChild(document.createTextNode(trailingPunct));
+      }
+    } else {
+      // @mention eşleşmesi
+      const handle = match[2].slice(1); // '@' karakterini at
+      a.href = `https://x.com/${handle}`;
+      a.textContent = match[2];
+      fragment.appendChild(a);
+    }
+
+    lastIndex = TOKEN_RE.lastIndex;
+  }
+
+  // Sondaki kalan metin
+  if (lastIndex < text.length) {
+    fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+  }
+
+  const wrapper = document.createElement("span");
+  wrapper.appendChild(fragment);
+  return wrapper;
 }
 
 // Format Date
@@ -1045,7 +1084,7 @@ function openDetailModal(item) {
   modalAuthorInfo.appendChild(names);
 
   // Setup Text
-  modalTweetText.innerHTML = formatTweetText(item.description || "No text content");
+  modalTweetText.replaceChildren(formatTweetText(item.description || "No text content"));
 
   // Setup Media
   modalMediaGallery.replaceChildren();

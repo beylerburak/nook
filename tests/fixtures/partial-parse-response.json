@@ -1,0 +1,90 @@
+{
+  "data": {
+    "bookmark_timeline_v2": {
+      "timeline": {
+        "instructions": [
+          {
+            "type": "TimelineAddEntries",
+            "entries": [
+              {
+                "entryId": "tweet-3333333333333333333",
+                "content": {
+                  "entryType": "TimelineTimelineItem",
+                  "itemContent": {
+                    "itemType": "TimelineTweet",
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "3333333333333333333",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "__typename": "User",
+                              "id": "VXNlcjoz",
+                              "rest_id": "333",
+                              "core": {
+                                "name": "Good Tweet User",
+                                "screen_name": "gooduser"
+                              },
+                              "avatar": {
+                                "image_url": "https://pbs.twimg.com/profile_images/good.jpg"
+                              }
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Mon Sep 21 11:39:13 +0000 2026",
+                          "full_text": "This one parses fine.",
+                          "display_text_range": [0, 22],
+                          "id_str": "3333333333333333333"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "entryId": "tweet-4444444444444444444",
+                "content": {
+                  "entryType": "TimelineTimelineItem",
+                  "itemContent": {
+                    "itemType": "TimelineTweet",
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "4444444444444444444",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "__typename": "User",
+                              "id": "VXNlcjo0",
+                              "rest_id": "444"
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Mon Sep 21 11:40:13 +0000 2026",
+                          "full_text": "This one fails to parse — no screen_name.",
+                          "display_text_range": [0, 42],
+                          "id_str": "4444444444444444444"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "entryId": "cursor-bottom-000000000000",
+                "content": {
+                  "entryType": "TimelineTimelineCursor",
+                  "cursorType": "Bottom",
+                  "value": "BOTTOM_CURSOR"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

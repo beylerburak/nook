@@ -1,0 +1,57 @@
+{
+  "data": {
+    "bookmark_timeline_v2": {
+      "timeline": {
+        "instructions": [
+          {
+            "type": "TimelineAddEntries",
+            "entries": [
+              {
+                "entryId": "tweet-2102117617347551447",
+                "content": {
+                  "itemContent": {
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "2102117617347551447",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "core": {
+                                "name": "Doruk Yalcinsoy",
+                                "screen_name": "dorukyalcinsoy"
+                              },
+                              "avatar": {
+                                "image_url": "https://pbs.twimg.com/profile_images/2015410694921863168/TEIfn6p5_x96.jpg"
+                              }
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Mon Sep 21 19:27:50 +0000 2026",
+                          "full_text": "Tebrik ederim muthis gelismeler! Dunyanin en insansi sesini yaptilar. https://t.co/video123",
+                          "display_text_range": [0, 69],
+                          "id_str": "2102117617347551447",
+                          "extended_entities": {
+                            "media": [
+                              {
+                                "id_str": "2102069315943940096",
+                                "media_url_https": "https://pbs.twimg.com/amplify_video_thumb/2102069315943940096/img/B4cpdqzchqH_b3NH.jpg",
+                                "type": "video",
+                                "ext_alt_text": "Demo video"
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

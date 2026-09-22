@@ -1,0 +1,82 @@
+{
+  "data": {
+    "bookmark_timeline_v2": {
+      "timeline": {
+        "instructions": [
+          {
+            "type": "TimelineAddEntries",
+            "entries": [
+              {
+                "entryId": "tweet-2101999689021243625",
+                "sortIndex": "1726918753000",
+                "content": {
+                  "entryType": "TimelineTimelineItem",
+                  "itemContent": {
+                    "itemType": "TimelineTweet",
+                    "tweet_results": {
+                      "result": {
+                        "__typename": "Tweet",
+                        "rest_id": "2101999689021243625",
+                        "core": {
+                          "user_results": {
+                            "result": {
+                              "__typename": "User",
+                              "id": "VXNlcjoxMjM=",
+                              "rest_id": "12345",
+                              "core": {
+                                "name": "Guillermo Casaus",
+                                "screen_name": "_guillecasaus"
+                              },
+                              "avatar": {
+                                "image_url": "https://pbs.twimg.com/profile_images/1876962992916422656/jDPi93wV_x96.jpg"
+                              }
+                            }
+                          }
+                        },
+                        "legacy": {
+                          "created_at": "Mon Sep 21 11:39:13 +0000 2026",
+                          "full_text": "Cloudflare, yapay zeka ile guvenlik denetimleri yapmak icin kendi becerisini (skill) yayinladi. https://t.co/abc123xyz",
+                          "display_text_range": [0, 96],
+                          "entities": {
+                            "media": [
+                              {
+                                "id_str": "2101999688",
+                                "media_url_https": "https://pbs.twimg.com/media/HSvNkE5XEAANbCx?format=jpg&name=medium",
+                                "type": "photo",
+                                "ext_alt_text": "Resim"
+                              }
+                            ]
+                          },
+                          "extended_entities": {
+                            "media": [
+                              {
+                                "id_str": "2101999688",
+                                "media_url_https": "https://pbs.twimg.com/media/HSvNkE5XEAANbCx?format=jpg&name=medium",
+                                "type": "photo",
+                                "ext_alt_text": "Resim"
+                              }
+                            ]
+                          },
+                          "id_str": "2101999689021243625"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "entryId": "cursor-bottom-1726918753000",
+                "sortIndex": "1726918750000",
+                "content": {
+                  "entryType": "TimelineTimelineCursor",
+                  "cursorType": "Bottom",
+                  "value": "DAABCgABGek1Z25-X_8KAAIa..."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

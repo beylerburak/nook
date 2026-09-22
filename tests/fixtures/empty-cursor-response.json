@@ -1,0 +1,23 @@
+{
+  "data": {
+    "bookmark_timeline_v2": {
+      "timeline": {
+        "instructions": [
+          {
+            "type": "TimelineAddEntries",
+            "entries": [
+              {
+                "entryId": "cursor-bottom-000000000000",
+                "content": {
+                  "entryType": "TimelineTimelineCursor",
+                  "cursorType": "Bottom",
+                  "value": "END_OF_TIMELINE_CURSOR"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}
