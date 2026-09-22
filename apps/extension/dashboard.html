@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nook - Bookmarks & Collections</title>
+  <link rel="stylesheet" href="dashboard.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-container">
+      <div class="brand">
+        <button id="sidebar-toggle-btn" class="sidebar-toggle-btn" title="Toggle Sidebar">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+          </svg>
+        </button>
+        <div class="brand-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>
+          </svg>
+        </div>
+        <span class="brand-title">Nook</span>
+        <span class="badge" id="total-count-badge">0</span>
+        <span class="sync-badge hidden" id="sync-status-badge" title="Local file sync status">
+          <span class="sync-dot"></span>
+          <span id="sync-status-text">Local Sync</span>
+        </span>
+      </div>
+
+      <div class="search-wrapper">
+        <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        <input type="text" id="search-input" placeholder="Search bookmarks, @authors, #tags... (Press /)" autocomplete="off" />
+        <button id="search-clear" class="btn-icon hidden" title="Clear search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div class="header-actions">
+        <!-- Import JSON -->
+        <input type="file" id="import-file-input" accept=".json,application/json" class="hidden" />
+        <button id="btn-import" class="btn btn-secondary" title="Import bookmarks and lists from JSON">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg>
+          Import
+        </button>
+
+        <!-- Export JSON -->
+        <button id="btn-export" class="btn btn-secondary" title="Export bookmarks and lists as JSON">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          Export
+        </button>
+
+        <button id="btn-clear-all" class="btn btn-ghost danger-text" title="Delete all saved bookmarks">
+          Clear All
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- App Layout: Sidebar + Main Content -->
+  <div class="app-layout">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-section">
+        <div class="nav-item active" data-nav="all">
+          <span class="nav-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>
+            </svg>
+          </span>
+          <span class="nav-label">All Bookmarks</span>
+          <span class="nav-count" id="nav-count-all">0</span>
+        </div>
+
+        <div class="nav-item" data-nav="x">
+          <span class="nav-icon">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+            </svg>
+          </span>
+          <span class="nav-label">X / Twitter</span>
+          <span class="nav-count" id="nav-count-x">0</span>
+        </div>
+
+        <div class="nav-item" data-nav="chrome">
+          <span class="nav-icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="2" y1="12" x2="22" y2="12"></line>
+              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+            </svg>
+          </span>
+          <span class="nav-label">Web Pages</span>
+          <span class="nav-count" id="nav-count-chrome">0</span>
+        </div>
+
+        <div class="nav-item" data-nav="unorganized">
+          <span class="nav-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>
+              <line x1="9" y1="9" x2="15" y2="15"></line>
+              <line x1="15" y1="9" x2="9" y2="15"></line>
+            </svg>
+          </span>
+          <span class="nav-label">Unorganized</span>
+          <span class="nav-count" id="nav-count-unorganized">0</span>
+        </div>
+      </div>
+
+      <!-- Lists Section -->
+      <div class="sidebar-section">
+        <div class="section-header">
+          <span class="section-title">LISTS</span>
+          <button id="btn-new-list" class="btn-section-add" title="Create new list">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"></line>
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+            </svg>
+          </button>
+        </div>
+        <div class="lists-nav" id="lists-nav">
+          <!-- Dynamic List items -->
+        </div>
+      </div>
+
+      <!-- Tags Section -->
+      <div class="sidebar-section">
+        <div class="section-header">
+          <span class="section-title">TAGS</span>
+        </div>
+        <div class="tags-nav" id="tags-nav">
+          <!-- Dynamic Tag chips -->
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Active View Toolbar -->
+      <div class="view-header">
+        <div class="view-title-wrap">
+          <h2 id="current-view-title" class="view-title">All Bookmarks</h2>
+          <button id="btn-clear-filter" class="btn-clear-filter hidden" title="Clear active list/tag filter">
+            <span>Clear filter</span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+
+        <div class="view-controls">
+          <div class="filter-tabs">
+            <button class="filter-tab active" data-filter="all">All <span class="tab-count" id="count-all">0</span></button>
+            <button class="filter-tab" data-filter="media">With Media <span class="tab-count" id="count-media">0</span></button>
+            <button class="filter-tab" data-filter="text">Text Only <span class="tab-count" id="count-text">0</span></button>
+          </div>
+
+          <div class="sort-selector">
+            <label for="sort-select">Sort:</label>
+            <select id="sort-select">
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- Cards Grid -->
+      <div id="cards-container" class="cards-grid"></div>
+
+      <!-- Empty State -->
+      <div id="empty-state" class="empty-state hidden">
+        <div class="empty-icon-wrap">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+            <path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>
+          </svg>
+        </div>
+        <h3 id="empty-title">No bookmarks yet</h3>
+        <p id="empty-desc">When you bookmark a tweet on X (Twitter), Nook will automatically capture it here along with photos and video previews.</p>
+      </div>
+    </main>
+  </div>
+
+  <!-- Detail Modal -->
+  <div id="detail-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <div class="modal-author" id="modal-author-info">
+          <!-- Avatar, names, handle -->
+        </div>
+        <button id="detail-modal-close" class="modal-close-btn" title="Close (Esc)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <div id="modal-tweet-text" class="modal-text"></div>
+        <div id="modal-media-gallery" class="modal-media"></div>
+        <div id="modal-quote" class="modal-quote"></div>
+
+        <!-- List & Tag Management in Modal -->
+        <div class="modal-organization">
+          <!-- List Assignment -->
+          <div class="org-row">
+            <span class="org-label">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+              </svg>
+              List:
+            </span>
+            <select id="modal-list-select" class="org-select">
+              <option value="">(No List)</option>
+            </select>
+          </div>
+
+          <!-- Tags Assignment -->
+          <div class="org-row-tags">
+            <span class="org-label">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z"></path>
+                <path d="M7 7h.01"></path>
+              </svg>
+              Tags:
+            </span>
+            <div class="tags-editor-wrap">
+              <div id="modal-tags-list" class="modal-tags-list"></div>
+              <div class="tag-input-wrap">
+                <input type="text" id="modal-tag-input" placeholder="Type a tag & press Enter..." autocomplete="off" />
+              </div>
+              <div id="modal-suggested-tags" class="suggested-tags"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-meta">
+          <div class="meta-row">
+            <span class="meta-label">Tweet Date:</span>
+            <span id="modal-tweet-date" class="meta-value">-</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-label">Saved to Nook:</span>
+            <span id="modal-saved-date" class="meta-value">-</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-label">Original URL:</span>
+            <a id="modal-tweet-url" class="meta-link" href="#" target="_blank" rel="noopener noreferrer">-</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <div class="modal-footer-left">
+          <button id="modal-btn-delete" class="btn btn-ghost danger-text">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 6h18m-2 0v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6m3 0V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+            </svg>
+            Delete
+          </button>
+        </div>
+        <div class="modal-footer-right">
+          <button id="modal-btn-copy-text" class="btn btn-secondary" title="Copy tweet text">
+            Copy Text
+          </button>
+          <button id="modal-btn-copy-url" class="btn btn-secondary" title="Copy tweet link">
+            Copy Link
+          </button>
+          <a id="modal-btn-open-x" class="btn btn-primary" href="#" target="_blank" rel="noopener noreferrer">
+            <span>Open on X</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+              <polyline points="15 3 21 3 21 9"></polyline>
+              <line x1="10" y1="14" x2="21" y2="3"></line>
+            </svg>
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create / Edit List Modal -->
+  <div id="list-modal" class="modal-overlay hidden" role="dialog" aria-modal="true">
+    <div class="modal-dialog modal-dialog-sm">
+      <div class="modal-header">
+        <h3 id="list-modal-title" class="modal-title">New List</h3>
+        <button id="list-modal-close" class="modal-close-btn" title="Close (Esc)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Icon / Emoji</label>
+          <div class="emoji-picker" id="emoji-picker">
+            <button type="button" class="emoji-chip active" data-emoji="📁">📁</button>
+            <button type="button" class="emoji-chip" data-emoji="🎨">🎨</button>
+            <button type="button" class="emoji-chip" data-emoji="📚">📚</button>
+            <button type="button" class="emoji-chip" data-emoji="💡">💡</button>
+            <button type="button" class="emoji-chip" data-emoji="⚡">⚡</button>
+            <button type="button" class="emoji-chip" data-emoji="🛠️">🛠️</button>
+            <button type="button" class="emoji-chip" data-emoji="💼">💼</button>
+            <button type="button" class="emoji-chip" data-emoji="🔬">🔬</button>
+            <button type="button" class="emoji-chip" data-emoji="🚀">🚀</button>
+            <button type="button" class="emoji-chip" data-emoji="🎵">🎵</button>
+            <button type="button" class="emoji-chip" data-emoji="🔖">🔖</button>
+            <button type="button" class="emoji-chip" data-emoji="🧠">🧠</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="list-name-input">List Name</label>
+          <input type="text" id="list-name-input" class="form-input" placeholder="e.g. AI Resources, Design Inspiration" autocomplete="off" />
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" id="list-modal-cancel" class="btn btn-secondary">Cancel</button>
+        <button type="button" id="list-modal-save" class="btn btn-primary">Save List</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lightbox Modal -->
+  <div id="lightbox" class="lightbox-overlay hidden" role="dialog" aria-modal="true">
+    <button id="lightbox-close" class="lightbox-close" title="Close (Esc)">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+    <div class="lightbox-content">
+      <img id="lightbox-img" src="" alt="Full view preview" />
+    </div>
+  </div>
+
+  <!-- Drag & Drop Zone Overlay -->
+  <div id="drag-drop-overlay" class="drag-drop-overlay hidden">
+    <div class="drag-drop-box">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+        <polyline points="17 8 12 3 7 8"></polyline>
+        <line x1="12" y1="3" x2="12" y2="15"></line>
+      </svg>
+      <h3>Drop JSON backup file here</h3>
+      <p>Release to import your bookmarks & lists</p>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>
