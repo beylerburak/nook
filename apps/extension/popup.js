@@ -1,4 +1,4 @@
-const { LOCAL_SERVER_URL, ICONS, createAvatarFallback } = NookShared;
+const { ICONS, createAvatarFallback } = NookShared;
 
 async function loadItems() {
   const container = document.querySelector("#items");
@@ -24,22 +24,9 @@ async function loadItems() {
     };
   }
 
-  let { items = [], lists = [] } = await chrome.storage.local.get(["items", "lists"]);
-
-  // If extension was freshly reinstalled and storage is empty, check local server
-  if (!items.length) {
-    try {
-      const res = await fetch(`${LOCAL_SERVER_URL}/api/bookmarks`);
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.items) && data.items.length > 0) {
-          items = data.items;
-          lists = Array.isArray(data.lists) ? data.lists : [];
-          await chrome.storage.local.set({ items, lists });
-        }
-      }
-    } catch (e) {}
-  }
+  await NookDB.ready();
+  const items = await NookDB.getAllBookmarks();
+  const lists = await NookDB.getAllLists();
 
   if (countBadge) {
     countBadge.textContent = items.length;
@@ -191,12 +178,7 @@ async function loadItems() {
 }
 
 async function deleteItem(id) {
-  const { items = [] } = await chrome.storage.local.get("items");
-  const updated = items.filter((item) => item.id !== id);
-  await chrome.storage.local.set({ items: updated });
-  fetch(`${LOCAL_SERVER_URL}/api/bookmarks/${encodeURIComponent(id)}`, {
-    method: "DELETE"
-  }).catch(() => {});
+  await NookDB.softDeleteBookmark(id);
   loadItems();
 }
 

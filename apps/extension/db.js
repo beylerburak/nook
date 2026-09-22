@@ -1,0 +1,470 @@
+/**
+ * Nook IndexedDB Storage Layer
+ *
+ * Thin promise wrapper over raw IndexedDB, replacing the old design where
+ * chrome.storage.local held one big "items" array and one big "lists" array
+ * that got read-modify-written in full on every single change. Each
+ * bookmark/list is now its own IndexedDB record, so a single tag edit only
+ * touches that one record.
+ *
+ * Every record carries `updatedAt` (ISO string, set on every write) and
+ * `deletedAt` (ISO string or null). Deletes are SOFT — we set `deletedAt`
+ * instead of removing the row — so a future self-hosted backend (Postgres +
+ * REST API) can sync against this store via "give me everything changed
+ * since timestamp X", tombstones included (see getChangesSince).
+ *
+ * UMD-ish export, same pattern as x-parser.js / shared.js, so this file can
+ * be loaded as a plain <script> (dashboard.html / popup.html), via
+ * importScripts (background.js, a classic service worker) and required from
+ * Node tests (tests/db.test.js, via fake-indexeddb). Everything lives inside
+ * the factory function — no top-level const/let/function leaks into the
+ * shared global scope that other extension scripts run in.
+ */
+
+(function (root, factory) {
+  if (typeof module === "object" && typeof module.exports === "object") {
+    module.exports = factory();
+  } else {
+    root.NookDB = factory();
+  }
+})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+  "use strict";
+
+  const DB_VERSION = 1;
+  const STORE_BOOKMARKS = "bookmarks";
+  const STORE_LISTS = "lists";
+  const STORE_META = "meta";
+
+  // Overridable for tests (each test gets its own DB name so state never
+  // leaks between them). Changing it only takes effect before open()/ready()
+  // is first called — see _resetForTests().
+  let _dbName = "nook";
+
+  // Memoized promises so open()/ready() only do their work once per context
+  // (once per service worker lifetime, once per dashboard/popup page load).
+  let _dbPromise = null;
+  let _readyPromise = null;
+
+  // -- small IndexedDB promise helpers ---------------------------------
+
+  function promisifyRequest(request) {
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  function promisifyTransaction(tx) {
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error("Transaction aborted"));
+    });
+  }
+
+  function nowIso() {
+    return new Date().toISOString();
+  }
+
+  // -- open / schema -----------------------------------------------------
+
+  function open() {
+    if (_dbPromise) return _dbPromise;
+
+    _dbPromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(_dbName, DB_VERSION);
+
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+
+        if (!db.objectStoreNames.contains(STORE_BOOKMARKS)) {
+          const bookmarks = db.createObjectStore(STORE_BOOKMARKS, { keyPath: "id" });
+          bookmarks.createIndex("url", "url");
+          bookmarks.createIndex("source", "source");
+          bookmarks.createIndex("listId", "listId");
+          bookmarks.createIndex("savedAt", "savedAt");
+          bookmarks.createIndex("updatedAt", "updatedAt");
+        }
+
+        if (!db.objectStoreNames.contains(STORE_LISTS)) {
+          const lists = db.createObjectStore(STORE_LISTS, { keyPath: "id" });
+          lists.createIndex("updatedAt", "updatedAt");
+        }
+
+        if (!db.objectStoreNames.contains(STORE_META)) {
+          db.createObjectStore(STORE_META, { keyPath: "key" });
+        }
+      };
+
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+
+    return _dbPromise;
+  }
+
+  // -- change notification -------------------------------------------------
+
+  // Lets other extension contexts (dashboard, popup) know a write happened
+  // so they can reload from the DB, instead of chrome.storage.onChanged
+  // which only fired for whole-array chrome.storage.local writes. Guarded
+  // because BroadcastChannel doesn't exist in the Node test environment.
+  function notifyChange(stores, ids) {
+    if (typeof BroadcastChannel === "undefined") return;
+    try {
+      const channel = new BroadcastChannel("nook-db");
+      channel.postMessage({ type: "changed", stores, ids });
+      channel.close();
+    } catch (e) {
+      // Ignore — never let a notification failure break the caller's write.
+    }
+  }
+
+  // -- bookmarks -----------------------------------------------------------
+
+  async function getAllBookmarks({ includeDeleted = false } = {}) {
+    const db = await open();
+    const tx = db.transaction(STORE_BOOKMARKS, "readonly");
+    const all = await promisifyRequest(tx.objectStore(STORE_BOOKMARKS).getAll());
+    return includeDeleted ? all : all.filter((item) => !item.deletedAt);
+  }
+
+  async function getBookmark(id) {
+    const db = await open();
+    const tx = db.transaction(STORE_BOOKMARKS, "readonly");
+    return promisifyRequest(tx.objectStore(STORE_BOOKMARKS).get(id));
+  }
+
+  // Non-deleted only — used for dedupe on save, so a soft-deleted bookmark
+  // never silently blocks re-saving the same URL.
+  async function findBookmarkByUrl(url) {
+    const db = await open();
+    const tx = db.transaction(STORE_BOOKMARKS, "readonly");
+    const matches = await promisifyRequest(tx.objectStore(STORE_BOOKMARKS).index("url").getAll(url));
+    return matches.find((item) => !item.deletedAt) || null;
+  }
+
+  function withWriteDefaults(item) {
+    return {
+      ...item,
+      updatedAt: nowIso(),
+      deletedAt: item.deletedAt === undefined ? null : item.deletedAt
+    };
+  }
+
+  async function putBookmark(item) {
+    const db = await open();
+    const tx = db.transaction(STORE_BOOKMARKS, "readwrite");
+    const record = withWriteDefaults(item);
+    await promisifyRequest(tx.objectStore(STORE_BOOKMARKS).put(record));
+    await promisifyTransaction(tx);
+    notifyChange([STORE_BOOKMARKS], [record.id]);
+    return record;
+  }
+
+  async function putBookmarks(items) {
+    if (!Array.isArray(items) || items.length === 0) return [];
+    const db = await open();
+    const tx = db.transaction(STORE_BOOKMARKS, "readwrite");
+    const store = tx.objectStore(STORE_BOOKMARKS);
+    const records = items.map(withWriteDefaults);
+    for (const record of records) {
+      store.put(record);
+    }
+    await promisifyTransaction(tx);
+    notifyChange([STORE_BOOKMARKS], records.map((r) => r.id));
+    return records;
+  }
+
+  async function updateBookmark(id, patch) {
+    const db = await open();
+    const tx = db.transaction(STORE_BOOKMARKS, "readwrite");
+    const store = tx.objectStore(STORE_BOOKMARKS);
+    const existing = await promisifyRequest(store.get(id));
+    if (!existing) {
+      await promisifyTransaction(tx);
+      return null;
+    }
+    const record = { ...existing, ...patch, id, updatedAt: nowIso() };
+    await promisifyRequest(store.put(record));
+    await promisifyTransaction(tx);
+    notifyChange([STORE_BOOKMARKS], [id]);
+    return record;
+  }
+
+  async function softDeleteBookmark(id) {
+    return updateBookmark(id, { deletedAt: nowIso() });
+  }
+
+  async function softDeleteAllBookmarks() {
+    const db = await open();
+    const tx = db.transaction(STORE_BOOKMARKS, "readwrite");
+    const store = tx.objectStore(STORE_BOOKMARKS);
+    const all = await promisifyRequest(store.getAll());
+    const ts = nowIso();
+    const ids = [];
+    for (const item of all) {
+      if (item.deletedAt) continue;
+      store.put({ ...item, deletedAt: ts, updatedAt: ts });
+      ids.push(item.id);
+    }
+    await promisifyTransaction(tx);
+    notifyChange([STORE_BOOKMARKS], ids);
+    return ids;
+  }
+
+  // -- lists -----------------------------------------------------------------
+
+  async function getAllLists({ includeDeleted = false } = {}) {
+    const db = await open();
+    const tx = db.transaction(STORE_LISTS, "readonly");
+    const all = await promisifyRequest(tx.objectStore(STORE_LISTS).getAll());
+    return includeDeleted ? all : all.filter((list) => !list.deletedAt);
+  }
+
+  async function putList(list) {
+    const db = await open();
+    const tx = db.transaction(STORE_LISTS, "readwrite");
+    const record = withWriteDefaults(list);
+    await promisifyRequest(tx.objectStore(STORE_LISTS).put(record));
+    await promisifyTransaction(tx);
+    notifyChange([STORE_LISTS], [record.id]);
+    return record;
+  }
+
+  // Soft-deletes the list AND clears listId/listName on its bookmarks, in
+  // the same transaction, so a crash/close between the two writes can never
+  // leave bookmarks pointing at a list that no longer exists.
+  async function softDeleteList(id) {
+    const db = await open();
+    const tx = db.transaction([STORE_LISTS, STORE_BOOKMARKS], "readwrite");
+    const listStore = tx.objectStore(STORE_LISTS);
+    const bookmarkStore = tx.objectStore(STORE_BOOKMARKS);
+    const ts = nowIso();
+
+    const existingList = await promisifyRequest(listStore.get(id));
+    if (existingList) {
+      listStore.put({ ...existingList, deletedAt: ts, updatedAt: ts });
+    }
+
+    const affected = await promisifyRequest(bookmarkStore.index("listId").getAll(id));
+    const clearedIds = [];
+    for (const item of affected) {
+      bookmarkStore.put({ ...item, listId: null, listName: null, updatedAt: ts });
+      clearedIds.push(item.id);
+    }
+
+    await promisifyTransaction(tx);
+    notifyChange([STORE_LISTS, STORE_BOOKMARKS], [id, ...clearedIds]);
+    return { listId: id, clearedBookmarkIds: clearedIds };
+  }
+
+  // -- sync helpers (for a future Postgres + REST backend) --------------------
+
+  // Returns everything (including tombstones) changed strictly after
+  // `isoTimestamp`, so a future sync loop can call this repeatedly with the
+  // last-seen timestamp and never re-fetch a record it already has.
+  async function getChangesSince(isoTimestamp) {
+    const db = await open();
+    const tx = db.transaction([STORE_BOOKMARKS, STORE_LISTS], "readonly");
+    const range = isoTimestamp ? IDBKeyRange.lowerBound(isoTimestamp, true) : undefined;
+
+    const bookmarks = await promisifyRequest(
+      tx.objectStore(STORE_BOOKMARKS).index("updatedAt").getAll(range)
+    );
+    const lists = await promisifyRequest(
+      tx.objectStore(STORE_LISTS).index("updatedAt").getAll(range)
+    );
+
+    return { bookmarks, lists };
+  }
+
+  async function getMeta(key) {
+    const db = await open();
+    const tx = db.transaction(STORE_META, "readonly");
+    const record = await promisifyRequest(tx.objectStore(STORE_META).get(key));
+    return record ? record.value : undefined;
+  }
+
+  async function setMeta(key, value) {
+    const db = await open();
+    const tx = db.transaction(STORE_META, "readwrite");
+    tx.objectStore(STORE_META).put({ key, value });
+    await promisifyTransaction(tx);
+    return value;
+  }
+
+  // Inserts brand-new items and merges incoming content into existing ones
+  // via mergeFn(existing, incoming) => merged|null, all inside ONE
+  // readwrite transaction (so a batch from the X bookmarks sync can't
+  // interleave with e.g. a concurrent SAVE_ITEM and lose a write the way
+  // the old read-modify-write-whole-array chrome.storage.local code could).
+  //
+  // A soft-deleted existing item is intentionally left alone — neither
+  // added nor updated — so an X sync batch can never resurrect a bookmark
+  // the user deliberately deleted.
+  async function mergeBatch(incomingItems, mergeFn) {
+    const db = await open();
+    const tx = db.transaction(STORE_BOOKMARKS, "readwrite");
+    const store = tx.objectStore(STORE_BOOKMARKS);
+    const now = nowIso();
+    const added = [];
+    const updated = [];
+
+    for (const incoming of incomingItems || []) {
+      if (!incoming || !incoming.id) continue;
+      const existing = await promisifyRequest(store.get(incoming.id));
+
+      if (!existing) {
+        const record = withWriteDefaults(incoming);
+        store.put(record);
+        added.push(record);
+        continue;
+      }
+
+      if (existing.deletedAt) {
+        // User deleted this on purpose — do not resurrect it from a sync batch.
+        continue;
+      }
+
+      const merged = mergeFn(existing, incoming);
+      if (merged) {
+        const record = { ...merged, updatedAt: now, deletedAt: null };
+        store.put(record);
+        updated.push(record);
+      }
+    }
+
+    await promisifyTransaction(tx);
+    notifyChange([STORE_BOOKMARKS], [...added, ...updated].map((r) => r.id));
+    return { added, updated };
+  }
+
+  // Fields of an "x" bookmark that a fresher parse of the same tweet may
+  // have picked up (e.g. an older parser missed the quoted tweet or media).
+  // Moved here from background.js so it's usable from mergeBatch and unit
+  // testable without loading the whole service worker.
+  const TWEET_CONTENT_FIELDS = ["title", "shortDescription", "description", "media", "attachments", "creator", "quote"];
+
+  // Returns an updated copy of `existing` when `incoming` (freshly parsed
+  // from the X API) carries newer tweet content, or null when nothing
+  // changed. Used as the mergeFn passed to mergeBatch() for X sync batches.
+  function mergeTweetContent(existing, incoming) {
+    if (existing.source !== "x") return null;
+    let changed = false;
+    const merged = { ...existing };
+    for (const field of TWEET_CONTENT_FIELDS) {
+      if (incoming[field] === undefined) continue;
+      if (JSON.stringify(existing[field] ?? null) !== JSON.stringify(incoming[field] ?? null)) {
+        merged[field] = incoming[field];
+        changed = true;
+      }
+    }
+    return changed ? merged : null;
+  }
+
+  // -- migration from chrome.storage.local -----------------------------------
+
+  // One-time bulk import of the old { items: [...], lists: [...] } shape
+  // into IndexedDB. Idempotent via the "migratedFromChromeStorage" meta
+  // flag. We deliberately do NOT delete the old chrome.storage.local keys —
+  // keep them around for one release as a backup in case the migration
+  // needs to be re-run or inspected.
+  // TODO(nook): once we're confident the IndexedDB migration has shipped
+  // safely for a full release, remove the old "items"/"lists" keys from
+  // chrome.storage.local (and this migration function).
+  async function migrateFromChromeStorage() {
+    const already = await getMeta("migratedFromChromeStorage");
+    if (already) return already;
+
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) {
+      return null;
+    }
+
+    const stored = await chrome.storage.local.get(["items", "lists"]);
+    const items = Array.isArray(stored.items) ? stored.items : [];
+    const lists = Array.isArray(stored.lists) ? stored.lists : [];
+
+    if (items.length > 0) {
+      const db = await open();
+      const tx = db.transaction(STORE_BOOKMARKS, "readwrite");
+      const store = tx.objectStore(STORE_BOOKMARKS);
+      for (const item of items) {
+        if (!item || !item.id) continue;
+        store.put({
+          ...item,
+          updatedAt: item.savedAt || nowIso(),
+          deletedAt: null
+        });
+      }
+      await promisifyTransaction(tx);
+    }
+
+    if (lists.length > 0) {
+      const db = await open();
+      const tx = db.transaction(STORE_LISTS, "readwrite");
+      const store = tx.objectStore(STORE_LISTS);
+      for (const list of lists) {
+        if (!list || !list.id) continue;
+        store.put({
+          ...list,
+          updatedAt: list.updatedAt || list.createdAt || nowIso(),
+          deletedAt: null
+        });
+      }
+      await promisifyTransaction(tx);
+    }
+
+    const result = {
+      migratedAt: nowIso(),
+      itemCount: items.length,
+      listCount: lists.length
+    };
+    await setMeta("migratedFromChromeStorage", result);
+    notifyChange([STORE_BOOKMARKS, STORE_LISTS], []);
+    return result;
+  }
+
+  // Opens the DB and runs the (idempotent) migration, memoized so it only
+  // does the work once per background/dashboard/popup context's lifetime.
+  function ready() {
+    if (!_readyPromise) {
+      _readyPromise = open().then(() => migrateFromChromeStorage());
+    }
+    return _readyPromise;
+  }
+
+  // Test-only: point at a fresh, uniquely-named DB and forget memoized
+  // promises, so each test starts from a clean slate without leaking state
+  // into the next one.
+  function _resetForTests(dbName) {
+    _dbName = dbName || `nook-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    _dbPromise = null;
+    _readyPromise = null;
+    return _dbName;
+  }
+
+  return {
+    open,
+    ready,
+    getAllBookmarks,
+    getBookmark,
+    findBookmarkByUrl,
+    putBookmark,
+    putBookmarks,
+    updateBookmark,
+    softDeleteBookmark,
+    softDeleteAllBookmarks,
+    getAllLists,
+    putList,
+    softDeleteList,
+    getChangesSince,
+    getMeta,
+    setMeta,
+    mergeBatch,
+    mergeTweetContent,
+    TWEET_CONTENT_FIELDS,
+    migrateFromChromeStorage,
+    _resetForTests
+  };
+});

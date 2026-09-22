@@ -9,9 +9,8 @@ let currentFilter = "all"; // 'all' | 'media' | 'text'
 let currentSort = "newest"; // 'newest' | 'oldest'
 let activeDetailItem = null;
 let selectedEmoji = "📁";
-let isLocalServerConnected = false;
 
-const { LOCAL_SERVER_URL, ICONS, createAvatarFallback, formatDate } = NookShared;
+const { ICONS, createAvatarFallback, formatDate } = NookShared;
 
 // DOM Elements
 const sidebar = document.getElementById("sidebar");
@@ -39,7 +38,6 @@ const listsNav = document.getElementById("lists-nav");
 const tagsNav = document.getElementById("tags-nav");
 const btnNewList = document.getElementById("btn-new-list");
 
-const syncStatusBadge = document.getElementById("sync-status-badge");
 const btnImport = document.getElementById("btn-import");
 const importFileInput = document.getElementById("import-file-input");
 const btnExport = document.getElementById("btn-export");
@@ -223,14 +221,16 @@ function setupEventListeners() {
     if (file) handleFileImport(file);
   });
 
-  // Listen for storage changes in real time
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === "local") {
-      if (changes.items) allItems = changes.items.newValue || [];
-      if (changes.lists) allLists = changes.lists.newValue || [];
-      updateSidebar();
-      renderGrid();
-    }
+  // Listen for changes made in other extension contexts (e.g. the popup, or
+  // a background auto-sync write) in real time. Every successful NookDB
+  // write posts on this channel; debounce so a burst of writes (an import,
+  // a sync batch) triggers one reload instead of many.
+  const dbChannel = new BroadcastChannel("nook-db");
+  let reloadDebounceTimer = null;
+  dbChannel.addEventListener("message", (e) => {
+    if (e.data?.type !== "changed") return;
+    clearTimeout(reloadDebounceTimer);
+    reloadDebounceTimer = setTimeout(reloadFromDB, 150);
   });
 }
 
@@ -241,91 +241,23 @@ function hasFiles(e) {
 // Initialize Bookmarks & Lists
 async function initBookmarks() {
   try {
-    const stored = await chrome.storage.local.get(["items", "lists"]);
-    allItems = Array.isArray(stored.items) ? stored.items : [];
-    allLists = Array.isArray(stored.lists) ? stored.lists : [];
-
-    // Attempt local server sync
-    await syncWithLocalServer();
-
-    updateSidebar();
-    renderGrid();
+    await NookDB.ready();
+    await reloadFromDB();
   } catch (err) {
     console.error("[Nook] Failed to initialize bookmarks:", err);
     showToast("Failed to load bookmarks");
   }
 }
 
-// Sync with local server (http://localhost:3333)
-async function syncWithLocalServer() {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1200);
-
-    const res = await fetch(`${LOCAL_SERVER_URL}/api/bookmarks`, {
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
-
-    if (!res.ok) throw new Error("Server response not ok");
-
-    const data = await res.json();
-    const serverItems = Array.isArray(data.items) ? data.items : [];
-    const serverLists = Array.isArray(data.lists) ? data.lists : [];
-
-    isLocalServerConnected = true;
-    syncStatusBadge.classList.remove("hidden");
-    syncStatusBadge.classList.add("connected");
-    syncStatusBadge.title = `Connected to local server (${serverItems.length} items, ${serverLists.length} lists on disk)`;
-
-    // Merge serverItems with allItems
-    const itemMap = new Map();
-    for (const item of serverItems) {
-      if (item?.id) itemMap.set(item.id, item);
-    }
-    for (const item of allItems) {
-      if (item?.id) itemMap.set(item.id, { ...itemMap.get(item.id), ...item });
-    }
-    const mergedItems = Array.from(itemMap.values());
-    mergedItems.sort((a, b) => {
-      const tA = new Date(a.savedAt || a.createdAt || 0).getTime();
-      const tB = new Date(b.savedAt || b.createdAt || 0).getTime();
-      return tB - tA;
-    });
-
-    // Merge lists
-    const listMap = new Map();
-    for (const l of serverLists) {
-      if (l?.id) listMap.set(l.id, l);
-    }
-    for (const l of allLists) {
-      if (l?.id) listMap.set(l.id, { ...listMap.get(l.id), ...l });
-    }
-    const mergedLists = Array.from(listMap.values());
-
-    const wasEmpty = allItems.length === 0 && mergedItems.length > 0;
-    allItems = mergedItems;
-    allLists = mergedLists;
-
-    // Save to chrome.storage.local
-    await chrome.storage.local.set({ items: allItems, lists: allLists });
-
-    // Sync back to server if server was missing items/lists
-    if (allItems.length > serverItems.length || allLists.length > serverLists.length) {
-      fetch(`${LOCAL_SERVER_URL}/api/bookmarks`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: allItems, lists: allLists })
-      }).catch(() => {});
-    }
-
-    if (wasEmpty) {
-      showToast(`Restored ${allItems.length} bookmarks from local server ✓`);
-    }
-  } catch (err) {
-    isLocalServerConnected = false;
-    syncStatusBadge.classList.add("hidden");
-  }
+// Reloads allItems/allLists from IndexedDB (non-deleted only) and re-renders.
+// Used on startup and whenever another extension context (popup, background
+// sync) reports a change via the "nook-db" BroadcastChannel.
+async function reloadFromDB() {
+  const [items, lists] = await Promise.all([NookDB.getAllBookmarks(), NookDB.getAllLists()]);
+  allItems = items;
+  allLists = lists;
+  updateSidebar();
+  renderGrid();
 }
 
 // Navigation / Filter state changer
@@ -1234,20 +1166,12 @@ function closeLightbox() {
   }
 }
 
-// Save an item that has updated tags or listId
+// Save an item that has updated tags or listId — writes only this one
+// record to IndexedDB, not the whole in-memory array.
 async function saveUpdatedItem(item) {
-  const idx = allItems.findIndex((i) => i.id === item.id);
-  if (idx >= 0) allItems[idx] = item;
-
-  await chrome.storage.local.set({ items: allItems });
-
-  if (isLocalServerConnected) {
-    fetch(`${LOCAL_SERVER_URL}/api/bookmarks`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(item)
-    }).catch(() => {});
-  }
+  const saved = await NookDB.putBookmark(item);
+  const idx = allItems.findIndex((i) => i.id === saved.id);
+  if (idx >= 0) allItems[idx] = saved;
 }
 
 // New List Modal Controls
@@ -1272,23 +1196,14 @@ async function handleSaveNewList() {
     return;
   }
 
-  const newList = {
+  const newList = await NookDB.putList({
     id: "list_" + Date.now(),
     name,
     icon: selectedEmoji || "📁",
     createdAt: new Date().toISOString()
-  };
+  });
 
   allLists.push(newList);
-  await chrome.storage.local.set({ lists: allLists });
-
-  if (isLocalServerConnected) {
-    fetch(`${LOCAL_SERVER_URL}/api/lists`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(newList)
-    }).catch(() => {});
-  }
 
   closeListModal();
   updateSidebar();
@@ -1303,23 +1218,10 @@ async function confirmDeleteList(listId, listName) {
 
   if (!confirmed) return;
 
-  allLists = allLists.filter((l) => l.id !== listId);
-
-  // Unassign list from bookmarks
-  for (const item of allItems) {
-    if (item.listId === listId) {
-      item.listId = null;
-      item.listName = null;
-    }
-  }
-
-  await chrome.storage.local.set({ lists: allLists, items: allItems });
-
-  if (isLocalServerConnected) {
-    fetch(`${LOCAL_SERVER_URL}/api/lists/${encodeURIComponent(listId)}`, {
-      method: "DELETE"
-    }).catch(() => {});
-  }
+  // Soft-deletes the list and clears listId/listName on its bookmarks in a
+  // single IndexedDB transaction, then reload since many records changed.
+  await NookDB.softDeleteList(listId);
+  await reloadFromDB();
 
   if (activeListId === listId) {
     setActiveNavigation("all", null, null);
@@ -1331,24 +1233,15 @@ async function confirmDeleteList(listId, listName) {
   showToast(`Deleted list "${listName}"`);
 }
 
-// Delete Bookmark
+// Delete Bookmark (soft delete — the record stays as a tombstone in IndexedDB)
 async function deleteBookmark(id) {
   try {
-    const { items = [] } = await chrome.storage.local.get("items");
-    const updated = items.filter((item) => item.id !== id);
-    await chrome.storage.local.set({ items: updated });
+    await NookDB.softDeleteBookmark(id);
 
-    allItems = updated;
+    allItems = allItems.filter((item) => item.id !== id);
     updateSidebar();
     renderGrid();
     showToast("Bookmark deleted");
-
-    // Sync deletion to local server
-    if (isLocalServerConnected) {
-      fetch(`${LOCAL_SERVER_URL}/api/bookmarks/${encodeURIComponent(id)}`, {
-        method: "DELETE"
-      }).catch(() => {});
-    }
   } catch (err) {
     console.error("[Nook] Failed to delete item:", err);
     showToast("Failed to delete bookmark");
@@ -1367,7 +1260,7 @@ async function confirmClearAll() {
   );
 
   if (confirmed) {
-    await chrome.storage.local.set({ items: [] });
+    await NookDB.softDeleteAllBookmarks();
     allItems = [];
     updateSidebar();
     renderGrid();
@@ -1428,51 +1321,25 @@ function handleFileImport(file) {
         return;
       }
 
-      // Merge items by id
-      const itemMap = new Map();
-      for (const item of allItems) {
-        if (item?.id) itemMap.set(item.id, item);
-      }
-      for (const item of incomingItems) {
-        if (item?.id) {
-          itemMap.set(item.id, { ...itemMap.get(item.id), ...item });
-        }
-      }
-      const mergedItems = Array.from(itemMap.values());
-      mergedItems.sort((a, b) => {
-        const tA = new Date(a.savedAt || a.createdAt || 0).getTime();
-        const tB = new Date(b.savedAt || b.createdAt || 0).getTime();
-        return tB - tA;
-      });
+      // Upsert items by id, keeping existing fields an incoming record
+      // doesn't carry (e.g. an older export missing a newer field).
+      const existingItemById = new Map(allItems.map((item) => [item.id, item]));
+      const itemsToWrite = incomingItems
+        .filter((item) => item?.id)
+        .map((item) => ({ ...existingItemById.get(item.id), ...item }));
+      const newItemCount = itemsToWrite.filter((item) => !existingItemById.has(item.id)).length;
 
-      // Merge lists by id
-      const listMap = new Map();
-      for (const l of allLists) {
-        if (l?.id) listMap.set(l.id, l);
-      }
-      for (const l of incomingLists) {
-        if (l?.id) {
-          listMap.set(l.id, { ...listMap.get(l.id), ...l });
-        }
-      }
-      const mergedLists = Array.from(listMap.values());
+      const existingListById = new Map(allLists.map((l) => [l.id, l]));
+      const listsToWrite = incomingLists
+        .filter((l) => l?.id)
+        .map((l) => ({ ...existingListById.get(l.id), ...l }));
 
-      const newItemCount = mergedItems.length - allItems.length;
-      allItems = mergedItems;
-      allLists = mergedLists;
-
-      await chrome.storage.local.set({ items: allItems, lists: allLists });
-      updateSidebar();
-      renderGrid();
-
-      // Sync to local server if running
-      if (isLocalServerConnected) {
-        fetch(`${LOCAL_SERVER_URL}/api/bookmarks`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ items: allItems, lists: allLists })
-        }).catch(() => {});
+      await NookDB.putBookmarks(itemsToWrite);
+      for (const list of listsToWrite) {
+        await NookDB.putList(list);
       }
+
+      await reloadFromDB();
 
       showToast(`Imported ${incomingItems.length} bookmarks (${newItemCount} new) & ${incomingLists.length} lists ✓`);
     } catch (err) {

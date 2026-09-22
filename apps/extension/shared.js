@@ -26,8 +26,6 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
-  const LOCAL_SERVER_URL = "http://localhost:3333";
-
   // Inline SVG icons reused across dashboard.js / popup.js. The icons that
   // are reused at different sizes/styles are small builder functions (so
   // each call site keeps its original width/height/stroke attributes and
@@ -119,7 +117,6 @@
   }
 
   return {
-    LOCAL_SERVER_URL,
     ICONS,
     createAvatarFallback,
     formatDate

@@ -1,17 +1,19 @@
 // Nook Background Service Worker
 // Listens for Chrome bookmark creation and captures web pages automatically
 
-importScripts("shared.js");
+importScripts("shared.js", "db.js");
 
 console.log("[Nook Background] Service Worker initialized");
 
-const { LOCAL_SERVER_URL } = self.NookShared;
+// Open the DB (and run the one-time chrome.storage.local migration) as soon
+// as the service worker wakes up, so the first message handler that needs
+// it doesn't pay the open+migrate cost on the critical path.
+self.NookDB.ready().catch((err) => {
+  console.error("[Nook Background] NookDB.ready() failed:", err);
+});
 
 // Cached X Bookmarks GraphQL queryId (captured from network by inject.js)
 let _cachedBookmarkQueryId = null;
-
-// Promise chain that serializes SYNC_ITEMS_BATCH writes to chrome.storage.local
-let _syncQueue = Promise.resolve();
 
 
 chrome.bookmarks.onCreated.addListener(async (id, bookmark) => {
@@ -112,32 +114,24 @@ chrome.bookmarks.onCreated.addListener(async (id, bookmark) => {
       savedAt: new Date().toISOString()
     };
 
-    // 5. Save to chrome.storage.local
-    const { items = [] } = await chrome.storage.local.get("items");
-
-    // Deduplicate: check if exact same URL already exists
-    const existingIdx = items.findIndex((i) => i.url === urlStr);
-    if (existingIdx >= 0) {
-      // Update existing item with new metadata/saved time
-      items[existingIdx] = { ...items[existingIdx], ...newItem, id: items[existingIdx].id };
+    // 5. Save to IndexedDB (deduplicate by URL, ignoring soft-deleted rows)
+    const existing = await self.NookDB.findBookmarkByUrl(urlStr);
+    if (existing) {
+      // Update existing item with new metadata/saved time, keep its id
+      await self.NookDB.putBookmark({ ...existing, ...newItem, id: existing.id });
     } else {
-      items.unshift(newItem);
+      await self.NookDB.putBookmark(newItem);
     }
-
-    await chrome.storage.local.set({ items });
     console.log("[Nook Background] Bookmark successfully saved to Nook:", newItem);
 
-    // 6. Sync to local server if running
-    syncToLocalServer(newItem);
-
-    // 7. Visual Feedback: Action badge on extension icon
+    // 6. Visual Feedback: Action badge on extension icon
     chrome.action.setBadgeText({ text: "✓" });
     chrome.action.setBadgeBackgroundColor({ color: "#10b981" });
     setTimeout(() => {
       chrome.action.setBadgeText({ text: "" });
     }, 2400);
 
-    // 8. In-page Toast notification on the tab
+    // 7. In-page Toast notification on the tab
     if (targetTab && targetTab.id && !targetTab.url.startsWith("chrome://")) {
       const toastMsg = ogImage
         ? `Nook: Saved "${siteName}" with image ✓`
@@ -300,33 +294,6 @@ function showNookToastInPage(message) {
   }, 2600);
 }
 
-// Returns an updated copy of `existing` when `incoming` (freshly parsed from the
-// X API) carries newer tweet content, or null when nothing changed.
-const TWEET_CONTENT_FIELDS = ["title", "shortDescription", "description", "media", "attachments", "creator", "quote"];
-
-function mergeTweetContent(existing, incoming) {
-  if (existing.source !== "x") return null;
-  let changed = false;
-  const merged = { ...existing };
-  for (const field of TWEET_CONTENT_FIELDS) {
-    if (incoming[field] === undefined) continue;
-    if (JSON.stringify(existing[field] ?? null) !== JSON.stringify(incoming[field] ?? null)) {
-      merged[field] = incoming[field];
-      changed = true;
-    }
-  }
-  return changed ? merged : null;
-}
-
-// Sync new bookmark to local server
-function syncToLocalServer(item) {
-  fetch(`${LOCAL_SERVER_URL}/api/bookmarks`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(item)
-  }).catch(() => {});
-}
-
 // Message listener from content script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === "SAVE_ITEM") {
@@ -338,14 +305,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
-        const { items = [] } = await chrome.storage.local.get("items");
-        const exists = items.some((existing) => existing.id === item.id);
-        if (!exists) {
-          items.unshift(item);
-          await chrome.storage.local.set({ items });
+        const existing = await self.NookDB.getBookmark(item.id);
+        if (existing && !existing.deletedAt) {
+          // Already saved and not deleted: nothing to do.
+        } else if (existing && existing.deletedAt) {
+          // A deliberate re-click of X's bookmark button on a post the user
+          // had removed from Nook should restore it, with fresh content.
+          await self.NookDB.putBookmark({ ...existing, ...item, deletedAt: null });
+        } else {
+          await self.NookDB.putBookmark(item);
         }
-        syncToLocalServer(item);
-        sendResponse({ success: true, count: items.length });
+
+        const count = (await self.NookDB.getAllBookmarks()).length;
+        sendResponse({ success: true, count });
       } catch (err) {
         console.error("[Nook Background] Error in SAVE_ITEM:", err);
         sendResponse({ success: false, error: err.message });
@@ -355,9 +327,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message && message.type === "SYNC_ITEMS_BATCH") {
-    // Serialize batches: the page's own Bookmarks fetch and auto sync can arrive
-    // together, and parallel get/set on "items" would drop one of the writes.
-    _syncQueue = _syncQueue.then(async () => {
+    // mergeBatch() runs the whole batch inside a single IndexedDB
+    // transaction, so the page's own Bookmarks fetch and auto sync arriving
+    // together can no longer race the way parallel get/set on a single
+    // chrome.storage.local "items" array could (the old _syncQueue promise
+    // chain that serialized those writes is no longer needed).
+    (async () => {
       try {
         const incoming = message.items;
         if (!Array.isArray(incoming) || incoming.length === 0) {
@@ -365,43 +340,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
-        const { items = [] } = await chrome.storage.local.get("items");
-        const indexById = new Map(items.map((existing, idx) => [existing.id, idx]));
-
-        const newItems = [];
-        const changedItems = [];
-        for (const incItem of incoming) {
-          const idx = indexById.get(incItem.id);
-          if (idx === undefined) {
-            newItems.push(incItem);
-            continue;
-          }
-          // Already saved: refresh tweet content (quote, media, text) that older
-          // parsers missed, but keep the user's list, tags and savedAt.
-          const merged = mergeTweetContent(items[idx], incItem);
-          if (merged) {
-            items[idx] = merged;
-            changedItems.push(merged);
-          }
-        }
-
-        if (newItems.length > 0 || changedItems.length > 0) {
-          await chrome.storage.local.set({ items: [...newItems, ...items] });
-
-          // Sync batch to server
-          fetch(`${LOCAL_SERVER_URL}/api/bookmarks`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify([...newItems, ...changedItems])
-          }).catch(() => {});
-        }
-
-        sendResponse({ success: true, count: newItems.length, updated: changedItems.length });
+        // Already-saved items get their tweet content (quote, media, text)
+        // refreshed when an older parser missed something, but keep the
+        // user's list, tags and savedAt — see NookDB.mergeTweetContent.
+        const { added, updated } = await self.NookDB.mergeBatch(incoming, self.NookDB.mergeTweetContent);
+        sendResponse({ success: true, count: added.length, updated: updated.length });
       } catch (err) {
         console.error("[Nook Background] Error in SYNC_ITEMS_BATCH:", err);
         sendResponse({ success: false, error: err.message });
       }
-    });
+    })();
     return true; // Keep channel open
   }
 
@@ -503,6 +451,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Auto-reload x.com tabs when extension is updated to prevent invalidated context errors
 chrome.runtime.onInstalled.addListener(() => {
+  self.NookDB.ready().catch((err) => {
+    console.error("[Nook Background] NookDB.ready() failed:", err);
+  });
+
   chrome.tabs.query({ url: ["*://x.com/*", "*://twitter.com/*"] }, (tabs) => {
     for (const tab of tabs) {
       chrome.tabs.reload(tab.id);
