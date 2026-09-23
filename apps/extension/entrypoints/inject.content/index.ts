@@ -1,3 +1,5 @@
+import { defineContentScript } from "wxt/utils/define-content-script";
+
 export default defineContentScript({
   matches: ["https://x.com/*", "https://twitter.com/*"],
   runAt: "document_start",
@@ -60,4 +62,3 @@ export default defineContentScript({
   };
   }
 });
-import { defineContentScript } from "wxt/utils/define-content-script";

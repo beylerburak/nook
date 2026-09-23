@@ -62,11 +62,19 @@ export interface NookMessageBase {
   type: string;
 }
 
+export interface ShowBookmarkToastMessage {
+  type: "SHOW_BOOKMARK_TOAST";
+  message: string;
+  bookmarkId?: string;
+  toastType?: "info" | "error";
+}
+
 export type ContentToBackgroundMessage =
   | { type: "SAVE_ITEM"; item: Bookmark }
   | { type: "GET_NOOK_BOOKMARK_STATES"; ids: string[] }
   | { type: "TOGGLE_NOOK_BOOKMARK"; item: Bookmark }
   | { type: "UPDATE_BOOKMARK_NOTE"; id: string; note: string }
+  | ShowBookmarkToastMessage
   | { type: "SYNC_ITEMS_BATCH"; items: Bookmark[] }
   | { type: "STORE_QUERY_ID"; queryId: string }
   | { type: "GET_QUERY_ID" }
@@ -76,7 +84,8 @@ export type ContentToBackgroundMessage =
 export type BackgroundToContentMessage =
   | { type: "BEGIN_AUTO_SYNC"; queryId?: string | null }
   | { type: "NOOK_QUERY_ID"; queryId: string }
-  | { type: "NOOK_SYNC_BOOKMARKS"; data: XApiResponse };
+  | { type: "NOOK_SYNC_BOOKMARKS"; data: XApiResponse }
+  | ShowBookmarkToastMessage;
 
 export interface MessageResponse {
   success?: boolean;
