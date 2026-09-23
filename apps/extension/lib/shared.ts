@@ -8,13 +8,9 @@
  * importScripts (background.js, a classic service worker) and as a content
  * script (manifest.json, loaded before content.js).
  *
- * NOTE: this file intentionally does NOT include the toast helpers
- * (showNotification in content.js / showNookToastInPage in background.js).
- * showNookToastInPage is passed to chrome.scripting.executeScript({ func })
- * and gets serialized and re-executed inside the target web page — it
- * cannot reference any outer scope, including this module. Keeping both
- * toast implementations self-contained (with a short comment explaining
- * why) is intentional, not an oversight.
+ * Bookmark feedback is rendered by the Astryx-backed content-script host.
+ * Save entry points send it a typed runtime message so toast layout and note
+ * handling stay shared across X and regular web pages.
  */
 
 

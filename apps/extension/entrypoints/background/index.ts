@@ -1,5 +1,6 @@
 import { defineBackground } from "wxt/utils/define-background";
 import * as NookDB from "../../lib/db";
+import { initBookmarkToastDelivery, sendBookmarkToast } from "../../lib/toast";
 import type { ContentToBackgroundMessage, MessageResponse } from "../../lib/types";
 // Nook Background Service Worker
 // Listens for Chrome bookmark creation and captures web pages automatically
@@ -8,6 +9,8 @@ import type { ContentToBackgroundMessage, MessageResponse } from "../../lib/type
 
 export default defineBackground(() => {
 console.log("[Nook Background] Service Worker initialized");
+
+initBookmarkToastDelivery();
 
 // Open the DB (and run the one-time chrome.storage.local migration) as soon
 // as the service worker wakes up, so the first message handler that needs
@@ -141,10 +144,10 @@ chrome.bookmarks.onCreated.addListener(async (id, bookmark) => {
         ? `Nook: Saved "${siteName}" with image ✓`
         : `Nook: Saved "${siteName}" to bookmarks ✓`;
 
-      chrome.scripting.executeScript({
-        target: { tabId: targetTab.id },
-        func: showNookToastInPage,
-        args: [toastMsg, savedBookmarkId(existing, newItem)]
+      sendBookmarkToast(targetTab.id, {
+        type: "SHOW_BOOKMARK_TOAST",
+        message: toastMsg,
+        bookmarkId: savedBookmarkId(existing, newItem),
       }).catch(() => {});
     }
   } catch (err) {
@@ -263,114 +266,22 @@ async function fetchPageMetadata(url: string) {
   }
 }
 
-// In-page toast notification injected into web pages when bookmarked
-function showNookToastInPage(message: string, bookmarkId: string) {
-  const id = "nook-toast-feedback";
-  let toast = document.getElementById(id) as (HTMLDivElement & { _timeout?: ReturnType<typeof setTimeout>; _successTimeout?: number }) | null;
-  if (!toast) {
-    toast = document.createElement("div");
-    toast.id = id;
-    toast.style.cssText = `
-      position: fixed;
-      bottom: 24px;
-      right: 24px;
-      width: min(340px, calc(100vw - 32px));
-      box-sizing: border-box;
-      background: #18181b;
-      color: #f4f4f5;
-      padding: 16px;
-      border-radius: 16px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      font-size: 13px;
-      box-shadow: 0 12px 30px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.12);
-      z-index: 2147483647;
-      transition: opacity 0.2s ease, transform 0.2s ease;
-      line-height: 1.4;
-    `;
-    document.body.appendChild(toast);
-  }
-
-  clearTimeout(toast._timeout);
-  clearTimeout(toast._successTimeout);
-  toast.replaceChildren();
-  const heading = document.createElement("div");
-  heading.textContent = "✓  Saved to Nook";
-  heading.style.cssText = "font-weight:700;font-size:14px;margin-bottom:4px";
-  const subheading = document.createElement("div");
-  subheading.textContent = message.replace(/^Nook:\s*/, "");
-  subheading.style.cssText = "color:#a1a1aa;font-size:12px;margin-bottom:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
-  const actions = document.createElement("div");
-  actions.style.cssText = "display:flex;gap:8px;align-items:center";
-  const noteButton = document.createElement("button");
-  noteButton.type = "button";
-  noteButton.textContent = "＋ Add a note";
-  noteButton.style.cssText = "border:0;border-radius:8px;background:#27272a;color:#fafafa;padding:8px 11px;font:600 12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer";
-  const closeButton = document.createElement("button");
-  closeButton.type = "button";
-  closeButton.textContent = "Dismiss";
-  closeButton.style.cssText = "border:0;background:transparent;color:#a1a1aa;padding:8px;font:500 12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer";
-  const composer = document.createElement("div");
-  composer.style.cssText = "display:none;margin-top:10px";
-  const input = document.createElement("textarea");
-  input.placeholder = "What do you want to remember?";
-  input.rows = 3;
-  input.style.cssText = "box-sizing:border-box;width:100%;resize:vertical;border:1px solid #3f3f46;border-radius:8px;background:#09090b;color:#fafafa;padding:9px;font:12px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;outline:none";
-  const composerActions = document.createElement("div");
-  composerActions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:8px";
-  const cancelButton = document.createElement("button");
-  cancelButton.type = "button";
-  cancelButton.textContent = "Cancel";
-  cancelButton.style.cssText = "border:0;background:transparent;color:#a1a1aa;padding:7px 9px;font:500 12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer";
-  const saveButton = document.createElement("button");
-  saveButton.type = "button";
-  saveButton.textContent = "Save note";
-  saveButton.style.cssText = "border:0;border-radius:8px;background:#7c3aed;color:white;padding:7px 11px;font:600 12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;cursor:pointer";
-  noteButton.onclick = () => {
-    composer.style.display = "block";
-    noteButton.style.display = "none";
-    input.focus();
-  };
-  cancelButton.onclick = () => {
-    composer.style.display = "none";
-    noteButton.style.display = "inline-block";
-  };
-  saveButton.onclick = () => {
-    const note = input.value.trim();
-    if (!note) { input.focus(); return; }
-    saveButton.disabled = true;
-    saveButton.textContent = "Saving…";
-    chrome.runtime.sendMessage({ type: "UPDATE_BOOKMARK_NOTE", id: bookmarkId, note }, (response) => {
-      if (chrome.runtime.lastError || !response?.success) {
-        saveButton.disabled = false;
-        saveButton.textContent = "Try again";
-        return;
-      }
-      heading.textContent = "✓  Note saved";
-      subheading.textContent = "You can edit it anytime in Nook.";
-      composer.remove();
-      actions.remove();
-      clearTimeout(toast?._successTimeout);
-      toast!._successTimeout = window.setTimeout(() => {
-        if (toast?.isConnected) toast.remove();
-      }, 2800);
-    });
-  };
-  closeButton.onclick = () => toast?.remove();
-  composerActions.append(cancelButton, saveButton);
-  composer.append(input, composerActions);
-  actions.append(noteButton, closeButton);
-  toast.append(heading, subheading, actions, composer);
-  toast.style.opacity = "1";
-  toast.style.transform = "translateY(0)";
-  toast.addEventListener("mouseenter", () => clearTimeout(toast?._timeout));
-  toast.addEventListener("mouseleave", () => {
-    if (composer.style.display !== "block") toast!._timeout = setTimeout(() => toast?.remove(), 7000);
-  });
-  toast._timeout = setTimeout(() => { if (composer.style.display !== "block") toast?.remove(); }, 7000);
-}
-
 // Message listener from content script
 chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sender, sendResponse: (response?: MessageResponse) => void) => {
+  if (message?.type === "SHOW_BOOKMARK_TOAST") {
+    const tabId = sender.tab?.id;
+    if (tabId === undefined) {
+      sendResponse({ success: false, error: "Cannot show a toast without a page tab" });
+      return;
+    }
+
+    sendBookmarkToast(tabId, message).then(
+      () => sendResponse({ success: true }),
+      (err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }),
+    );
+    return true;
+  }
+
   if (message?.type === "UPDATE_BOOKMARK_NOTE") {
     NookDB.updateBookmark(message.id, { note: message.note.trim() }).then((item) => {
       sendResponse({ success: Boolean(item) });
