@@ -33,7 +33,7 @@ async function loadItems() {
   }
 
   await NookDB.ready();
-  const items = await NookDB.getAllBookmarks();
+  const items = NookShared.sortBookmarksByDate(await NookDB.getAllBookmarks());
   const lists = await NookDB.getAllLists();
 
   if (countBadge) {

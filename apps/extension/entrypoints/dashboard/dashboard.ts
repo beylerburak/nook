@@ -491,27 +491,7 @@ function getFilteredAndSortedItems() {
     return true;
   });
 
-  // Sort
-  filtered.sort((a, b) => {
-    if (a.source === "x" && b.source === "x" && a.xSortIndex && b.xSortIndex) {
-      try {
-        const indexA = BigInt(a.xSortIndex);
-        const indexB = BigInt(b.xSortIndex);
-        if (indexA !== indexB) {
-          return currentSort === "newest"
-            ? indexA > indexB ? -1 : 1
-            : indexA < indexB ? -1 : 1;
-        }
-      } catch {
-        // Fall back to savedAt for unexpected sort index formats.
-      }
-    }
-    const timeA = new Date(a.savedAt || a.createdAt || 0).getTime();
-    const timeB = new Date(b.savedAt || b.createdAt || 0).getTime();
-    return currentSort === "newest" ? timeB - timeA : timeA - timeB;
-  });
-
-  return filtered;
+  return NookShared.sortBookmarksByDate(filtered, currentSort === "oldest" ? "oldest" : "newest");
 }
 
 // Render Grid

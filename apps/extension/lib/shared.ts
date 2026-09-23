@@ -109,9 +109,40 @@
     }
   }
 
+function getBookmarkSortTime(item: Bookmark): number {
+  // Chrome's createdAt is the browser bookmark's dateAdded. savedAt is when
+  // Nook imported it, so preferring savedAt would group an import by import time.
+  if (item.source === "chrome" && item.createdAt) {
+    const createdAt = new Date(item.createdAt).getTime();
+    if (Number.isFinite(createdAt)) return createdAt;
+  }
+
+  // X's timeline sort index is a millisecond timestamp and preserves the
+  // service's bookmark order when a sync batch gives items similar savedAt values.
+  if (item.source === "x" && item.xSortIndex && /^\d{13}$/.test(item.xSortIndex)) {
+    const xSortTime = Number(item.xSortIndex);
+    if (Number.isFinite(xSortTime)) return xSortTime;
+  }
+
+  const savedAt = item.savedAt ? new Date(item.savedAt).getTime() : NaN;
+  if (Number.isFinite(savedAt)) return savedAt;
+
+  const createdAt = item.createdAt ? new Date(item.createdAt).getTime() : NaN;
+  return Number.isFinite(createdAt) ? createdAt : 0;
+}
+
+function sortBookmarksByDate(items: Bookmark[], direction: "newest" | "oldest" = "newest"): Bookmark[] {
+  return [...items].sort((a, b) => {
+    const timeA = getBookmarkSortTime(a);
+    const timeB = getBookmarkSortTime(b);
+    return direction === "newest" ? timeB - timeA : timeA - timeB;
+  });
+}
+
 export {
   ICONS,
   createAvatarFallback,
-  formatDate
+  formatDate,
+  sortBookmarksByDate
 };
-import type { Creator } from "./types";
+import type { Bookmark, Creator } from "./types";

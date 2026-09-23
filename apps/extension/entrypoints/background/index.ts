@@ -408,6 +408,45 @@ chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sende
     return true; // Keep channel open for async response
   }
 
+  if (message && message.type === "GET_NOOK_BOOKMARK_STATES") {
+    (async () => {
+      try {
+        const states: Record<string, boolean> = {};
+        await Promise.all(message.ids.map(async (id) => {
+          const item = await NookDB.getBookmark(id);
+          states[id] = Boolean(item && !item.deletedAt);
+        }));
+        sendResponse({ success: true, states });
+      } catch (err) {
+        sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+    return true;
+  }
+
+  if (message && message.type === "TOGGLE_NOOK_BOOKMARK") {
+    (async () => {
+      try {
+        const item = message.item;
+        if (!item?.id || !item.url) {
+          sendResponse({ success: false, error: "Invalid item" });
+          return;
+        }
+        const existing = await NookDB.getBookmark(item.id);
+        if (existing && !existing.deletedAt) {
+          await NookDB.softDeleteBookmark(item.id);
+          sendResponse({ success: true, saved: false });
+          return;
+        }
+        await NookDB.putBookmark(existing ? { ...existing, ...item, deletedAt: null } : item);
+        sendResponse({ success: true, saved: true });
+      } catch (err) {
+        sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+    return true;
+  }
+
   if (message && message.type === "SYNC_ITEMS_BATCH") {
     // mergeBatch() runs the whole batch inside a single IndexedDB
     // transaction, so the page's own Bookmarks fetch and auto sync arriving

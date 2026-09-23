@@ -22,6 +22,190 @@ function isExtensionValid() {
   return typeof chrome !== "undefined" && Boolean(chrome.runtime?.id);
 }
 
+const nookSavedState = new Map<string, boolean>();
+const nookButtonItems = new WeakMap<HTMLElement, Bookmark>();
+const nookStatusRequested = new Set<string>();
+
+function installNookHoverStyles() {
+  if (document.getElementById("nook-x-action-hover-styles")) return;
+  const style = document.createElement("style");
+  style.id = "nook-x-action-hover-styles";
+  style.textContent = `
+    button[data-nook-action="true"] {
+      position: relative !important;
+      isolation: isolate;
+      overflow: visible !important;
+      transition: color 150ms ease;
+    }
+    button[data-nook-action="true"]::before {
+      content: "";
+      position: absolute;
+      inset: -8px;
+      z-index: 0;
+      border-radius: 9999px;
+      background: transparent;
+      pointer-events: none;
+      transition: background-color 150ms ease;
+    }
+    button[data-nook-action="true"]:hover,
+    button[data-nook-action="true"]:focus-visible {
+      color: rgb(29, 155, 240) !important;
+    }
+    button[data-nook-action="true"]:hover::before,
+    button[data-nook-action="true"]:focus-visible::before {
+      background: rgba(29, 155, 240, 0.1);
+    }
+    button[data-nook-action="true"] svg {
+      position: relative;
+      z-index: 1;
+    }
+  `;
+  (document.head || document.documentElement).appendChild(style);
+}
+
+function renderNookButton(button: HTMLElement, saved: boolean) {
+  button.setAttribute("aria-label", saved ? "Saved to Nook" : "Save to Nook");
+  button.setAttribute("aria-pressed", String(saved));
+  button.title = saved ? "Saved to Nook" : "Save to Nook";
+  button.style.color = saved ? "#10b981" : "";
+  const icon = button.querySelector("svg");
+  if (icon) {
+    icon.setAttribute("viewBox", "0 0 24 24");
+    const nookMark = '<path d="M6.25 3.75h11.5a.75.75 0 0 1 .75.75v15.75L12 17l-6.5 3.25V4.5a.75.75 0 0 1 .75-.75Z" fill="' + (saved ? "currentColor" : "none") + '" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9.25 13.75v-4l5.5 4.5v-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>';
+    if (icon.innerHTML !== nookMark) icon.innerHTML = nookMark;
+  }
+}
+
+function updateNookButtonState(id: string, saved: boolean) {
+  nookSavedState.set(id, saved);
+  for (const button of queryAll('[data-nook-action="true"]')) {
+    const item = nookButtonItems.get(button);
+    if (item?.id === id) renderNookButton(button, saved);
+  }
+}
+
+function getActionComponent(xAction: HTMLElement): HTMLElement {
+  const xButton = xAction.closest<HTMLElement>("button") || xAction;
+  const actionGroup = xButton.closest<HTMLElement>('[role="group"]');
+  if (!actionGroup) return xButton.parentElement || xButton;
+
+  let component = xButton;
+  while (component.parentElement && component.parentElement !== actionGroup) {
+    component = component.parentElement;
+  }
+  return component;
+}
+
+function makeNookButton(sourceComponent: HTMLElement): { wrapper: HTMLElement; button: HTMLElement } {
+  const wrapper = sourceComponent.cloneNode(true) as HTMLElement;
+  const button = (wrapper.matches("button") ? wrapper : wrapper.querySelector("button")) as HTMLElement | null;
+  if (!button) return { wrapper, button: wrapper };
+
+  wrapper.removeAttribute("id");
+  button.removeAttribute("id");
+  button.setAttribute("data-nook-action", "true");
+  button.setAttribute("type", "button");
+  button.setAttribute("aria-label", "Save to Nook");
+  button.setAttribute("aria-pressed", "false");
+  button.title = "Save to Nook";
+  wrapper.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
+
+  let icon = button.querySelector("svg");
+  if (!icon) {
+    icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("width", "1.25em");
+    icon.setAttribute("height", "1.25em");
+    button.replaceChildren(icon);
+  }
+  renderNookButton(button, false);
+  return { wrapper, button };
+}
+
+function installNookButtons(root: ParentNode = document) {
+  const articles = root instanceof Element && root.matches('article[data-testid="tweet"]')
+    ? [root as HTMLElement]
+    : Array.from(root.querySelectorAll<HTMLElement>('article[data-testid="tweet"]'));
+  const requested: string[] = [];
+
+  for (const article of articles) {
+    const existingNookButton = article.querySelector<HTMLElement>('[data-nook-action="true"]');
+    const xAction = article.querySelector<HTMLElement>('[data-testid="bookmark"], [data-testid="removeBookmark"]');
+    if (!existingNookButton && xAction) {
+      const xComponent = getActionComponent(xAction);
+      const { wrapper, button } = makeNookButton(xComponent);
+      xComponent.after(wrapper);
+      const item = parseTweet(article);
+      if (item.url) nookButtonItems.set(button, item);
+    }
+
+    const button = article.querySelector<HTMLElement>('[data-nook-action="true"]');
+    const item = button && nookButtonItems.get(button);
+    if (!button || !item) continue;
+    if (nookSavedState.has(item.id)) {
+      renderNookButton(button, nookSavedState.get(item.id)!);
+    } else if (!nookStatusRequested.has(item.id)) {
+      nookStatusRequested.add(item.id);
+      requested.push(item.id);
+    }
+  }
+
+  if (requested.length && isExtensionValid()) {
+    sendNookMessage({ type: "GET_NOOK_BOOKMARK_STATES", ids: requested }).then((response) => {
+      for (const [id, saved] of Object.entries(response?.states || {})) nookSavedState.set(id, saved);
+      for (const article of articles) {
+        const button = article.querySelector<HTMLElement>('[data-nook-action="true"]');
+        const item = button && nookButtonItems.get(button);
+        if (button && item && nookSavedState.has(item.id)) renderNookButton(button, nookSavedState.get(item.id)!);
+      }
+    }).catch((err) => console.warn("[Nook] Could not load bookmark status:", err));
+  }
+}
+
+document.addEventListener("click", async (event) => {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const button = target.closest<HTMLElement>('[data-nook-action="true"]');
+  if (!button) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (!isExtensionValid()) {
+    showNotification("Nook was updated. Please refresh the page (F5) 🔄");
+    return;
+  }
+  const item = nookButtonItems.get(button);
+  if (!item || button.getAttribute("aria-busy") === "true") return;
+  button.setAttribute("aria-busy", "true");
+  (button as HTMLButtonElement).disabled = true;
+  try {
+    const response = await sendNookMessage({ type: "TOGGLE_NOOK_BOOKMARK", item });
+    if (!response?.success || response.saved === undefined) throw new Error(response?.error || "Could not update Nook bookmark");
+    updateNookButtonState(item.id, response.saved);
+    showNotification(response.saved ? "Saved to Nook ✓" : "Removed from Nook");
+  } catch (err) {
+    console.warn("[Nook] Could not toggle bookmark:", err);
+    showNotification("Could not update Nook bookmark");
+  } finally {
+    button.removeAttribute("aria-busy");
+    (button as HTMLButtonElement).disabled = false;
+  }
+}, true);
+
+installNookHoverStyles();
+installNookButtons();
+const nookButtonObserver = new MutationObserver((mutations) => {
+  for (const mutation of mutations) {
+    const target = mutation.target instanceof Element ? mutation.target : mutation.target.parentElement;
+    if (target?.closest('[data-nook-action="true"]')) continue;
+    for (const node of mutation.addedNodes) {
+      if (node instanceof Element && !node.closest('[data-nook-action="true"]')) {
+        const article = node.closest<HTMLElement>('article[data-testid="tweet"]');
+        installNookButtons(article || node);
+      }
+    }
+  }
+});
+nookButtonObserver.observe(document.documentElement, { childList: true, subtree: true });
+
 document.addEventListener(
   "click",
   async (event) => {
@@ -59,6 +243,7 @@ document.addEventListener(
       const saved = await saveItem(item);
 
       if (saved) {
+        updateNookButtonState(item.id, true);
         showNotification(
           item.media?.length
             ? `Nook: Saved with ${item.media.length} media ✓`

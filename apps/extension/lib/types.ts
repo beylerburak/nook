@@ -64,6 +64,8 @@ export interface NookMessageBase {
 
 export type ContentToBackgroundMessage =
   | { type: "SAVE_ITEM"; item: Bookmark }
+  | { type: "GET_NOOK_BOOKMARK_STATES"; ids: string[] }
+  | { type: "TOGGLE_NOOK_BOOKMARK"; item: Bookmark }
   | { type: "UPDATE_BOOKMARK_NOTE"; id: string; note: string }
   | { type: "SYNC_ITEMS_BATCH"; items: Bookmark[] }
   | { type: "STORE_QUERY_ID"; queryId: string }
@@ -83,6 +85,8 @@ export interface MessageResponse {
   updated?: number;
   queryId?: string | null;
   received?: boolean;
+  saved?: boolean;
+  states?: Record<string, boolean>;
 }
 
 /**
