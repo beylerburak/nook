@@ -8,13 +8,27 @@
     "build": "wxt build -b chrome",
     "zip": "wxt zip -b chrome",
     "typecheck": "tsc --noEmit",
+    "theme:build": "astryx theme build src/app/theme/nook.ts -o src/app/theme/nook.css",
+    "theme:check": "astryx theme build src/app/theme/nook.ts -o src/app/theme/nook.css --check",
     "test": "vitest run"
   },
   "devDependencies": {
+    "@astryxdesign/cli": "^0.6.2",
     "@types/chrome": "^0.3.0",
     "@types/node": "^26.6.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@wxt-dev/module-react": "^1.2.2",
+    "happy-dom": "^20.14.5",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11",
     "wxt": "^0.21.4"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "^0.6.2",
+    "@astryxdesign/theme-neutral": "^0.6.2",
+    "@stylexjs/stylex": "^0.19.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   }
 }
