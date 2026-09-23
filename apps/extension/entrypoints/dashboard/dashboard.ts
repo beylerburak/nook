@@ -1,81 +1,94 @@
+import * as NookDB from "../../lib/db";
+import * as NookShared from "../../lib/shared";
+import type { Bookmark, BookmarkList, Media, Quote } from "../../lib/types";
+
+// DOM ids/selectors here refer to elements in the paired dashboard HTML.
+type UIElement = HTMLElement & { value: any; files: FileList | null; src: string; href: string; textContent: any; dataset: DOMStringMap; disabled: boolean };
+const byId = (id: string): UIElement => document.getElementById(id) as UIElement;
+const queryOne = (selector: string): UIElement => document.querySelector(selector) as UIElement;
+const queryAll = (selector: string): UIElement[] => Array.from(document.querySelectorAll(selector)) as UIElement[];
+
 // Nook Dashboard Script - Lists & Tags Edition
-let allItems = [];
-let allLists = [];
+let allItems: Bookmark[] = [];
+let allLists: BookmarkList[] = [];
 let searchQuery = "";
-let currentNav = "all"; // 'all' | 'unorganized' | null
-let activeListId = null; // null or string (id of selected list)
-let activeTag = null; // null or string (name of selected tag)
+let currentNav: string | null = "all";
+let activeListId: string | null = null;
+let activeTag: string | null = null;
 let currentFilter = "all"; // 'all' | 'media' | 'text'
 let currentSort = "newest"; // 'newest' | 'oldest'
-let activeDetailItem = null;
+let activeDetailItem: Bookmark | null = null;
 let selectedEmoji = "📁";
 
 const { ICONS, createAvatarFallback, formatDate } = NookShared;
 
 // DOM Elements
-const sidebar = document.getElementById("sidebar");
-const sidebarToggleBtn = document.getElementById("sidebar-toggle-btn");
-const cardsContainer = document.getElementById("cards-container");
-const emptyState = document.getElementById("empty-state");
-const emptyTitle = document.getElementById("empty-title");
-const emptyDesc = document.getElementById("empty-desc");
-const currentViewTitle = document.getElementById("current-view-title");
-const btnClearFilter = document.getElementById("btn-clear-filter");
+const sidebar = byId("sidebar");
+const sidebarToggleBtn = byId("sidebar-toggle-btn");
+const cardsContainer = byId("cards-container");
+const emptyState = byId("empty-state");
+const emptyTitle = byId("empty-title");
+const emptyDesc = byId("empty-desc");
+const currentViewTitle = byId("current-view-title");
+const btnClearFilter = byId("btn-clear-filter");
 
-const searchInput = document.getElementById("search-input");
-const searchClearBtn = document.getElementById("search-clear");
-const sortSelect = document.getElementById("sort-select");
-const filterTabs = document.querySelectorAll(".filter-tab");
-const totalCountBadge = document.getElementById("total-count-badge");
-const countAllSpan = document.getElementById("count-all");
-const countMediaSpan = document.getElementById("count-media");
-const countTextSpan = document.getElementById("count-text");
-const navCountAll = document.getElementById("nav-count-all");
-const navCountX = document.getElementById("nav-count-x");
-const navCountChrome = document.getElementById("nav-count-chrome");
-const navCountUnorganized = document.getElementById("nav-count-unorganized");
-const listsNav = document.getElementById("lists-nav");
-const tagsNav = document.getElementById("tags-nav");
-const btnNewList = document.getElementById("btn-new-list");
+const searchInput = byId("search-input");
+const searchClearBtn = byId("search-clear");
+const sortSelect = byId("sort-select");
+const filterTabs = queryAll(".filter-tab");
+const totalCountBadge = byId("total-count-badge");
+const countAllSpan = byId("count-all");
+const countMediaSpan = byId("count-media");
+const countTextSpan = byId("count-text");
+const navCountAll = byId("nav-count-all");
+const navCountX = byId("nav-count-x");
+const navCountChrome = byId("nav-count-chrome");
+const navCountUnorganized = byId("nav-count-unorganized");
+const listsNav = byId("lists-nav");
+const tagsNav = byId("tags-nav");
+const btnNewList = byId("btn-new-list");
 
-const btnImport = document.getElementById("btn-import");
-const importFileInput = document.getElementById("import-file-input");
-const btnExport = document.getElementById("btn-export");
-const btnClearAll = document.getElementById("btn-clear-all");
-const dragDropOverlay = document.getElementById("drag-drop-overlay");
+const btnImport = byId("btn-import");
+const importFileInput = byId("import-file-input");
+const btnExport = byId("btn-export");
+const btnClearAll = byId("btn-clear-all");
+const dragDropOverlay = byId("drag-drop-overlay");
 
 // Detail Modal Elements
-const detailModal = document.getElementById("detail-modal");
-const modalAuthorInfo = document.getElementById("modal-author-info");
-const detailModalClose = document.getElementById("detail-modal-close");
-const modalTweetText = document.getElementById("modal-tweet-text");
-const modalMediaGallery = document.getElementById("modal-media-gallery");
-const modalQuote = document.getElementById("modal-quote");
-const modalListSelect = document.getElementById("modal-list-select");
-const modalTagsList = document.getElementById("modal-tags-list");
-const modalTagInput = document.getElementById("modal-tag-input");
-const modalSuggestedTags = document.getElementById("modal-suggested-tags");
-const modalTweetDate = document.getElementById("modal-tweet-date");
-const modalSavedDate = document.getElementById("modal-saved-date");
-const modalTweetUrl = document.getElementById("modal-tweet-url");
-const modalBtnOpenX = document.getElementById("modal-btn-open-x");
-const modalBtnCopyText = document.getElementById("modal-btn-copy-text");
-const modalBtnCopyUrl = document.getElementById("modal-btn-copy-url");
-const modalBtnDelete = document.getElementById("modal-btn-delete");
+const detailModal = byId("detail-modal");
+const modalAuthorInfo = byId("modal-author-info");
+const detailModalClose = byId("detail-modal-close");
+const modalTweetText = byId("modal-tweet-text");
+const modalMediaGallery = byId("modal-media-gallery");
+const modalQuote = byId("modal-quote");
+const modalListSelect = byId("modal-list-select");
+const modalTagsList = byId("modal-tags-list");
+const modalTagInput = byId("modal-tag-input");
+const modalSuggestedTags = byId("modal-suggested-tags");
+const modalTweetDate = byId("modal-tweet-date");
+const modalSavedDate = byId("modal-saved-date");
+const modalTweetUrl = byId("modal-tweet-url");
+const modalBtnOpenX = byId("modal-btn-open-x");
+const modalBtnCopyText = byId("modal-btn-copy-text");
+const modalBtnCopyUrl = byId("modal-btn-copy-url");
+const modalBtnDelete = byId("modal-btn-delete");
+const modalNoteInput = byId("modal-note-input");
+const modalNoteSave = byId("modal-note-save");
+const modalNoteStatus = byId("modal-note-status");
 
 // New List Modal Elements
-const listModal = document.getElementById("list-modal");
-const listModalClose = document.getElementById("list-modal-close");
-const listModalCancel = document.getElementById("list-modal-cancel");
-const listModalSave = document.getElementById("list-modal-save");
-const listNameInput = document.getElementById("list-name-input");
-const emojiPicker = document.getElementById("emoji-picker");
+const listModal = byId("list-modal");
+const listModalClose = byId("list-modal-close");
+const listModalCancel = byId("list-modal-cancel");
+const listModalSave = byId("list-modal-save");
+const listNameInput = byId("list-name-input");
+const emojiPicker = byId("emoji-picker");
 
 // Lightbox Elements
-const lightbox = document.getElementById("lightbox");
-const lightboxImg = document.getElementById("lightbox-img");
-const lightboxClose = document.getElementById("lightbox-close");
-const toast = document.getElementById("toast");
+const lightbox = byId("lightbox");
+const lightboxImg = byId("lightbox-img");
+const lightboxClose = byId("lightbox-close");
+const toast = byId("toast");
 
 // Initialize
 document.addEventListener("DOMContentLoaded", () => {
@@ -92,7 +105,7 @@ function setupEventListeners() {
 
   // Search input
   searchInput.addEventListener("input", (e) => {
-    searchQuery = e.target.value.trim().toLowerCase();
+    searchQuery = (e.target as HTMLInputElement).value.trim().toLowerCase();
     searchClearBtn.classList.toggle("hidden", !searchQuery);
     renderGrid();
   });
@@ -124,9 +137,9 @@ function setupEventListeners() {
   });
 
   // Navigation Items (All & Unorganized)
-  document.querySelectorAll(".nav-item[data-nav]").forEach((item) => {
+  queryAll(".nav-item[data-nav]").forEach((item) => {
     item.addEventListener("click", () => {
-      const nav = item.dataset.nav;
+      const nav = item.dataset.nav ?? null;
       setActiveNavigation(nav, null, null);
     });
   });
@@ -141,14 +154,14 @@ function setupEventListeners() {
     tab.addEventListener("click", () => {
       filterTabs.forEach((t) => t.classList.remove("active"));
       tab.classList.add("active");
-      currentFilter = tab.dataset.filter;
+      currentFilter = tab.dataset.filter ?? "all";
       renderGrid();
     });
   });
 
   // Sort dropdown
   sortSelect.addEventListener("change", (e) => {
-    currentSort = e.target.value;
+    currentSort = (e.target as HTMLSelectElement).value;
     renderGrid();
   });
 
@@ -159,11 +172,11 @@ function setupEventListeners() {
   listModalSave.addEventListener("click", handleSaveNewList);
 
   // Emoji picker chips
-  emojiPicker.querySelectorAll(".emoji-chip").forEach((chip) => {
+  emojiPicker.querySelectorAll<HTMLElement>(".emoji-chip").forEach((chip) => {
     chip.addEventListener("click", () => {
       emojiPicker.querySelectorAll(".emoji-chip").forEach((c) => c.classList.remove("active"));
       chip.classList.add("active");
-      selectedEmoji = chip.dataset.emoji;
+      selectedEmoji = chip.dataset.emoji ?? "📁";
     });
   });
 
@@ -181,7 +194,7 @@ function setupEventListeners() {
   });
 
   importFileInput.addEventListener("change", (e) => {
-    const file = e.target.files?.[0];
+    const file = (e.target as HTMLInputElement).files?.[0];
     if (file) handleFileImport(file);
     importFileInput.value = "";
   });
@@ -226,15 +239,15 @@ function setupEventListeners() {
   // write posts on this channel; debounce so a burst of writes (an import,
   // a sync batch) triggers one reload instead of many.
   const dbChannel = new BroadcastChannel("nook-db");
-  let reloadDebounceTimer = null;
+  let reloadDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   dbChannel.addEventListener("message", (e) => {
     if (e.data?.type !== "changed") return;
-    clearTimeout(reloadDebounceTimer);
+    if (reloadDebounceTimer !== null) clearTimeout(reloadDebounceTimer);
     reloadDebounceTimer = setTimeout(reloadFromDB, 150);
   });
 }
 
-function hasFiles(e) {
+function hasFiles(e: DragEvent) {
   return e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files");
 }
 
@@ -261,7 +274,7 @@ async function reloadFromDB() {
 }
 
 // Navigation / Filter state changer
-function setActiveNavigation(nav, listId, tag) {
+function setActiveNavigation(nav: string | null, listId: string | null, tag: string | null) {
   currentNav = nav;
   activeListId = listId;
   activeTag = tag;
@@ -270,33 +283,33 @@ function setActiveNavigation(nav, listId, tag) {
   sidebar.classList.remove("open");
 
   // Update active state in UI
-  document.querySelectorAll(".nav-item").forEach((el) => el.classList.remove("active"));
-  document.querySelectorAll(".tag-pill").forEach((el) => el.classList.remove("active"));
+  queryAll(".nav-item").forEach((el) => el.classList.remove("active"));
+  queryAll(".tag-pill").forEach((el) => el.classList.remove("active"));
 
   if (nav === "all") {
-    document.querySelector('.nav-item[data-nav="all"]')?.classList.add("active");
+    queryOne('.nav-item[data-nav="all"]')?.classList.add("active");
     currentViewTitle.textContent = "All Bookmarks";
     btnClearFilter.classList.add("hidden");
   } else if (nav === "x") {
-    document.querySelector('.nav-item[data-nav="x"]')?.classList.add("active");
+    queryOne('.nav-item[data-nav="x"]')?.classList.add("active");
     currentViewTitle.textContent = "X / Twitter Bookmarks";
     btnClearFilter.classList.remove("hidden");
   } else if (nav === "chrome") {
-    document.querySelector('.nav-item[data-nav="chrome"]')?.classList.add("active");
+    queryOne('.nav-item[data-nav="chrome"]')?.classList.add("active");
     currentViewTitle.textContent = "Web Page Bookmarks";
     btnClearFilter.classList.remove("hidden");
   } else if (nav === "unorganized") {
-    document.querySelector('.nav-item[data-nav="unorganized"]')?.classList.add("active");
+    queryOne('.nav-item[data-nav="unorganized"]')?.classList.add("active");
     currentViewTitle.textContent = "Unorganized Bookmarks";
     btnClearFilter.classList.remove("hidden");
   } else if (listId) {
-    const listEl = document.querySelector(`.nav-item[data-list-id="${listId}"]`);
+    const listEl = queryOne(`.nav-item[data-list-id="${listId}"]`);
     listEl?.classList.add("active");
     const list = allLists.find((l) => l.id === listId);
     currentViewTitle.textContent = list ? `${list.icon || "📁"} ${list.name}` : "List";
     btnClearFilter.classList.remove("hidden");
   } else if (tag) {
-    const tagEl = document.querySelector(`.tag-pill[data-tag="${tag}"]`);
+    const tagEl = queryOne(`.tag-pill[data-tag="${tag}"]`);
     tagEl?.classList.add("active");
     currentViewTitle.textContent = `#${tag}`;
     btnClearFilter.classList.remove("hidden");
@@ -347,7 +360,7 @@ function updateSidebar() {
 
       const countSpan = document.createElement("span");
       countSpan.className = "nav-count";
-      countSpan.textContent = count;
+      countSpan.textContent = String(count);
 
       const delBtn = document.createElement("button");
       delBtn.className = "list-delete-btn";
@@ -421,14 +434,14 @@ function updateSidebar() {
 }
 
 // Extract media array safely
-function getMediaList(item) {
+function getMediaList(item: Bookmark): Media[] {
   if (Array.isArray(item.media) && item.media.length > 0) return item.media;
   if (Array.isArray(item.attachments) && item.attachments.length > 0) return item.attachments;
   return [];
 }
 
 // Media on the item itself or inside its quoted tweet
-function hasAnyMedia(item) {
+function hasAnyMedia(item: Bookmark) {
   return getMediaList(item).length > 0 || (item.quote?.media?.length || 0) > 0;
 }
 
@@ -458,7 +471,7 @@ function getFilteredAndSortedItems() {
 
     // 4. Search query
     if (searchQuery) {
-      const text = [item.description, item.quote?.text, item.quote?.creator?.name, item.quote?.creator?.handle]
+      const text = [item.description, item.note, item.quote?.text, item.quote?.creator?.name, item.quote?.creator?.handle]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -480,6 +493,19 @@ function getFilteredAndSortedItems() {
 
   // Sort
   filtered.sort((a, b) => {
+    if (a.source === "x" && b.source === "x" && a.xSortIndex && b.xSortIndex) {
+      try {
+        const indexA = BigInt(a.xSortIndex);
+        const indexB = BigInt(b.xSortIndex);
+        if (indexA !== indexB) {
+          return currentSort === "newest"
+            ? indexA > indexB ? -1 : 1
+            : indexA < indexB ? -1 : 1;
+        }
+      } catch {
+        // Fall back to savedAt for unexpected sort index formats.
+      }
+    }
     const timeA = new Date(a.savedAt || a.createdAt || 0).getTime();
     const timeB = new Date(b.savedAt || b.createdAt || 0).getTime();
     return currentSort === "newest" ? timeB - timeA : timeA - timeB;
@@ -521,7 +547,7 @@ function renderGrid() {
 }
 
 // Create single bookmark card element
-function createBookmarkCard(item) {
+function createBookmarkCard(item: Bookmark) {
   const card = document.createElement("article");
   card.className = "bookmark-card";
   card.dataset.id = item.id;
@@ -529,13 +555,13 @@ function createBookmarkCard(item) {
   // Clicking card anywhere opens Detail Modal
   card.addEventListener("click", (e) => {
     if (
-      e.target.closest(".action-btn") ||
-      e.target.closest(".btn-card-open") ||
-      e.target.closest(".media-thumb") ||
-      e.target.closest(".media-single") ||
-      e.target.closest(".card-list-badge") ||
-      e.target.closest("a.quote-card") ||
-      e.target.closest(".card-tag-pill")
+      (e.target as Element).closest(".action-btn") ||
+      (e.target as Element).closest(".btn-card-open") ||
+      (e.target as Element).closest(".media-thumb") ||
+      (e.target as Element).closest(".media-single") ||
+      (e.target as Element).closest(".card-list-badge") ||
+      (e.target as Element).closest("a.quote-card") ||
+      (e.target as Element).closest(".card-tag-pill")
     ) {
       return;
     }
@@ -657,6 +683,13 @@ function createBookmarkCard(item) {
     card.appendChild(body);
   }
 
+  if (item.note?.trim()) {
+    const note = document.createElement("div");
+    note.className = "card-note-preview";
+    note.textContent = item.note;
+    card.appendChild(note);
+  }
+
   // 4. Media Gallery
   if (mediaList.length > 0) {
     const mediaContainer = createMediaGallery(mediaList);
@@ -732,9 +765,9 @@ function createBookmarkCard(item) {
 }
 
 // Quoted tweet shown inside a bookmark card / detail modal, like X renders it
-function createQuoteCard(quote) {
+function createQuoteCard(quote: Quote) {
   const creator = quote.creator || {};
-  const box = document.createElement(quote.url ? "a" : "div");
+  const box = document.createElement(quote.url ? "a" : "div") as HTMLAnchorElement;
   box.className = "quote-card";
   if (quote.url) {
     box.href = quote.url;
@@ -795,7 +828,7 @@ function createQuoteCard(quote) {
 }
 
 // Media Gallery Component
-function createMediaGallery(mediaList) {
+function createMediaGallery(mediaList: Media[]) {
   const container = document.createElement("div");
   container.className = "card-media";
 
@@ -861,7 +894,7 @@ function createMediaGallery(mediaList) {
 // Format Tweet Text — safe DOM-based version
 // Uses createElement instead of innerHTML/regex-replace;
 // no quote-injection / href-breakout risk.
-function formatTweetText(text) {
+function formatTweetText(text: string) {
   if (!text) return document.createElement("span");
 
   // Combined tokenizer: splits URLs and @mentions
@@ -924,7 +957,7 @@ function formatTweetText(text) {
 }
 
 // Open Detail Modal
-function openDetailModal(item) {
+function openDetailModal(item: Bookmark) {
   activeDetailItem = item;
   const creator = item.creator || {};
 
@@ -958,6 +991,28 @@ function openDetailModal(item) {
 
   // Setup Text
   modalTweetText.replaceChildren(formatTweetText(item.description || "No text content"));
+
+  modalNoteInput.value = item.note || "";
+  modalNoteStatus.textContent = "";
+  modalNoteSave.disabled = false;
+  modalNoteSave.textContent = "Save note";
+  modalNoteSave.onclick = async () => {
+    modalNoteSave.disabled = true;
+    modalNoteSave.textContent = "Saving…";
+    item.note = modalNoteInput.value.trim();
+    try {
+      await saveUpdatedItem(item);
+      renderGrid();
+      modalNoteStatus.textContent = "Saved";
+      modalNoteSave.textContent = "Saved";
+      setTimeout(() => { if (modalNoteSave.textContent === "Saved") modalNoteSave.textContent = "Save note"; }, 1300);
+    } catch (error) {
+      modalNoteStatus.textContent = "Could not save. Try again.";
+      modalNoteSave.textContent = "Save note";
+    } finally {
+      modalNoteSave.disabled = false;
+    }
+  };
 
   // Setup Media
   modalMediaGallery.replaceChildren();
@@ -1068,11 +1123,12 @@ function openDetailModal(item) {
   document.body.style.overflow = "hidden";
 }
 
-function renderModalTags(item) {
+function renderModalTags(item: Bookmark) {
+  const tags = item.tags ?? (item.tags = []);
   modalTagsList.replaceChildren();
   if (!Array.isArray(item.tags)) item.tags = [];
 
-  item.tags.forEach((tag) => {
+  tags.forEach((tag) => {
     const clean = tag.replace(/^#/, "");
     const chip = document.createElement("span");
     chip.className = "modal-tag-chip";
@@ -1089,7 +1145,7 @@ function renderModalTags(item) {
       </svg>
     `;
     rmBtn.onclick = async () => {
-      item.tags = item.tags.filter((t) => t.replace(/^#/, "").toLowerCase() !== clean.toLowerCase());
+      item.tags = (item.tags ?? []).filter((t) => t.replace(/^#/, "").toLowerCase() !== clean.toLowerCase());
       await saveUpdatedItem(item);
       renderModalTags(item);
       updateSidebar();
@@ -1106,8 +1162,9 @@ function renderModalTags(item) {
     if (e.key === "Enter" || e.key === ",") {
       e.preventDefault();
       const val = modalTagInput.value.trim().toLowerCase().replace(/^#/, "");
-      if (val && !item.tags.map((t) => t.toLowerCase().replace(/^#/, "")).includes(val)) {
-        item.tags.push(val);
+      const currentTags = item.tags ?? (item.tags = []);
+      if (val && !currentTags.map((t) => t.toLowerCase().replace(/^#/, "")).includes(val)) {
+        currentTags.push(val);
         await saveUpdatedItem(item);
         renderModalTags(item);
         updateSidebar();
@@ -1119,12 +1176,12 @@ function renderModalTags(item) {
 
   // Suggested Tags (system tags not already added)
   modalSuggestedTags.replaceChildren();
-  const allSystemTags = new Set();
+  const allSystemTags = new Set<string>();
   allItems.forEach((i) => {
     (i.tags || []).forEach((t) => allSystemTags.add(t.replace(/^#/, "").toLowerCase()));
   });
 
-  const currentItemTags = item.tags.map((t) => t.replace(/^#/, "").toLowerCase());
+  const currentItemTags = tags.map((t) => t.replace(/^#/, "").toLowerCase());
   const suggestions = Array.from(allSystemTags).filter((t) => !currentItemTags.includes(t));
 
   if (suggestions.length > 0) {
@@ -1134,7 +1191,7 @@ function renderModalTags(item) {
       btn.className = "suggested-tag-btn";
       btn.textContent = `+ #${st}`;
       btn.onclick = async () => {
-        item.tags.push(st);
+        (item.tags ?? (item.tags = [])).push(st);
         await saveUpdatedItem(item);
         renderModalTags(item);
         updateSidebar();
@@ -1152,7 +1209,7 @@ function closeDetailModal() {
 }
 
 // Lightbox modal controls
-function openLightbox(url) {
+function openLightbox(url: string) {
   lightboxImg.src = url;
   lightbox.classList.remove("hidden");
   document.body.style.overflow = "hidden";
@@ -1168,7 +1225,7 @@ function closeLightbox() {
 
 // Save an item that has updated tags or listId — writes only this one
 // record to IndexedDB, not the whole in-memory array.
-async function saveUpdatedItem(item) {
+async function saveUpdatedItem(item: Bookmark) {
   const saved = await NookDB.putBookmark(item);
   const idx = allItems.findIndex((i) => i.id === saved.id);
   if (idx >= 0) allItems[idx] = saved;
@@ -1178,7 +1235,7 @@ async function saveUpdatedItem(item) {
 function openListModal() {
   selectedEmoji = "📁";
   listNameInput.value = "";
-  emojiPicker.querySelectorAll(".emoji-chip").forEach((c) => {
+  emojiPicker.querySelectorAll<HTMLElement>(".emoji-chip").forEach((c) => {
     c.classList.toggle("active", c.dataset.emoji === "📁");
   });
   listModal.classList.remove("hidden");
@@ -1211,7 +1268,7 @@ async function handleSaveNewList() {
   showToast(`Created list "${newList.name}" ✓`);
 }
 
-async function confirmDeleteList(listId, listName) {
+async function confirmDeleteList(listId: string, listName: string) {
   const confirmed = window.confirm(
     `Are you sure you want to delete the list "${listName}"? Bookmarks in this list will NOT be deleted, they will simply become unorganized.`
   );
@@ -1234,7 +1291,7 @@ async function confirmDeleteList(listId, listName) {
 }
 
 // Delete Bookmark (soft delete — the record stays as a tombstone in IndexedDB)
-async function deleteBookmark(id) {
+async function deleteBookmark(id: string) {
   try {
     await NookDB.softDeleteBookmark(id);
 
@@ -1296,7 +1353,7 @@ function exportBookmarks() {
 }
 
 // Handle JSON File Import (both legacy array and { items, lists })
-function handleFileImport(file) {
+function handleFileImport(file: File) {
   if (!file.name.endsWith(".json")) {
     showToast("Please select a valid .json file");
     return;
@@ -1305,8 +1362,8 @@ function handleFileImport(file) {
   const reader = new FileReader();
   reader.onload = async (e) => {
     try {
-      const content = e.target?.result;
-      const parsed = JSON.parse(content);
+      const content = (e.target as FileReader | null)?.result;
+      const parsed = JSON.parse(String(content ?? "")) as { items?: Bookmark[]; lists?: BookmarkList[] } | Bookmark[];
 
       const incomingItems = Array.isArray(parsed)
         ? parsed
@@ -1314,7 +1371,7 @@ function handleFileImport(file) {
         ? parsed.items
         : [];
 
-      const incomingLists = Array.isArray(parsed.lists) ? parsed.lists : [];
+      const incomingLists = !Array.isArray(parsed) && Array.isArray(parsed.lists) ? parsed.lists : [];
 
       if (incomingItems.length === 0 && incomingLists.length === 0) {
         showToast("No bookmarks or lists found in file");
@@ -1344,7 +1401,7 @@ function handleFileImport(file) {
       showToast(`Imported ${incomingItems.length} bookmarks (${newItemCount} new) & ${incomingLists.length} lists ✓`);
     } catch (err) {
       console.error("[Nook] Import error:", err);
-      showToast("Invalid JSON file: " + err.message);
+      showToast("Invalid JSON file: " + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -1352,8 +1409,8 @@ function handleFileImport(file) {
 }
 
 // Toast notification helper
-let toastTimeout;
-function showToast(message) {
+let toastTimeout: ReturnType<typeof setTimeout> | undefined;
+function showToast(message: string) {
   toast.textContent = message;
   toast.classList.remove("hidden");
 

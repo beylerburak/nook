@@ -1,10 +1,15 @@
-(function () {
+export default defineContentScript({
+  matches: ["https://x.com/*", "https://twitter.com/*"],
+  runAt: "document_start",
+  world: "MAIN",
+  main() {
   console.log("[Nook Inject] Interceptor running in MAIN world");
 
   const originalFetch = window.fetch;
 
   window.fetch = async function (...args) {
-    const url = typeof args[0] === "string" ? args[0] : args[0]?.url;
+    const input = args[0];
+    const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.href;
 
     if (url && url.includes("/i/api/graphql/") && url.includes("Bookmarks")) {
       const queryIdMatch = url.match(/\/i\/api\/graphql\/([^/?]+)\/Bookmarks/);
@@ -31,12 +36,12 @@
   const originalOpen = XMLHttpRequest.prototype.open;
   const originalSend = XMLHttpRequest.prototype.send;
 
-  XMLHttpRequest.prototype.open = function (method, url) {
-    this._nookUrl = url;
-    return originalOpen.apply(this, arguments);
+  XMLHttpRequest.prototype.open = function (method: string, url: string | URL, async: boolean = true, username?: string | null, password?: string | null) {
+    this._nookUrl = String(url);
+    return originalOpen.call(this, method, url, async, username, password);
   };
 
-  XMLHttpRequest.prototype.send = function () {
+  XMLHttpRequest.prototype.send = function (body?: Document | XMLHttpRequestBodyInit | null) {
     this.addEventListener("load", function () {
       const u = this._nookUrl;
       if (u && u.includes("/i/api/graphql/") && u.includes("Bookmarks")) {
@@ -51,6 +56,8 @@
         } catch (e) {}
       }
     });
-    return originalSend.apply(this, arguments);
+    return originalSend.call(this, body);
   };
-})();
+  }
+});
+import { defineContentScript } from "wxt/utils/define-content-script";

@@ -2,12 +2,10 @@
 // same way it runs inside a chrome-extension page. Each test resets to a
 // fresh, uniquely-named database via NookDB._resetForTests() so no state
 // leaks between tests.
-require("fake-indexeddb/auto");
-
-const test = require("node:test");
-const assert = require("node:assert/strict");
-
-const NookDB = require("../apps/extension/db.js");
+import "fake-indexeddb/auto";
+import { test, vi } from "vitest";
+import assert from "node:assert/strict";
+import * as NookDB from "../lib/db";
 
 function freshDb() {
   NookDB._resetForTests();
@@ -24,6 +22,7 @@ test("putBookmark / getBookmark round-trip and sets updatedAt", async () => {
   assert.ok(new Date(saved.updatedAt).getTime() >= before);
 
   const fetched = await NookDB.getBookmark("x:1");
+  assert.ok(fetched);
   assert.equal(fetched.title, "Hello");
   assert.equal(fetched.deletedAt, null);
 });
@@ -33,6 +32,7 @@ test("updateBookmark refreshes updatedAt on every write", async () => {
   const first = await NookDB.putBookmark({ id: "x:1", source: "x", title: "A" });
   await new Promise((r) => setTimeout(r, 5));
   const second = await NookDB.updateBookmark("x:1", { title: "B" });
+  assert.ok(second);
 
   assert.equal(second.title, "B");
   assert.notEqual(second.updatedAt, first.updatedAt);
@@ -84,10 +84,12 @@ test("softDeleteList clears listId/listName on its bookmarks in the same transac
   assert.equal(lists.length, 0);
 
   const item1 = await NookDB.getBookmark("x:1");
+  assert.ok(item1);
   assert.equal(item1.listId, null);
   assert.equal(item1.listName, null);
 
   const item2 = await NookDB.getBookmark("x:2");
+  assert.ok(item2);
   assert.equal(item2.listId, "l2");
 });
 
@@ -97,14 +99,15 @@ test("mergeBatch adds new items, updates changed content, ignores unchanged, and
     id: "x:1",
     source: "x",
     title: "old title",
-    quote: null
+    quote: null,
+    media: [{ type: "image", url: "https://pbs.twimg.com/media/saved.jpg" }]
   });
   await NookDB.putBookmark({ id: "x:2", source: "x", title: "unchanged" });
   await NookDB.putBookmark({ id: "x:3", source: "x", title: "deleted one" });
   await NookDB.softDeleteBookmark("x:3");
 
   const incoming = [
-    { id: "x:1", source: "x", title: "old title", quote: { text: "a quote now" } },
+    { id: "x:1", source: "x", title: "old title", quote: { text: "a quote now" }, media: [], xSortIndex: "1726918753000" },
     { id: "x:2", source: "x", title: "unchanged" },
     { id: "x:3", source: "x", title: "deleted one - should not resurrect" },
     { id: "x:4", source: "x", title: "brand new" }
@@ -116,9 +119,14 @@ test("mergeBatch adds new items, updates changed content, ignores unchanged, and
   assert.deepEqual(updated.map((i) => i.id), ["x:1"]);
 
   const item1 = await NookDB.getBookmark("x:1");
+  assert.ok(item1);
+  assert.ok(item1.quote);
   assert.equal(item1.quote.text, "a quote now");
+  assert.equal(item1.media?.[0]?.url, "https://pbs.twimg.com/media/saved.jpg", "an empty X parse must preserve previously saved media");
+  assert.equal(item1.xSortIndex, "1726918753000");
 
   const item3 = await NookDB.getBookmark("x:3");
+  assert.ok(item3);
   assert.ok(item3.deletedAt, "soft-deleted item must stay deleted, not be resurrected");
 
   const visible = await NookDB.getAllBookmarks();
@@ -148,17 +156,17 @@ test("findBookmarkByUrl ignores deleted bookmarks", async () => {
 test("migrateFromChromeStorage imports legacy items/lists and is idempotent", async () => {
   freshDb();
 
-  const legacyItems = [
+  const legacyItems: Array<{ id: string; source: string; title: string; savedAt?: string; url?: string }> = [
     { id: "x:1", source: "x", title: "Legacy tweet", savedAt: "2024-01-01T00:00:00.000Z" },
     { id: "chrome:1", source: "chrome", title: "Legacy page", url: "https://example.com" }
   ];
   const legacyLists = [{ id: "l1", name: "Reading", icon: "📚" }];
 
-  global.chrome = {
+  vi.stubGlobal("chrome", {
     storage: {
       local: {
-        get: async (keys) => {
-          const result = {};
+        get: async (keys: string | string[]) => {
+          const result: { items?: typeof legacyItems; lists?: typeof legacyLists } = {};
           const wanted = Array.isArray(keys) ? keys : [keys];
           if (wanted.includes("items")) result.items = legacyItems;
           if (wanted.includes("lists")) result.lists = legacyLists;
@@ -166,16 +174,18 @@ test("migrateFromChromeStorage imports legacy items/lists and is idempotent", as
         }
       }
     }
-  };
+  });
 
   try {
     const result = await NookDB.migrateFromChromeStorage();
+    assert.ok(result);
     assert.equal(result.itemCount, 2);
     assert.equal(result.listCount, 1);
 
     const bookmarks = await NookDB.getAllBookmarks();
     assert.equal(bookmarks.length, 2);
     const legacyTweet = bookmarks.find((i) => i.id === "x:1");
+    assert.ok(legacyTweet);
     assert.equal(legacyTweet.updatedAt, "2024-01-01T00:00:00.000Z");
 
     const lists = await NookDB.getAllLists();
@@ -185,11 +195,12 @@ test("migrateFromChromeStorage imports legacy items/lists and is idempotent", as
     // extra legacy item to chrome.storage.local and confirm it's ignored.
     legacyItems.push({ id: "x:2", source: "x", title: "Should not be imported" });
     const secondResult = await NookDB.migrateFromChromeStorage();
+    assert.ok(secondResult);
     assert.equal(secondResult.itemCount, 2); // returns the original stored result
     const bookmarksAfter = await NookDB.getAllBookmarks();
     assert.equal(bookmarksAfter.length, 2);
     assert.ok(!bookmarksAfter.some((i) => i.id === "x:2"));
   } finally {
-    delete global.chrome;
+    vi.unstubAllGlobals();
   }
 });

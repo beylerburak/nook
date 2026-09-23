@@ -1,3 +1,17 @@
+import type { XApiNode, XApiResponse } from "./types";
+
+type XRecord = XApiNode & Record<string, any>;
+interface ParseDiagnostic {
+  valid: boolean;
+  timelineKey: string | null;
+  entryCount: number;
+  tweetEntryCount: number;
+  tweetCount: number;
+  hasBottomCursor: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
 /**
  * Nook X Parser Module
  *
@@ -6,22 +20,15 @@
  * in Chrome Extension (via globalThis.NookXParser in content scripts).
  */
 
-(function (root, factory) {
-  if (typeof module === "object" && typeof module.exports === "object") {
-    module.exports = factory();
-  } else {
-    root.NookXParser = factory();
-  }
-})(typeof globalThis !== "undefined" ? globalThis : this, function () {
-  "use strict";
+
 
   /**
    * Unwraps TweetWithVisibilityResults wrapper when present.
    * X often wraps protected or moderated tweets with this type.
    */
-  function unwrapTweetResult(result) {
+  function unwrapTweetResult(result: XRecord | null | undefined): XRecord | null {
     if (!result) return null;
-    return result.__typename === "TweetWithVisibilityResults" ? result.tweet : result;
+    return result.__typename === "TweetWithVisibilityResults" ? result.tweet ?? null : result;
   }
 
   /**
@@ -30,7 +37,7 @@
    * 2. Falls back to legacy full_text sliced by display_text_range (stripping trailing media t.co links).
    * 3. Unescapes HTML entities (&amp;, &lt;, &gt;).
    */
-  function cleanTweetText(tweet) {
+  function cleanTweetText(tweet: XRecord | null | undefined): string {
     if (!tweet) return "";
     let text = tweet.note_tweet?.note_tweet_results?.result?.text || "";
 
@@ -52,8 +59,8 @@
   /**
    * Parses media items from tweet entities / extended_entities
    */
-  function parseTweetMedia(legacy) {
-    const media = [];
+  function parseTweetMedia(legacy: XRecord | null | undefined): Array<{ type: "image" | "video"; url: string; alt: string }> {
+    const media: Array<{ type: "image" | "video"; url: string; alt: string }> = [];
     if (!legacy) return media;
 
     const mediaEntities = legacy.extended_entities?.media || legacy.entities?.media || [];
@@ -80,7 +87,7 @@
   /**
    * Parses a single GraphQL tweet result (used for both bookmarked and quoted tweets).
    */
-  function parseGraphQLTweet(result) {
+  function parseGraphQLTweet(result: XRecord | null | undefined): XRecord | null {
     const tweet = unwrapTweetResult(result);
     if (!tweet?.legacy) return null;
 
@@ -116,7 +123,8 @@
   /**
    * Extracts bottom cursor from GraphQL timeline response for pagination.
    */
-  function extractBottomCursor(data) {
+  function extractBottomCursor(input: unknown): string | null {
+    const data = input as XApiResponse | XRecord | null | undefined;
     try {
       const timeline =
         data?.data?.bookmark_timeline_v2?.timeline ||
@@ -150,8 +158,9 @@
   /**
    * Parses GraphQL Bookmarks API response into normalized Nook bookmark items.
    */
-  function parseGraphQLBookmarks(data) {
-    const parsedItems = [];
+  function parseGraphQLBookmarks(input: unknown): XRecord[] {
+    const data = input as XApiResponse | XRecord | null | undefined;
+    const parsedItems: XRecord[] = [];
     if (!data || typeof data !== "object") return parsedItems;
 
     try {
@@ -191,8 +200,9 @@
         parsedItems.push({
           id: `x:${tweet.statusId}`,
           source: "x",
-          title: `${tweet.creator.handle}: ${tweet.text.slice(0, 100)}`,
-          shortDescription: tweet.text.slice(0, 180),
+          xSortIndex: typeof entry.sortIndex === "string" ? entry.sortIndex : undefined,
+          title: `${tweet.creator.handle}: ${(tweet.text ?? "").slice(0, 100)}`,
+          shortDescription: (tweet.text ?? "").slice(0, 180),
           description: tweet.text,
           category: null,
           tags: [],
@@ -227,16 +237,17 @@
   /**
    * Diagnoses X GraphQL response to detect schema changes, API errors, or unexpected formats.
    */
-  function diagnoseGraphQLResponse(data) {
+  function diagnoseGraphQLResponse(input: unknown): ParseDiagnostic {
+    const data = input as XApiResponse | XRecord | null | undefined;
     const result = {
       valid: false,
-      timelineKey: null,
+      timelineKey: null as string | null,
       entryCount: 0,
       tweetEntryCount: 0,
       tweetCount: 0,
       hasBottomCursor: false,
-      errors: [],
-      warnings: []
+      errors: [] as string[],
+      warnings: [] as string[]
     };
 
     if (!data || typeof data !== "object") {
@@ -318,13 +329,12 @@
     return result;
   }
 
-  return {
-    unwrapTweetResult,
-    cleanTweetText,
-    parseTweetMedia,
-    parseGraphQLTweet,
-    extractBottomCursor,
-    parseGraphQLBookmarks,
-    diagnoseGraphQLResponse
-  };
-});
+export {
+  unwrapTweetResult,
+  cleanTweetText,
+  parseTweetMedia,
+  parseGraphQLTweet,
+  extractBottomCursor,
+  parseGraphQLBookmarks,
+  diagnoseGraphQLResponse
+};

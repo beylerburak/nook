@@ -3,3 +3,7 @@ node_modules/
 .DS_Store
 *.log
 /raw*.json
+*.pem
+apps/extension/.output/
+apps/extension/.wxt/
+apps/extension/web-ext-artifacts/

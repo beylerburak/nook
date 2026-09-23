@@ -21,14 +21,7 @@
  * shared global scope that other extension scripts run in.
  */
 
-(function (root, factory) {
-  if (typeof module === "object" && typeof module.exports === "object") {
-    module.exports = factory();
-  } else {
-    root.NookDB = factory();
-  }
-})(typeof globalThis !== "undefined" ? globalThis : this, function () {
-  "use strict";
+
 
   const DB_VERSION = 1;
   const STORE_BOOKMARKS = "bookmarks";
@@ -42,20 +35,20 @@
 
   // Memoized promises so open()/ready() only do their work once per context
   // (once per service worker lifetime, once per dashboard/popup page load).
-  let _dbPromise = null;
-  let _readyPromise = null;
+  let _dbPromise: Promise<IDBDatabase> | null = null;
+  let _readyPromise: Promise<unknown> | null = null;
 
   // -- small IndexedDB promise helpers ---------------------------------
 
-  function promisifyRequest(request) {
-    return new Promise((resolve, reject) => {
+  function promisifyRequest<T = any>(request: IDBRequest<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
   }
 
-  function promisifyTransaction(tx) {
-    return new Promise((resolve, reject) => {
+  function promisifyTransaction(tx: IDBTransaction): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error || new Error("Transaction aborted"));
@@ -68,14 +61,14 @@
 
   // -- open / schema -----------------------------------------------------
 
-  function open() {
+  function open(): Promise<IDBDatabase> {
     if (_dbPromise) return _dbPromise;
 
     _dbPromise = new Promise((resolve, reject) => {
       const request = indexedDB.open(_dbName, DB_VERSION);
 
-      request.onupgradeneeded = (event) => {
-        const db = event.target.result;
+      request.onupgradeneeded = () => {
+        const db = request.result;
 
         if (!db.objectStoreNames.contains(STORE_BOOKMARKS)) {
           const bookmarks = db.createObjectStore(STORE_BOOKMARKS, { keyPath: "id" });
@@ -109,7 +102,7 @@
   // so they can reload from the DB, instead of chrome.storage.onChanged
   // which only fired for whole-array chrome.storage.local writes. Guarded
   // because BroadcastChannel doesn't exist in the Node test environment.
-  function notifyChange(stores, ids) {
+  function notifyChange(stores: string[], ids: string[] = []) {
     if (typeof BroadcastChannel === "undefined") return;
     try {
       const channel = new BroadcastChannel("nook-db");
@@ -122,29 +115,29 @@
 
   // -- bookmarks -----------------------------------------------------------
 
-  async function getAllBookmarks({ includeDeleted = false } = {}) {
+  async function getAllBookmarks({ includeDeleted = false }: { includeDeleted?: boolean } = {}): Promise<Bookmark[]> {
     const db = await open();
     const tx = db.transaction(STORE_BOOKMARKS, "readonly");
-    const all = await promisifyRequest(tx.objectStore(STORE_BOOKMARKS).getAll());
+    const all = await promisifyRequest<Bookmark[]>(tx.objectStore(STORE_BOOKMARKS).getAll());
     return includeDeleted ? all : all.filter((item) => !item.deletedAt);
   }
 
-  async function getBookmark(id) {
+  async function getBookmark(id: string): Promise<Bookmark | undefined> {
     const db = await open();
     const tx = db.transaction(STORE_BOOKMARKS, "readonly");
-    return promisifyRequest(tx.objectStore(STORE_BOOKMARKS).get(id));
+    return promisifyRequest<Bookmark | undefined>(tx.objectStore(STORE_BOOKMARKS).get(id));
   }
 
   // Non-deleted only — used for dedupe on save, so a soft-deleted bookmark
   // never silently blocks re-saving the same URL.
-  async function findBookmarkByUrl(url) {
+  async function findBookmarkByUrl(url: string): Promise<Bookmark | null> {
     const db = await open();
     const tx = db.transaction(STORE_BOOKMARKS, "readonly");
-    const matches = await promisifyRequest(tx.objectStore(STORE_BOOKMARKS).index("url").getAll(url));
+    const matches = await promisifyRequest<Bookmark[]>(tx.objectStore(STORE_BOOKMARKS).index("url").getAll(url));
     return matches.find((item) => !item.deletedAt) || null;
   }
 
-  function withWriteDefaults(item) {
+  function withWriteDefaults<T extends Bookmark | BookmarkList>(item: T): T {
     return {
       ...item,
       updatedAt: nowIso(),
@@ -152,7 +145,7 @@
     };
   }
 
-  async function putBookmark(item) {
+  async function putBookmark(item: Bookmark): Promise<Bookmark> {
     const db = await open();
     const tx = db.transaction(STORE_BOOKMARKS, "readwrite");
     const record = withWriteDefaults(item);
@@ -162,7 +155,7 @@
     return record;
   }
 
-  async function putBookmarks(items) {
+  async function putBookmarks(items: Bookmark[]): Promise<Bookmark[]> {
     if (!Array.isArray(items) || items.length === 0) return [];
     const db = await open();
     const tx = db.transaction(STORE_BOOKMARKS, "readwrite");
@@ -176,11 +169,11 @@
     return records;
   }
 
-  async function updateBookmark(id, patch) {
+  async function updateBookmark(id: string, patch: Partial<Bookmark>): Promise<Bookmark | null> {
     const db = await open();
     const tx = db.transaction(STORE_BOOKMARKS, "readwrite");
     const store = tx.objectStore(STORE_BOOKMARKS);
-    const existing = await promisifyRequest(store.get(id));
+    const existing = await promisifyRequest<Bookmark | undefined>(store.get(id));
     if (!existing) {
       await promisifyTransaction(tx);
       return null;
@@ -192,15 +185,15 @@
     return record;
   }
 
-  async function softDeleteBookmark(id) {
+  async function softDeleteBookmark(id: string): Promise<Bookmark | null> {
     return updateBookmark(id, { deletedAt: nowIso() });
   }
 
-  async function softDeleteAllBookmarks() {
+  async function softDeleteAllBookmarks(): Promise<string[]> {
     const db = await open();
     const tx = db.transaction(STORE_BOOKMARKS, "readwrite");
     const store = tx.objectStore(STORE_BOOKMARKS);
-    const all = await promisifyRequest(store.getAll());
+    const all = await promisifyRequest<Bookmark[]>(store.getAll());
     const ts = nowIso();
     const ids = [];
     for (const item of all) {
@@ -215,14 +208,14 @@
 
   // -- lists -----------------------------------------------------------------
 
-  async function getAllLists({ includeDeleted = false } = {}) {
+  async function getAllLists({ includeDeleted = false }: { includeDeleted?: boolean } = {}): Promise<BookmarkList[]> {
     const db = await open();
     const tx = db.transaction(STORE_LISTS, "readonly");
-    const all = await promisifyRequest(tx.objectStore(STORE_LISTS).getAll());
+    const all = await promisifyRequest<BookmarkList[]>(tx.objectStore(STORE_LISTS).getAll());
     return includeDeleted ? all : all.filter((list) => !list.deletedAt);
   }
 
-  async function putList(list) {
+  async function putList(list: BookmarkList): Promise<BookmarkList> {
     const db = await open();
     const tx = db.transaction(STORE_LISTS, "readwrite");
     const record = withWriteDefaults(list);
@@ -235,19 +228,19 @@
   // Soft-deletes the list AND clears listId/listName on its bookmarks, in
   // the same transaction, so a crash/close between the two writes can never
   // leave bookmarks pointing at a list that no longer exists.
-  async function softDeleteList(id) {
+  async function softDeleteList(id: string): Promise<{ listId: string; clearedBookmarkIds: string[] }> {
     const db = await open();
     const tx = db.transaction([STORE_LISTS, STORE_BOOKMARKS], "readwrite");
     const listStore = tx.objectStore(STORE_LISTS);
     const bookmarkStore = tx.objectStore(STORE_BOOKMARKS);
     const ts = nowIso();
 
-    const existingList = await promisifyRequest(listStore.get(id));
+    const existingList = await promisifyRequest<BookmarkList | undefined>(listStore.get(id));
     if (existingList) {
       listStore.put({ ...existingList, deletedAt: ts, updatedAt: ts });
     }
 
-    const affected = await promisifyRequest(bookmarkStore.index("listId").getAll(id));
+    const affected = await promisifyRequest<Bookmark[]>(bookmarkStore.index("listId").getAll(id));
     const clearedIds = [];
     for (const item of affected) {
       bookmarkStore.put({ ...item, listId: null, listName: null, updatedAt: ts });
@@ -264,29 +257,29 @@
   // Returns everything (including tombstones) changed strictly after
   // `isoTimestamp`, so a future sync loop can call this repeatedly with the
   // last-seen timestamp and never re-fetch a record it already has.
-  async function getChangesSince(isoTimestamp) {
+  async function getChangesSince(isoTimestamp: string | null): Promise<{ bookmarks: Bookmark[]; lists: BookmarkList[] }> {
     const db = await open();
     const tx = db.transaction([STORE_BOOKMARKS, STORE_LISTS], "readonly");
     const range = isoTimestamp ? IDBKeyRange.lowerBound(isoTimestamp, true) : undefined;
 
-    const bookmarks = await promisifyRequest(
+    const bookmarks = await promisifyRequest<Bookmark[]>(
       tx.objectStore(STORE_BOOKMARKS).index("updatedAt").getAll(range)
     );
-    const lists = await promisifyRequest(
+    const lists = await promisifyRequest<BookmarkList[]>(
       tx.objectStore(STORE_LISTS).index("updatedAt").getAll(range)
     );
 
     return { bookmarks, lists };
   }
 
-  async function getMeta(key) {
+  async function getMeta<T = any>(key: string): Promise<T | undefined> {
     const db = await open();
     const tx = db.transaction(STORE_META, "readonly");
-    const record = await promisifyRequest(tx.objectStore(STORE_META).get(key));
+    const record = await promisifyRequest<{ key: string; value: T } | undefined>(tx.objectStore(STORE_META).get(key));
     return record ? record.value : undefined;
   }
 
-  async function setMeta(key, value) {
+  async function setMeta<T>(key: string, value: T): Promise<T> {
     const db = await open();
     const tx = db.transaction(STORE_META, "readwrite");
     tx.objectStore(STORE_META).put({ key, value });
@@ -303,7 +296,7 @@
   // A soft-deleted existing item is intentionally left alone — neither
   // added nor updated — so an X sync batch can never resurrect a bookmark
   // the user deliberately deleted.
-  async function mergeBatch(incomingItems, mergeFn) {
+  async function mergeBatch(incomingItems: Bookmark[], mergeFn: (existing: Bookmark, incoming: Bookmark) => Bookmark | null): Promise<{ added: Bookmark[]; updated: Bookmark[] }> {
     const db = await open();
     const tx = db.transaction(STORE_BOOKMARKS, "readwrite");
     const store = tx.objectStore(STORE_BOOKMARKS);
@@ -313,7 +306,7 @@
 
     for (const incoming of incomingItems || []) {
       if (!incoming || !incoming.id) continue;
-      const existing = await promisifyRequest(store.get(incoming.id));
+      const existing = await promisifyRequest<Bookmark | undefined>(store.get(incoming.id));
 
       if (!existing) {
         const record = withWriteDefaults(incoming);
@@ -344,17 +337,23 @@
   // have picked up (e.g. an older parser missed the quoted tweet or media).
   // Moved here from background.js so it's usable from mergeBatch and unit
   // testable without loading the whole service worker.
-  const TWEET_CONTENT_FIELDS = ["title", "shortDescription", "description", "media", "attachments", "creator", "quote"];
+  const TWEET_CONTENT_FIELDS = ["title", "shortDescription", "description", "media", "attachments", "creator", "quote", "xSortIndex"];
 
   // Returns an updated copy of `existing` when `incoming` (freshly parsed
   // from the X API) carries newer tweet content, or null when nothing
   // changed. Used as the mergeFn passed to mergeBatch() for X sync batches.
-  function mergeTweetContent(existing, incoming) {
+  function mergeTweetContent(existing: Bookmark, incoming: Bookmark): Bookmark | null {
     if (existing.source !== "x") return null;
     let changed = false;
     const merged = { ...existing };
     for (const field of TWEET_CONTENT_FIELDS) {
       if (incoming[field] === undefined) continue;
+      // An incomplete X response must not erase media already captured from
+      // the page or restored from an export. X cannot remove media from a
+      // tweet while it remains bookmarked, so an empty parse is not newer data.
+      if ((field === "media" || field === "attachments") && Array.isArray(existing[field]) && existing[field].length > 0 && Array.isArray(incoming[field]) && incoming[field].length === 0) {
+        continue;
+      }
       if (JSON.stringify(existing[field] ?? null) !== JSON.stringify(incoming[field] ?? null)) {
         merged[field] = incoming[field];
         changed = true;
@@ -373,7 +372,7 @@
   // TODO(nook): once we're confident the IndexedDB migration has shipped
   // safely for a full release, remove the old "items"/"lists" keys from
   // chrome.storage.local (and this migration function).
-  async function migrateFromChromeStorage() {
+  async function migrateFromChromeStorage(): Promise<{ migratedAt: string; itemCount: number; listCount: number } | null> {
     const already = await getMeta("migratedFromChromeStorage");
     if (already) return already;
 
@@ -382,8 +381,8 @@
     }
 
     const stored = await chrome.storage.local.get(["items", "lists"]);
-    const items = Array.isArray(stored.items) ? stored.items : [];
-    const lists = Array.isArray(stored.lists) ? stored.lists : [];
+    const items: Bookmark[] = Array.isArray(stored.items) ? stored.items : [];
+    const lists: BookmarkList[] = Array.isArray(stored.lists) ? stored.lists : [];
 
     if (items.length > 0) {
       const db = await open();
@@ -427,7 +426,7 @@
 
   // Opens the DB and runs the (idempotent) migration, memoized so it only
   // does the work once per background/dashboard/popup context's lifetime.
-  function ready() {
+  function ready(): Promise<unknown> {
     if (!_readyPromise) {
       _readyPromise = open().then(() => migrateFromChromeStorage());
     }
@@ -437,34 +436,34 @@
   // Test-only: point at a fresh, uniquely-named DB and forget memoized
   // promises, so each test starts from a clean slate without leaking state
   // into the next one.
-  function _resetForTests(dbName) {
+  function _resetForTests(dbName?: string): string {
     _dbName = dbName || `nook-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     _dbPromise = null;
     _readyPromise = null;
     return _dbName;
   }
 
-  return {
-    open,
-    ready,
-    getAllBookmarks,
-    getBookmark,
-    findBookmarkByUrl,
-    putBookmark,
-    putBookmarks,
-    updateBookmark,
-    softDeleteBookmark,
-    softDeleteAllBookmarks,
-    getAllLists,
-    putList,
-    softDeleteList,
-    getChangesSince,
-    getMeta,
-    setMeta,
-    mergeBatch,
-    mergeTweetContent,
-    TWEET_CONTENT_FIELDS,
-    migrateFromChromeStorage,
-    _resetForTests
-  };
-});
+export {
+  open,
+  ready,
+  getAllBookmarks,
+  getBookmark,
+  findBookmarkByUrl,
+  putBookmark,
+  putBookmarks,
+  updateBookmark,
+  softDeleteBookmark,
+  softDeleteAllBookmarks,
+  getAllLists,
+  putList,
+  softDeleteList,
+  getChangesSince,
+  getMeta,
+  setMeta,
+  mergeBatch,
+  mergeTweetContent,
+  TWEET_CONTENT_FIELDS,
+  migrateFromChromeStorage,
+  _resetForTests
+};
+import type { Bookmark, BookmarkList } from "./types";

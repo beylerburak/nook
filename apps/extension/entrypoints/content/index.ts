@@ -1,10 +1,22 @@
+import { defineContentScript } from "wxt/utils/define-content-script";
+import * as NookXParser from "../../lib/x-parser";
+import type { Bookmark, ContentToBackgroundMessage, Media, MessageResponse, Quote } from "../../lib/types";
+
+type UIElement = HTMLElement & { value?: string; files?: FileList | null; src?: string; href?: string; _timeout?: ReturnType<typeof setTimeout>; _successTimeout?: number };
+const byId = (id: string): UIElement => document.getElementById(id) as UIElement;
+const queryOne = (selector: string): UIElement => document.querySelector(selector) as UIElement;
+const queryAll = (selector: string): UIElement[] => Array.from(document.querySelectorAll(selector)) as UIElement[];
+const sendNookMessage = (message: ContentToBackgroundMessage): Promise<MessageResponse> =>
+  chrome.runtime.sendMessage(message);
+
+
+export default defineContentScript({
+  matches: ["https://x.com/*", "https://twitter.com/*"],
+  runAt: "document_idle",
+  main() {
 console.log("[Nook] Running");
 
-const {
-  parseGraphQLBookmarks,
-  extractBottomCursor,
-  diagnoseGraphQLResponse
-} = (typeof globalThis !== "undefined" && globalThis.NookXParser) || {};
+const { parseGraphQLBookmarks, extractBottomCursor, diagnoseGraphQLResponse } = NookXParser;
 
 function isExtensionValid() {
   return typeof chrome !== "undefined" && Boolean(chrome.runtime?.id);
@@ -50,7 +62,8 @@ document.addEventListener(
         showNotification(
           item.media?.length
             ? `Nook: Saved with ${item.media.length} media ✓`
-            : "Nook: Saved to bookmarks ✓"
+            : "Nook: Saved to bookmarks ✓",
+          item.id
         );
         console.log("[Nook] Saved", item);
       }
@@ -62,23 +75,23 @@ document.addEventListener(
 );
 
 // querySelectorAll that skips matches inside `exclude` (e.g. the quoted tweet box)
-function queryAllOutside(root, selector, exclude) {
-  return [...root.querySelectorAll(selector)].filter((el) => !exclude || !exclude.contains(el));
+function queryAllOutside(root: Element, selector: string, exclude: Element | null = null): HTMLElement[] {
+  return [...root.querySelectorAll<HTMLElement>(selector)].filter((el) => !exclude || !exclude.contains(el));
 }
 
-function queryOutside(root, selector, exclude) {
+function queryOutside(root: Element, selector: string, exclude: Element | null = null): HTMLElement | null {
   return queryAllOutside(root, selector, exclude)[0] || null;
 }
 
 // The quoted tweet is rendered as a clickable div[role="link"] with its own User-Name
-function findQuoteBox(article) {
+function findQuoteBox(article: Element): HTMLElement | null {
   return [...article.querySelectorAll('div[role="link"]')].find((el) =>
     el.querySelector('[data-testid="User-Name"]')
-  ) || null;
+  ) as HTMLElement | undefined || null;
 }
 
-function extractMedia(article, exclude = null) {
-  const media = [];
+function extractMedia(article: Element, exclude: Element | null = null): Media[] {
+  const media: Media[] = [];
   const seenUrls = new Set();
 
   // 1. Tweet Photos (and video thumbnails X renders as <img>)
@@ -89,7 +102,7 @@ function extractMedia(article, exclude = null) {
   );
 
   for (const img of photoImgs) {
-    let src = img.getAttribute("src") || img.src;
+    let src = img.getAttribute("src") || (img as HTMLImageElement).src;
     if (!src) continue;
 
     // Normalizing low-res small thumbnails to large when available
@@ -118,7 +131,7 @@ function extractMedia(article, exclude = null) {
   // 2. Video / GIF poster thumbnail
   const videos = queryAllOutside(article, "video", exclude);
   for (const video of videos) {
-    const poster = video.getAttribute("poster") || video.poster;
+    const poster = video.getAttribute("poster") || (video as HTMLVideoElement).poster;
     if (poster) {
       const baseId = poster.split("?")[0];
       if (!seenUrls.has(baseId)) {
@@ -139,7 +152,7 @@ function extractMedia(article, exclude = null) {
     exclude
   );
   for (const img of cardImgs) {
-    const src = img.getAttribute("src") || img.src;
+    const src = img.getAttribute("src") || (img as HTMLImageElement).src;
     if (src && !src.includes("profile_images")) {
       const baseId = src.split("?")[0];
       if (!seenUrls.has(baseId)) {
@@ -156,13 +169,13 @@ function extractMedia(article, exclude = null) {
   return media;
 }
 
-function extractAvatar(root, exclude = null) {
+function extractAvatar(root: Element, exclude: Element | null = null): string | null {
   const avatarImg = queryOutside(
     root,
     '[data-testid^="Tweet-User-Avatar"] img, [data-testid="UserAvatar"] img, img[src*="pbs.twimg.com/profile_images/"]',
     exclude
   );
-  const src = avatarImg?.getAttribute("src") || avatarImg?.src;
+  const src = avatarImg?.getAttribute("src") || (avatarImg as HTMLImageElement | null)?.src;
   if (src) return src;
 
   // Avatars that haven't loaded an <img> yet still carry a background-image
@@ -170,7 +183,7 @@ function extractAvatar(root, exclude = null) {
   return bg?.style.backgroundImage.match(/url\("?([^")]+)"?\)/)?.[1] || null;
 }
 
-function parseUserName(userElement) {
+function parseUserName(userElement: HTMLElement | null): { handle: string | null; name: string | null } {
   const lines = (userElement?.innerText || "")
     .split("\n")
     .map((line) => line.trim())
@@ -181,9 +194,9 @@ function parseUserName(userElement) {
   };
 }
 
-function parseQuoteBox(box) {
-  const { handle, name } = parseUserName(box.querySelector('[data-testid="User-Name"]'));
-  const text = box.querySelector('[data-testid="tweetText"]')?.innerText?.trim() || "";
+function parseQuoteBox(box: HTMLElement): Quote {
+  const { handle, name } = parseUserName(box.querySelector<HTMLElement>('[data-testid="User-Name"]'));
+  const text = box.querySelector<HTMLElement>('[data-testid="tweetText"]')?.innerText?.trim() || "";
 
   // The quote box has no permalink of its own; photo links still contain the status id
   let url = null;
@@ -192,7 +205,7 @@ function parseQuoteBox(box) {
   if (match) url = `https://x.com/${match[1]}/status/${match[2]}`;
 
   return {
-    id: url ? `x:${url.match(/\/status\/(\d+)/)[1]}` : null,
+    id: url ? `x:${url.match(/\/status\/(\d+)/)?.[1] ?? null}` : null,
     url,
     text,
     creator: { name, handle, avatar: extractAvatar(box) },
@@ -201,9 +214,11 @@ function parseQuoteBox(box) {
   };
 }
 
-function showNotification(message) {
+function showNotification(message: string, bookmarkId?: string) {
   const id = "nook-toast-feedback";
-  let toast = document.getElementById(id);
+  let toast = byId(id);
+  clearTimeout(toast?._timeout);
+  clearTimeout(toast?._successTimeout);
   if (!toast) {
     toast = document.createElement("div");
     toast.id = id;
@@ -211,48 +226,109 @@ function showNotification(message) {
       position: fixed;
       bottom: 24px;
       right: 24px;
+      width: min(340px, calc(100vw - 32px));
+      box-sizing: border-box;
       background: #18181b;
       color: #f4f4f5;
-      padding: 10px 18px;
-      border-radius: 9999px;
+      padding: 16px;
+      border-radius: 16px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       font-size: 13px;
-      font-weight: 500;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.1);
+      box-shadow: 0 12px 30px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.12);
       z-index: 999999;
-      pointer-events: none;
-      transition: opacity 0.25s ease, transform 0.25s ease;
-      transform: translateY(10px);
-      opacity: 0;
+      transition: opacity 0.2s ease, transform 0.2s ease;
+      line-height: 1.4;
     `;
     document.body.appendChild(toast);
   }
 
-  toast.textContent = message;
+  if (!bookmarkId) {
+    toast.textContent = message;
+    toast.style.padding = "10px 18px";
+    toast.style.width = "auto";
+    toast.style.borderRadius = "9999px";
+    toast._timeout = setTimeout(() => toast?.remove(), 2600);
+  } else {
+    const heading = document.createElement("div");
+    heading.textContent = "✓  Saved to Nook";
+    heading.style.cssText = "font-weight:700;font-size:14px;margin-bottom:4px";
+    const detail = document.createElement("div");
+    detail.textContent = message.replace(/^Nook:\s*/, "");
+    detail.style.cssText = "color:#a1a1aa;font-size:12px;margin-bottom:12px";
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:8px;align-items:center";
+    const noteButton = document.createElement("button");
+    noteButton.type = "button";
+    noteButton.textContent = "＋ Add a note";
+    noteButton.style.cssText = "border:0;border-radius:8px;background:#27272a;color:#fafafa;padding:8px 11px;font:600 12px -apple-system,BlinkMacSystemFont,sans-serif;cursor:pointer";
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.textContent = "Dismiss";
+    dismiss.style.cssText = "border:0;background:transparent;color:#a1a1aa;padding:8px;font:500 12px -apple-system,BlinkMacSystemFont,sans-serif;cursor:pointer";
+    const composer = document.createElement("div");
+    composer.style.cssText = "display:none;margin-top:10px";
+    const input = document.createElement("textarea");
+    input.placeholder = "What do you want to remember?";
+    input.rows = 3;
+    input.style.cssText = "box-sizing:border-box;width:100%;resize:vertical;border:1px solid #3f3f46;border-radius:8px;background:#09090b;color:#fafafa;padding:9px;font:12px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;outline:none";
+    const controls = document.createElement("div");
+    controls.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:8px";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    cancel.style.cssText = "border:0;background:transparent;color:#a1a1aa;padding:7px 9px;font:500 12px -apple-system,BlinkMacSystemFont,sans-serif;cursor:pointer";
+    const save = document.createElement("button");
+    save.type = "button";
+    save.textContent = "Save note";
+    save.style.cssText = "border:0;border-radius:8px;background:#7c3aed;color:white;padding:7px 11px;font:600 12px -apple-system,BlinkMacSystemFont,sans-serif;cursor:pointer";
+    noteButton.onclick = () => { composer.style.display = "block"; noteButton.style.display = "none"; input.focus(); };
+    cancel.onclick = () => { composer.style.display = "none"; noteButton.style.display = "inline-block"; };
+    dismiss.onclick = () => toast?.remove();
+    save.onclick = () => {
+      const note = input.value.trim();
+      if (!note) { input.focus(); return; }
+      save.disabled = true;
+      save.textContent = "Saving…";
+      sendNookMessage({ type: "UPDATE_BOOKMARK_NOTE", id: bookmarkId, note }).then((response) => {
+        if (!response?.success) { save.disabled = false; save.textContent = "Try again"; return; }
+        heading.textContent = "✓  Note saved";
+        detail.textContent = "You can edit it anytime in Nook.";
+        actions.remove();
+        composer.remove();
+        clearTimeout(toast?._successTimeout);
+        toast!._successTimeout = window.setTimeout(() => {
+          if (toast?.isConnected) toast.remove();
+        }, 2800);
+      }).catch(() => { save.disabled = false; save.textContent = "Try again"; });
+    };
+    controls.append(cancel, save);
+    composer.append(input, controls);
+    actions.append(noteButton, dismiss);
+    toast.replaceChildren(heading, detail, actions, composer);
+    toast._timeout = setTimeout(() => { if (composer.style.display !== "block") toast?.remove(); }, 7000);
+    toast.addEventListener("mouseenter", () => clearTimeout(toast?._timeout));
+    toast.addEventListener("mouseleave", () => {
+      if (composer.style.display !== "block") toast!._timeout = setTimeout(() => toast?.remove(), 7000);
+    });
+  }
   toast.style.opacity = "1";
   toast.style.transform = "translateY(0)";
-
-  clearTimeout(toast._timeout);
-  toast._timeout = setTimeout(() => {
-    toast.style.opacity = "0";
-    toast.style.transform = "translateY(10px)";
-  }, 2400);
 }
 
-function extractTweetUrl(article, timeElement, handle, exclude = null) {
+function extractTweetUrl(article: Element, timeElement: Element | null, handle: string | null, exclude: Element | null = null): string | null {
   let href = null;
 
   // 1. Time element link (most reliable on timeline)
   const timeLink = timeElement?.closest("a");
   if (timeLink) {
-    href = timeLink.getAttribute("href") || timeLink.href;
+    href = timeLink.getAttribute("href") || (timeLink as HTMLAnchorElement).href;
   }
 
   // 2. Look for status link in article (ignoring quotes and photo links)
   if (!href) {
     const statusLinks = queryAllOutside(article, 'a[href*="/status/"]', exclude);
     for (const link of statusLinks) {
-      const linkHref = link.getAttribute("href") || link.href;
+      const linkHref = link.getAttribute("href") || (link as HTMLAnchorElement).href;
       if (
         linkHref &&
         !linkHref.includes("/photo/") &&
@@ -274,7 +350,7 @@ function extractTweetUrl(article, timeElement, handle, exclude = null) {
   if (!href) {
     const anyStatus = queryOutside(article, 'a[href*="/status/"]', exclude);
     if (anyStatus) {
-      href = anyStatus.getAttribute("href") || anyStatus.href;
+      href = anyStatus.getAttribute("href") || (anyStatus as HTMLAnchorElement).href;
     }
   }
 
@@ -290,7 +366,7 @@ function extractTweetUrl(article, timeElement, handle, exclude = null) {
   }
 }
 
-function parseTweet(article) {
+function parseTweet(article: Element): Bookmark {
   // Everything inside the quoted tweet box belongs to the quote, not the main tweet
   const quoteBox = findQuoteBox(article);
 
@@ -353,7 +429,7 @@ function parseTweet(article) {
   };
 }
 
-async function saveItem(item) {
+async function saveItem(item: Bookmark) {
   if (!isExtensionValid()) {
     console.warn("[Nook] Extension context invalidated. Please refresh the page (F5).");
     showNotification("Nook was updated. Please refresh the page (F5) 🔄");
@@ -362,7 +438,7 @@ async function saveItem(item) {
 
   return new Promise((resolve) => {
     try {
-      chrome.runtime.sendMessage({ type: "SAVE_ITEM", item }, (response) => {
+      sendNookMessage({ type: "SAVE_ITEM", item }).then((response) => {
         if (chrome.runtime.lastError) {
           console.warn("[Nook] Message error:", chrome.runtime.lastError.message);
           resolve(false);
@@ -407,26 +483,27 @@ const X_FEATURES = JSON.stringify({
 });
 
 // Bump when parseGraphQLBookmarks extracts new fields, to trigger one full backfill sync
-const X_SYNC_PARSER_VERSION = 2;
+const X_SYNC_PARSER_VERSION = 3;
 
 // Store queryId captured by inject.js
-let _nookQueryId = null;
+  let _nookQueryId: string | null = null;
 
 window.addEventListener("message", (event) => {
   if (event.data?.type === "NOOK_QUERY_ID") {
+    if (typeof event.data.queryId !== "string") return;
     _nookQueryId = event.data.queryId;
     console.log("[Nook] Captured queryId from page:", _nookQueryId);
     // Persist in background.js so it survives SPA navigation
-    chrome.runtime.sendMessage({ type: "STORE_QUERY_ID", queryId: _nookQueryId }).catch(() => {});
+    sendNookMessage({ type: "STORE_QUERY_ID", queryId: event.data.queryId }).catch(() => {});
   }
 
   if (event.data?.type === "NOOK_SYNC_BOOKMARKS") {
     try {
-      const items = parseGraphQLBookmarks(event.data.data);
+      const items = parseGraphQLBookmarks(event.data.data) as unknown as Bookmark[];
       if (items.length > 0) {
-        chrome.runtime.sendMessage({ type: "SYNC_ITEMS_BATCH", items }, (response) => {
-          if (response?.success && response.count > 0) {
-            showNotification(`Nook: ${response.count} bookmark${response.count > 1 ? "s" : ""} synced ✓`);
+        sendNookMessage({ type: "SYNC_ITEMS_BATCH", items }).then((response) => {
+          if (response?.success && (response.count ?? 0) > 0) {
+            showNotification(`Nook: ${response.count} bookmark${(response.count ?? 0) > 1 ? "s" : ""} synced ✓`);
           }
           if (typeof window._nookUpdateSyncLog === "function") {
             window._nookUpdateSyncLog(response?.count ?? 0);
@@ -443,7 +520,7 @@ window.addEventListener("message", (event) => {
   }
 });
 
-function getCsrfToken() {
+function getCsrfToken(): string | null {
   const match = document.cookie.match(/(?:^|;\s*)ct0=([^;]+)/);
   return match ? match[1] : null;
 }
@@ -451,8 +528,8 @@ function getCsrfToken() {
 // Note: extractBottomCursor is provided by NookXParser
 
 
-async function fetchBookmarkPage(queryId, csrfToken, cursor) {
-  const variables = { count: 100, includePromotedContent: false };
+async function fetchBookmarkPage(queryId: string, csrfToken: string, cursor: string | null) {
+  const variables: { count: number; includePromotedContent: boolean; cursor?: string } = { count: 100, includePromotedContent: false };
   if (cursor) variables.cursor = cursor;
 
   const url = `https://x.com/i/api/graphql/${queryId}/Bookmarks?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(X_FEATURES)}`;
@@ -473,7 +550,7 @@ async function fetchBookmarkPage(queryId, csrfToken, cursor) {
 }
 
 function injectSyncOverlay() {
-  if (document.getElementById("nook-sync-overlay")) return;
+  if (byId("nook-sync-overlay")) return;
   const el = document.createElement("div");
   el.id = "nook-sync-overlay";
   el.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.92);backdrop-filter:blur(10px);display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
@@ -485,7 +562,7 @@ function injectSyncOverlay() {
   document.body.appendChild(el);
 }
 
-async function startAutoSync(msgQueryId) {
+async function startAutoSync(msgQueryId: string | null) {
   if (window._nookAutoSyncing) return;
   window._nookAutoSyncing = true;
 
@@ -493,27 +570,27 @@ async function startAutoSync(msgQueryId) {
     console.error("[Nook] NookXParser is missing — x-parser.js failed to load");
     window._nookAutoSyncing = false;
     injectSyncOverlay();
-    const el = document.getElementById("nook-sync-log");
+    const el = byId("nook-sync-log");
     if (el) el.textContent = "Error: the X parser module failed to load.";
-    setTimeout(() => chrome.runtime.sendMessage({ type: "CLOSE_CURRENT_TAB" }), 5000);
+    setTimeout(() => sendNookMessage({ type: "CLOSE_CURRENT_TAB" }), 5000);
     return;
   }
 
   console.log("[Nook] Auto sync started (direct API mode)");
   injectSyncOverlay();
-  const logEl = () => document.getElementById("nook-sync-log");
-  const updateLog = (msg) => { const el = logEl(); if (el) el.textContent = msg; };
+  const logEl = () => byId("nook-sync-log");
+  const updateLog = (msg: string) => { const el = logEl(); if (el) el.textContent = msg; };
 
-  function finishSync(newCount, updatedCount) {
+  function finishSync(newCount: number, updatedCount: number) {
     window._nookAutoSyncing = false;
-    const ov = document.getElementById("nook-sync-overlay");
+    const ov = byId("nook-sync-overlay");
     if (ov) ov.innerHTML = `
       <div style="font-size:26px;font-weight:700;margin-bottom:10px;color:#4ade80">✓ Done</div>
       <div style="font-size:16px;margin-bottom:6px">${newCount} new bookmark${newCount === 1 ? "" : "s"} added to Nook.</div>
       ${updatedCount ? `<div style="font-size:13px;opacity:.7;margin-bottom:6px">${updatedCount} bookmark${updatedCount === 1 ? "" : "s"} updated (quotes / media).</div>` : ""}
       <div style="font-size:12px;opacity:.5">Closing tab…</div>
     `;
-    setTimeout(() => chrome.runtime.sendMessage({ type: "CLOSE_CURRENT_TAB" }), 2000);
+    setTimeout(() => sendNookMessage({ type: "CLOSE_CURRENT_TAB" }), 2000);
   }
 
   try {
@@ -528,7 +605,7 @@ async function startAutoSync(msgQueryId) {
     if (!queryId) {
       // Ask background.js if it has a cached one
       queryId = await new Promise((resolve) => {
-        chrome.runtime.sendMessage({ type: "GET_QUERY_ID" }, (resp) => {
+        sendNookMessage({ type: "GET_QUERY_ID" }).then((resp) => {
           resolve(resp?.queryId || null);
         });
       });
@@ -550,7 +627,7 @@ async function startAutoSync(msgQueryId) {
     // Bumped when the parser starts extracting new data (v2: quoted tweets).
     // Until a full pass completes, don't stop early on already-saved pages so
     // older bookmarks get backfilled.
-    const { xSyncParserVersion = 1 } = await chrome.storage.local.get("xSyncParserVersion");
+    const { xSyncParserVersion = 1 } = await chrome.storage.local.get<{ xSyncParserVersion?: number }>("xSyncParserVersion");
     const fullScan = xSyncParserVersion < X_SYNC_PARSER_VERSION;
     if (fullScan) console.log("[Nook] Parser updated — running full backfill scan");
 
@@ -602,8 +679,8 @@ async function startAutoSync(msgQueryId) {
           console.warn("[Nook] Partial parse on page", page, "—", partialWarning);
         }
 
-        const result = await new Promise((resolve) => {
-          chrome.runtime.sendMessage({ type: "SYNC_ITEMS_BATCH", items }, resolve);
+        const result = await new Promise<MessageResponse>((resolve) => {
+          sendNookMessage({ type: "SYNC_ITEMS_BATCH", items: items as unknown as Bookmark[] }).then(resolve);
         });
         totalSynced += result?.count ?? 0;
         totalUpdated += result?.updated ?? 0;
@@ -630,14 +707,14 @@ async function startAutoSync(msgQueryId) {
     finishSync(totalSynced, totalUpdated);
   } catch (err) {
     console.error("[Nook] Auto sync error:", err);
-    const ov = document.getElementById("nook-sync-overlay");
+    const ov = byId("nook-sync-overlay");
     if (ov) ov.innerHTML = `
       <div style="font-size:22px;font-weight:700;margin-bottom:10px;color:#f87171">✗ Error</div>
-      <div style="font-size:14px;opacity:.8;max-width:340px;text-align:center">${err.message}</div>
+      <div style="font-size:14px;opacity:.8;max-width:340px;text-align:center">${err instanceof Error ? err.message : String(err)}</div>
       <div style="font-size:12px;opacity:.5;margin-top:16px">Closing tab…</div>
     `;
     window._nookAutoSyncing = false;
-    setTimeout(() => chrome.runtime.sendMessage({ type: "CLOSE_CURRENT_TAB" }), 5000);
+    setTimeout(() => sendNookMessage({ type: "CLOSE_CURRENT_TAB" }), 5000);
   }
 }
 
@@ -647,5 +724,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ received: true });
     // Pass queryId from message (background.js cached it from inject.js interception)
     startAutoSync(message.queryId || null);
+  }
+});
   }
 });

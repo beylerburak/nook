@@ -1,9 +1,9 @@
-const test = require("node:test");
-const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
+import { test } from "vitest";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 
-const {
+import {
   unwrapTweetResult,
   cleanTweetText,
   parseTweetMedia,
@@ -11,10 +11,10 @@ const {
   extractBottomCursor,
   parseGraphQLBookmarks,
   diagnoseGraphQLResponse
-} = require("../apps/extension/x-parser.js");
+} from "../lib/x-parser";
 
-function loadFixture(filename) {
-  const filePath = path.join(__dirname, "fixtures", filename);
+function loadFixture(filename: string) {
+  const filePath = new URL(`./fixtures/${filename}`, import.meta.url);
   const content = fs.readFileSync(filePath, "utf-8");
   return JSON.parse(content);
 }
@@ -29,6 +29,7 @@ test("X Parser — Standard Tweet (timeline-v2-standard)", () => {
   assert.equal(item.id, "x:2101999689021243625");
   assert.equal(item.source, "x");
   assert.equal(item.url, "https://x.com/_guillecasaus/status/2101999689021243625");
+  assert.equal(item.xSortIndex, "1726918753000");
   assert.equal(item.creator.handle, "@_guillecasaus");
   assert.equal(item.creator.name, "Guillermo Casaus");
   assert.match(item.creator.avatar, /pbs\.twimg\.com\/profile_images/);
@@ -250,49 +251,28 @@ test("X Parser — Synthetic current-format sample (synthetic-current-format)", 
 // see tools/anonymize-x-fixture.js). These are not committed by default —
 // each contributor generates their own from their browser — so this test
 // skips cleanly when none exist rather than failing CI.
-test("X Parser — Real-world snapshots (tests/fixtures/real-*.json)", async (t) => {
-  const fixturesDir = path.join(__dirname, "fixtures");
-  const realFixtureFiles = fs
-    .readdirSync(fixturesDir)
-    .filter((f) => /^real-.*\.json$/.test(f));
+const fixturesDir = new URL("./fixtures/", import.meta.url);
+const realFixtureFiles = fs.readdirSync(fixturesDir).filter((f) => /^real-.*\.json$/.test(f));
 
-  if (realFixtureFiles.length === 0) {
-    t.skip("No tests/fixtures/real-*.json snapshots found; run `npm run fixture:anonymize` to generate one.");
-    return;
-  }
-
+if (realFixtureFiles.length === 0) {
+  test.skip("X Parser — Real-world snapshots (tests/fixtures/real-*.json)", () => {});
+} else {
   for (const filename of realFixtureFiles) {
-    await t.test(filename, () => {
+    test(`X Parser — Real-world snapshot (${filename})`, () => {
       const fixture = loadFixture(filename);
       const items = parseGraphQLBookmarks(fixture);
-
       assert.ok(items.length > 0, `${filename}: expected at least one parsed item`);
 
       for (const item of items) {
-        assert.ok(
-          typeof item.creator.handle === "string" && item.creator.handle.startsWith("@") && item.creator.handle.length > 1,
-          `${filename}: item (${item.id}) should have a valid handle`
-        );
-        assert.ok(
-          typeof item.creator.name === "string" && item.creator.name.length > 0,
-          `${filename}: item (${item.id}) should have a non-empty creator name`
-        );
-        assert.match(
-          item.url,
-          /^https:\/\/x\.com\/[^/]+\/status\/\d+$/,
-          `${filename}: item (${item.id}) should have a well-formed status URL`
-        );
+        assert.ok(typeof item.creator.handle === "string" && item.creator.handle.startsWith("@") && item.creator.handle.length > 1);
+        assert.ok(typeof item.creator.name === "string" && item.creator.name.length > 0);
+        assert.match(item.url, /^https:\/\/x\.com\/[^/]+\/status\/\d+$/);
       }
 
       const diag = diagnoseGraphQLResponse(fixture);
-      assert.equal(diag.valid, true, `${filename}: diagnostic should report valid`);
-      assert.deepEqual(diag.warnings, [], `${filename}: diagnostic should report no warnings`);
-      assert.equal(
-        diag.tweetCount,
-        diag.tweetEntryCount,
-        `${filename}: every tweet-like entry should have parsed successfully`
-      );
+      assert.equal(diag.valid, true);
+      assert.deepEqual(diag.warnings, []);
+      assert.equal(diag.tweetCount, diag.tweetEntryCount);
     });
   }
-});
-
+}

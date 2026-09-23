@@ -1,9 +1,17 @@
+import * as NookDB from "../../lib/db";
+import * as NookShared from "../../lib/shared";
+
+type UIElement = HTMLElement & { value: any; files: FileList | null; src: string; href: string; dataset: DOMStringMap; textContent: any };
+const byId = (id: string): UIElement => document.getElementById(id) as UIElement;
+const queryOne = (selector: string): UIElement => document.querySelector(selector) as UIElement;
+const queryAll = (selector: string): UIElement[] => Array.from(document.querySelectorAll(selector)) as UIElement[];
+
 const { ICONS, createAvatarFallback } = NookShared;
 
 async function loadItems() {
-  const container = document.querySelector("#items");
-  const countBadge = document.querySelector("#popup-count");
-  const openDashboardBtn = document.querySelector("#open-dashboard");
+  const container = queryOne("#items");
+  const countBadge = queryOne("#popup-count");
+  const openDashboardBtn = queryOne("#open-dashboard");
 
   // Setup dashboard button
   if (openDashboardBtn) {
@@ -12,7 +20,7 @@ async function loadItems() {
     };
   }
 
-  const syncXBtn = document.querySelector("#sync-x-btn");
+  const syncXBtn = queryOne("#sync-x-btn");
   if (syncXBtn) {
     syncXBtn.onclick = () => {
       syncXBtn.textContent = "Syncing...";
@@ -29,7 +37,7 @@ async function loadItems() {
   const lists = await NookDB.getAllLists();
 
   if (countBadge) {
-    countBadge.textContent = items.length;
+    countBadge.textContent = String(items.length);
   }
 
   container.replaceChildren();
@@ -49,7 +57,7 @@ async function loadItems() {
 
     // Clicking card opens the tweet on X directly
     card.onclick = (e) => {
-      if (e.target.closest(".btn-del")) return;
+      if ((e.target as Element).closest(".btn-del")) return;
       if (item.url) {
         chrome.tabs.create({ url: item.url });
       } else {
@@ -177,7 +185,7 @@ async function loadItems() {
   }
 }
 
-async function deleteItem(id) {
+async function deleteItem(id: string) {
   await NookDB.softDeleteBookmark(id);
   loadItems();
 }

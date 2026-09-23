@@ -4,7 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Nook - Bookmarks & Collections</title>
-  <link rel="stylesheet" href="dashboard.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -218,6 +217,15 @@
         <div id="modal-media-gallery" class="modal-media"></div>
         <div id="modal-quote" class="modal-quote"></div>
 
+        <section class="modal-notes">
+          <label for="modal-note-input" class="modal-notes-heading">Your note</label>
+          <textarea id="modal-note-input" class="modal-note-input" rows="4" placeholder="Add a thought, reminder, or context..."></textarea>
+          <div class="modal-note-actions">
+            <span id="modal-note-status" class="modal-note-status"></span>
+            <button id="modal-note-save" class="btn btn-primary" type="button">Save note</button>
+          </div>
+        </section>
+
         <!-- List & Tag Management in Modal -->
         <div class="modal-organization">
           <!-- List Assignment -->
@@ -370,9 +378,6 @@
 
   <!-- Toast Notification -->
   <div id="toast" class="toast hidden"></div>
-
-  <script src="shared.js"></script>
-  <script src="db.js"></script>
-  <script src="dashboard.js"></script>
+  <script type="module" src="./main.ts"></script>
 </body>
 </html>

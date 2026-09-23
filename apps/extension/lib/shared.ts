@@ -17,14 +17,7 @@
  * why) is intentional, not an oversight.
  */
 
-(function (root, factory) {
-  if (typeof module === "object" && typeof module.exports === "object") {
-    module.exports = factory();
-  } else {
-    root.NookShared = factory();
-  }
-})(typeof globalThis !== "undefined" ? globalThis : this, function () {
-  "use strict";
+
 
   // Inline SVG icons reused across dashboard.js / popup.js. The icons that
   // are reused at different sizes/styles are small builder functions (so
@@ -80,7 +73,7 @@
    * Single-letter avatar placeholder shown when a creator has no avatar
    * image, or when their avatar image fails to load.
    */
-  function createAvatarFallback(creator) {
+  function createAvatarFallback(creator: Creator | undefined): HTMLDivElement {
     const div = document.createElement("div");
     div.className = "avatar-fallback";
     const name = creator?.name || creator?.handle || "X";
@@ -92,14 +85,14 @@
    * Formats an ISO date string as a short relative/absolute label
    * ("Just now", "5m ago", "3d ago", "Jan 5" ...).
    */
-  function formatDate(dateString) {
+  function formatDate(dateString: string | null | undefined): string {
     if (!dateString) return "Saved";
     try {
       const date = new Date(dateString);
       if (isNaN(date.getTime())) return "Saved";
 
       const now = new Date();
-      const diffSec = Math.floor((now - date) / 1000);
+      const diffSec = Math.floor((now.getTime() - date.getTime()) / 1000);
 
       if (diffSec < 60) return "Just now";
       if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
@@ -116,9 +109,9 @@
     }
   }
 
-  return {
-    ICONS,
-    createAvatarFallback,
-    formatDate
-  };
-});
+export {
+  ICONS,
+  createAvatarFallback,
+  formatDate
+};
+import type { Creator } from "./types";

@@ -1084,6 +1084,49 @@ body {
   gap: 18px;
 }
 
+.modal-notes {
+  background: #18181c;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.modal-notes-heading { color: var(--text-primary); font-size: 13px; font-weight: 600; }
+.modal-note-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 92px;
+  padding: 10px 12px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+}
+.modal-note-input:focus { border-color: var(--accent); }
+.modal-note-actions { display: flex; align-items: center; justify-content: space-between; min-height: 32px; }
+.modal-note-status { color: var(--text-secondary); font-size: 12px; }
+
+.card-note-preview {
+  margin: 0 18px 14px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: rgba(124, 58, 237, 0.08);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .modal-text {
   font-size: 15px;
   line-height: 1.6;
