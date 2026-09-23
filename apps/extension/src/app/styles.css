@@ -1,0 +1,165 @@
+@import "@astryxdesign/core/reset.css";
+@import "@astryxdesign/core/astryx.css";
+@import "./theme/nook.css";
+
+body {
+  min-height: 100dvh;
+  margin: 0;
+  color: var(--color-text-primary);
+  background-color: var(--color-background-body);
+  background-image:
+    radial-gradient(ellipse at 12% 4%, color-mix(in srgb, var(--color-background-blue) 48%, transparent), transparent 48%),
+    radial-gradient(ellipse at 92% 88%, color-mix(in srgb, var(--color-background-purple) 30%, transparent), transparent 46%);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+#app-root {
+  min-height: 100dvh;
+}
+
+.nook-app-shell {
+  background: transparent;
+}
+
+.nook-glass-topnav,
+.nook-glass-sidenav {
+  background-color: color-mix(in srgb, var(--color-background-surface) 78%, transparent);
+  backdrop-filter: blur(var(--spacing-6));
+}
+
+.nook-main-content {
+  min-width: 0;
+}
+
+.nook-bookmark-toolbar {
+  width: 100%;
+  min-width: 0;
+}
+
+.nook-data-table-view-trigger {
+  border-radius: var(--radius-element);
+}
+
+.nook-data-table-view-popover-surface {
+  padding-block: 0;
+  padding-inline: 0;
+}
+
+.nook-data-table-view-popover {
+  block-size: 28rem;
+}
+
+.nook-data-table-view-rail {
+  flex-shrink: 0;
+}
+
+.nook-data-table-view-rail-item {
+  justify-content: flex-start;
+}
+
+.nook-data-table-view-panel {
+  block-size: 100%;
+  flex-grow: 1;
+  min-width: 0;
+}
+
+.nook-data-table-transfer-root,
+.nook-data-table-transfer-panels {
+  flex-grow: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.nook-data-table-transfer-panel {
+  flex-basis: 0;
+  flex-grow: 1;
+  min-block-size: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.nook-data-table-transfer-divider {
+  border-inline-start: var(--border-width) solid var(--color-border);
+}
+
+.nook-data-table-transfer-header {
+  border-block-end: var(--border-width) solid var(--color-border);
+}
+
+.nook-data-table-transfer-header-action {
+  height: auto;
+  padding-block: 0;
+  padding-inline: 0;
+  border-radius: 0;
+  background-image: none;
+  color: var(--color-text-accent);
+  font-size: var(--text-body-size);
+  font-weight: var(--text-body-weight);
+  line-height: var(--text-body-leading);
+}
+
+.nook-data-table-transfer-header-action:hover:not(:disabled, [aria-disabled="true"]) {
+  background-image: none;
+  text-decoration: underline;
+}
+
+.nook-data-table-transfer-body {
+  flex-grow: 1;
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.nook-data-table-transfer-pad-start {
+  padding-inline-start: var(--spacing-4);
+  padding-inline-end: var(--spacing-3);
+}
+
+.nook-data-table-transfer-pad-end {
+  padding-inline-start: var(--spacing-3);
+  padding-inline-end: var(--spacing-4);
+}
+
+.nook-data-table-transfer-item {
+  min-width: 0;
+  transition: background-color var(--duration-fast), opacity var(--duration-fast);
+}
+
+.nook-data-table-transfer-grip {
+  margin-inline-start: calc(-1 * var(--spacing-1-5));
+}
+
+.nook-data-table-transfer-end-action {
+  margin-inline-end: calc(-1 * var(--spacing-1-5));
+}
+
+.nook-data-table-transfer-empty {
+  text-align: center;
+}
+
+.nook-editor-layout {
+  min-width: 0;
+}
+
+.nook-inspector-panel {
+  background-color: color-mix(in srgb, var(--color-background-surface) 82%, transparent);
+  backdrop-filter: blur(var(--spacing-4));
+}
+
+.nook-bookmark-card {
+  background-color: color-mix(in srgb, var(--color-background-card) 82%, transparent);
+  backdrop-filter: blur(var(--spacing-4));
+  box-shadow: var(--shadow-low);
+  transition: background-color var(--duration-fast) ease, box-shadow var(--duration-fast) ease;
+}
+
+.nook-bookmark-card:hover {
+  background-color: color-mix(in srgb, var(--color-background-card) 94%, transparent);
+  box-shadow: var(--shadow-med);
+}
+
+.nook-popup-shell {
+  background-color: color-mix(in srgb, var(--color-background-surface) 86%, transparent);
+  backdrop-filter: blur(var(--spacing-5));
+}

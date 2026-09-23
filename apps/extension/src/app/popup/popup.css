@@ -1,0 +1,10 @@
+body {
+  width: calc(var(--spacing-12) * 8);
+  max-height: calc(var(--spacing-12) * 11);
+  min-height: auto;
+  overflow-y: auto;
+}
+
+#app-root {
+  min-height: auto;
+}
