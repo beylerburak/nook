@@ -399,20 +399,42 @@
   // Returns an updated copy of `existing` when `incoming` (freshly parsed
   // from the X API) carries newer tweet content, or null when nothing
   // changed. Used as the mergeFn passed to mergeBatch() for X sync batches.
+  // A DOM-parsed save only ever carries a video's poster, never `videoUrl`
+  // (the playable MP4 only comes from X's GraphQL API, see
+  // entrypoints/content/video-media-registry.ts) — so a later DOM save of
+  // the same tweet must not wipe a `videoUrl` a sync already attached to
+  // that media item. Fills any gaps in `incomingMedia` from the matching
+  // (same `url`, i.e. same poster) item in `existingMedia`.
+  function preserveVideoUrls(existingMedia: unknown, incomingMedia: unknown): unknown {
+    if (!Array.isArray(existingMedia) || !Array.isArray(incomingMedia)) return incomingMedia;
+    return incomingMedia.map((item: Media) => {
+      if (!item || item.videoUrl || !item.url) return item;
+      const match = (existingMedia as Media[]).find((e) => e && e.url === item.url && e.videoUrl);
+      return match ? { ...item, videoUrl: match.videoUrl } : item;
+    });
+  }
+
   function mergeTweetContent(existing: Bookmark, incoming: Bookmark): Bookmark | null {
     if (existing.source !== "x") return null;
     let changed = false;
     const merged = { ...existing };
     for (const field of TWEET_CONTENT_FIELDS) {
       if (incoming[field] === undefined) continue;
-      // An incomplete X response must not erase media already captured from
-      // the page or restored from an export. X cannot remove media from a
-      // tweet while it remains bookmarked, so an empty parse is not newer data.
-      if ((field === "media" || field === "attachments") && Array.isArray(existing[field]) && existing[field].length > 0 && Array.isArray(incoming[field]) && incoming[field].length === 0) {
-        continue;
+
+      let incomingValue: unknown = incoming[field];
+
+      if (field === "media" || field === "attachments") {
+        // An incomplete X response must not erase media already captured from
+        // the page or restored from an export. X cannot remove media from a
+        // tweet while it remains bookmarked, so an empty parse is not newer data.
+        if (Array.isArray(existing[field]) && existing[field].length > 0 && Array.isArray(incomingValue) && incomingValue.length === 0) {
+          continue;
+        }
+        incomingValue = preserveVideoUrls(existing[field], incomingValue);
       }
-      if (JSON.stringify(existing[field] ?? null) !== JSON.stringify(incoming[field] ?? null)) {
-        merged[field] = incoming[field];
+
+      if (JSON.stringify(existing[field] ?? null) !== JSON.stringify(incomingValue ?? null)) {
+        merged[field] = incomingValue;
         changed = true;
       }
     }
@@ -524,5 +546,5 @@ export {
   migrateFromChromeStorage,
   _resetForTests
 };
-import type { Bookmark, BookmarkList } from "./types";
+import type { Bookmark, BookmarkList, Media } from "./types";
 import { normalizeUrlForDedupe } from "./url";

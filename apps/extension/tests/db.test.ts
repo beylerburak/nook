@@ -133,6 +133,57 @@ test("mergeBatch adds new items, updates changed content, ignores unchanged, and
   assert.deepEqual(visible.map((i) => i.id).sort(), ["x:1", "x:2", "x:4"]);
 });
 
+test("mergeTweetContent keeps a videoUrl already synced from the API when a later DOM save's media has the same poster but no videoUrl", async () => {
+  freshDb();
+  await NookDB.putBookmark({
+    id: "x:5",
+    source: "x",
+    title: "old title",
+    media: [{ type: "video", url: "https://pbs.twimg.com/amplify_video_thumb/5/img/poster.jpg", videoUrl: "https://video.twimg.com/5/high.mp4" }]
+  });
+
+  // A DOM-parsed save of the same tweet: same poster, but no videoUrl (a
+  // <video poster> src never exposes the playable MP4), and the title
+  // changed so the merge isn't a no-op.
+  const incoming = [
+    {
+      id: "x:5",
+      source: "x",
+      title: "new title",
+      media: [{ type: "video", url: "https://pbs.twimg.com/amplify_video_thumb/5/img/poster.jpg", alt: "Video thumbnail" }]
+    }
+  ];
+
+  const { updated } = await NookDB.mergeBatch(incoming, NookDB.mergeTweetContent);
+  assert.deepEqual(updated.map((i) => i.id), ["x:5"]);
+
+  const item = await NookDB.getBookmark("x:5");
+  assert.ok(item);
+  assert.equal(item.title, "new title");
+  assert.equal(item.media?.[0]?.videoUrl, "https://video.twimg.com/5/high.mp4", "a DOM save without videoUrl must not wipe one already synced");
+});
+
+test("mergeTweetContent lets a fresher videoUrl for the same poster replace an older one", async () => {
+  freshDb();
+  await NookDB.putBookmark({
+    id: "x:6",
+    source: "x",
+    media: [{ type: "video", url: "https://pbs.twimg.com/amplify_video_thumb/6/img/poster.jpg", videoUrl: "https://video.twimg.com/6/old.mp4" }]
+  });
+
+  const incoming = [
+    {
+      id: "x:6",
+      source: "x",
+      media: [{ type: "video", url: "https://pbs.twimg.com/amplify_video_thumb/6/img/poster.jpg", videoUrl: "https://video.twimg.com/6/new.mp4" }]
+    }
+  ];
+
+  await NookDB.mergeBatch(incoming, NookDB.mergeTweetContent);
+  const item = await NookDB.getBookmark("x:6");
+  assert.equal(item?.media?.[0]?.videoUrl, "https://video.twimg.com/6/new.mp4");
+});
+
 test("getChangesSince filters by timestamp", async () => {
   freshDb();
   await NookDB.putBookmark({ id: "x:1", source: "x" });
