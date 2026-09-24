@@ -1,29 +1,21 @@
 import { useEffect, useState } from "react";
 import { AppShell } from "@astryxdesign/core/AppShell";
-import { Avatar } from "@astryxdesign/core/Avatar";
-import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
-import { EmptyState } from "@astryxdesign/core/EmptyState";
-import { HStack, VStack } from "@astryxdesign/core/Layout";
-import { List, ListItem } from "@astryxdesign/core/List";
-import { Text } from "@astryxdesign/core/Text";
-import { Thumbnail } from "@astryxdesign/core/Thumbnail";
-import { Token } from "@astryxdesign/core/Token";
+import { VStack } from "@astryxdesign/core/Layout";
 import { Theme, type ThemeMode } from "@astryxdesign/core/theme";
 import { ToastViewport, useToast } from "@astryxdesign/core/Toast";
 import { nookTheme } from "../theme/nook.js";
-import { AppearanceMenu } from "../components/AppearanceMenu";
 import { useAppearance } from "../components/useAppearance";
 import * as NookDB from "../../../lib/db";
-import * as NookShared from "../../../lib/shared";
-import type { Bookmark, BookmarkList } from "../../../lib/types";
-
-function bookmarkLabel(item: Bookmark) {
-  if (item.source === "chrome") {
-    return item.title || item.creator?.name || item.creator?.handle || "Web Bookmark";
-  }
-  return item.creator?.name || item.creator?.handle || "X Post";
-}
+import type { BookmarkList } from "../../../lib/types";
+import { getTags } from "../dashboard/bookmark-utils";
+import { buildDashboardBookmarkUrl, buildDashboardSearchUrl } from "./dashboardLinks";
+import { PageCard } from "./PageCard";
+import { PopupFooter } from "./PopupFooter";
+import { PopupHeader } from "./PopupHeader";
+import { QuickOrganize } from "./QuickOrganize";
+import { useActivePage } from "./useActivePage";
+import { useSaveShortcut } from "./useSaveShortcut";
 
 function PopupScreen({
   appearanceMode,
@@ -33,37 +25,42 @@ function PopupScreen({
   onAppearanceChange: (mode: ThemeMode) => void;
 }) {
   const toast = useToast();
-  const [items, setItems] = useState<Bookmark[]>([]);
+  const activePage = useActivePage();
+  const saveShortcut = useSaveShortcut();
+
+  const [totalCount, setTotalCount] = useState(0);
   const [lists, setLists] = useState<BookmarkList[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [existingTags, setExistingTags] = useState<string[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [justSaved, setJustSaved] = useState(false);
 
-  const refresh = async () => {
-    await NookDB.ready();
-    const [bookmarks, bookmarkLists] = await Promise.all([
-      NookDB.getAllBookmarks(),
-      NookDB.getAllLists(),
-    ]);
-    setItems(NookShared.sortBookmarksByDate(bookmarks));
-    setLists(bookmarkLists);
-    setIsLoading(false);
-  };
-
+  // Library-wide metadata for the header count and the QuickOrganize
+  // collection/tag pickers. Read straight from IndexedDB, same as
+  // DashboardApp/useBookmarkLibrary, so the popup doesn't duplicate a
+  // background message just to list collections and tags.
   useEffect(() => {
-    void refresh().catch((error) => {
-      console.error("[Nook] Failed to load bookmarks:", error);
-      setIsLoading(false);
-      toast({ body: "Could not load bookmarks.", type: "error" });
+    let isActive = true;
+    const loadLibraryMeta = async () => {
+      await NookDB.ready();
+      const [bookmarks, bookmarkLists] = await Promise.all([
+        NookDB.getAllBookmarks(),
+        NookDB.getAllLists(),
+      ]);
+      if (!isActive) return;
+      setTotalCount(bookmarks.length);
+      setLists(bookmarkLists);
+      setExistingTags(getTags(bookmarks).map(([tag]) => tag));
+    };
+    void loadLibraryMeta().catch((error) => {
+      console.error("[Nook] Failed to load library metadata:", error);
     });
     const channel = new BroadcastChannel("nook-db");
-    channel.addEventListener("message", () => {
-      void refresh().catch((error) => {
-        console.error("[Nook] Failed to refresh bookmarks:", error);
-      });
-    });
-    return () => channel.close();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [toast]);
+    channel.addEventListener("message", () => void loadLibraryMeta());
+    return () => {
+      isActive = false;
+      channel.close();
+    };
+  }, []);
 
   const openUrl = (url: string) => {
     chrome.tabs.create({ url }).catch((error) => {
@@ -72,8 +69,37 @@ function PopupScreen({
     });
   };
 
-  const openDashboard = () => {
-    openUrl(chrome.runtime.getURL("dashboard.html"));
+  const openDashboard = () => openUrl(chrome.runtime.getURL("dashboard.html"));
+  const openDashboardSearch = (query: string) => openUrl(chrome.runtime.getURL(buildDashboardSearchUrl(query)));
+  const openBookmarkInDashboard = (id: string) => openUrl(chrome.runtime.getURL(buildDashboardBookmarkUrl(id)));
+
+  const handleSave = async () => {
+    try {
+      await activePage.save();
+      setJustSaved(true);
+      toast({ body: "Saved to Nook" });
+    } catch (error) {
+      console.error("[Nook] Failed to save the page:", error);
+      toast({ body: "Could not save this page.", type: "error" });
+    }
+  };
+
+  const handleRemove = async () => {
+    try {
+      await activePage.remove();
+      // Instant, undoable delete (no confirm dialog) matches how the
+      // dashboard already handles bookmark deletion — see deleteBookmark in
+      // useBookmarkLibrary.ts, which soft-deletes immediately and only
+      // toasts. Undo re-saves the same page, which the background's
+      // SAVE_ITEM handler already treats as un-deleting an existing row.
+      toast({
+        body: "Removed from Nook.",
+        endContent: <Button label="Undo" size="sm" variant="ghost" onClick={() => void handleSave()} />,
+      });
+    } catch (error) {
+      console.error("[Nook] Failed to remove the bookmark:", error);
+      toast({ body: "Could not remove this bookmark.", type: "error" });
+    }
   };
 
   const startSync = () => {
@@ -89,105 +115,48 @@ function PopupScreen({
     }
   };
 
-  const deleteBookmark = async (id: string) => {
-    try {
-      await NookDB.softDeleteBookmark(id);
-      await refresh();
-    } catch (error) {
-      console.error("[Nook] Failed to delete bookmark:", error);
-      toast({ body: "Could not delete this bookmark.", type: "error" });
-    }
-  };
+  const bookmark = activePage.state?.kind === "page" ? activePage.state.bookmark : null;
 
   return (
     <AppShell className="nook-popup-shell" height="auto" contentPadding={0} variant="surface">
       <VStack width="100%" isScrollable gap={3} padding={4}>
-        <HStack justify="between" align="center" gap={2}>
-          <HStack align="center" gap={2}>
-            <Text type="large" weight="bold">Nook</Text>
-            <Badge label={items.length} />
-          </HStack>
-          <HStack align="center" gap={1}>
-            <AppearanceMenu mode={appearanceMode} onChange={onAppearanceChange} />
-            <Button label="Dashboard" size="sm" variant="secondary" onClick={openDashboard} />
-          </HStack>
-        </HStack>
+        <PopupHeader
+          totalCount={totalCount}
+          appearanceMode={appearanceMode}
+          onAppearanceChange={onAppearanceChange}
+          onOpenDashboard={openDashboard}
+        />
 
-        <HStack gap={2}>
-          <Button
-            label="Sync X bookmarks"
-            size="sm"
-            variant="primary"
-            isLoading={isSyncing}
-            onClick={startSync}
-          />
-          <Text type="supporting">Latest saved bookmarks</Text>
-        </HStack>
+        <PageCard
+          state={activePage.state}
+          phase={activePage.phase}
+          errorMessage={activePage.error}
+          isSaving={activePage.isSaving}
+          isRemoving={activePage.isRemoving}
+          saveShortcut={saveShortcut}
+          onSave={() => void handleSave()}
+          onRemove={() => void handleRemove()}
+          onRetry={() => void activePage.refresh()}
+          onOpenInDashboard={openBookmarkInDashboard}
+        />
 
-        {isLoading ? (
-          <Text color="secondary">Loading bookmarks…</Text>
-        ) : items.length === 0 ? (
-          <EmptyState
-            title="No bookmarks yet"
-            description="Save a post on X or a web page to see it here."
-            isCompact
+        {bookmark ? (
+          <QuickOrganize
+            bookmark={bookmark}
+            lists={lists}
+            suggestedTags={existingTags}
+            defaultIsOpen={justSaved}
+            onPatch={activePage.patchBookmark}
           />
-        ) : (
-          <List density="compact" hasDividers aria-label="Latest bookmarks">
-            {items.map((item) => {
-              const media = item.media || item.attachments || [];
-              const list = lists.find((candidate) => candidate.id === item.listId);
-              const title = bookmarkLabel(item);
-              const description = item.description || item.shortDescription || item.url || "";
-              return (
-                <ListItem
-                  key={item.id}
-                  label={title}
-                  description={
-                    <VStack gap={2}>
-                      <Text type="supporting" color="secondary">{description}</Text>
-                      {list && <Token label={(list.icon || "📁") + " " + list.name} size="sm" />}
-                      {(item.tags || []).slice(0, 3).map((tag) => (
-                        <Token key={tag} label={"#" + tag.replace(/^#/, "")} size="sm" />
-                      ))}
-                    </VStack>
-                  }
-                  startContent={
-                    <Avatar
-                      name={item.creator?.name || item.creator?.handle || title}
-                      src={item.creator?.avatar || undefined}
-                      size="sm"
-                    />
-                  }
-                  endContent={
-                    <HStack align="center" gap={1}>
-                      {media[0] && (
-                        <Thumbnail
-                          src={media[0].url}
-                          alt={media[0].alt || `${title} preview`}
-                          label={`${title} preview`}
-                        />
-                      )}
-                      <Button
-                        label="Delete"
-                        size="sm"
-                        variant="ghost"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          void deleteBookmark(item.id);
-                        }}
-                      />
-                    </HStack>
-                  }
-                  onClick={() => {
-                    if (item.url) openUrl(item.url);
-                    else openDashboard();
-                  }}
-                />
-              );
-            })}
-          </List>
-        )}
+        ) : null}
+
+        <PopupFooter
+          onSearch={openDashboardSearch}
+          onSync={startSync}
+          isSyncing={isSyncing}
+          onOpenDashboard={openDashboard}
+          saveShortcut={saveShortcut}
+        />
       </VStack>
     </AppShell>
   );

@@ -213,6 +213,31 @@ function DashboardScreen({
     setTagDraft("");
   }, []);
 
+  // Deep links from the popup: ?q= prefills the search box (see
+  // buildDashboardSearchUrl in src/app/popup/dashboardLinks.ts), ?id= opens
+  // that bookmark's detail panel once it's loaded. Read once on mount —
+  // this is an entry point, not a two-way binding with the URL.
+  const appliedDeepLinkRef = useRef(false);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const query = params.get("q");
+    if (query) {
+      setSearch(query);
+      resetPagination();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (appliedDeepLinkRef.current || isLoading) return;
+    const id = new URLSearchParams(window.location.search).get("id");
+    if (id) {
+      const match = items.find((item) => item.id === id);
+      if (match) openDetails(match);
+    }
+    appliedDeepLinkRef.current = true;
+  }, [isLoading, items, openDetails]);
+
   const savePatch = async (patch: Partial<Bookmark>): Promise<boolean> => {
     if (!activeItem) return false;
     const updated = await updateBookmark(activeItem.id, patch);
