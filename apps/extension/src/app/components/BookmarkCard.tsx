@@ -59,7 +59,7 @@ export const BookmarkCard = memo(function BookmarkCard({
 
   return (
     <Card className="nook-bookmark-card">
-      <VStack gap={4}>
+      <VStack className="nook-bookmark-card-content" gap={4}>
         <HStack gap={3} vAlign="center" hAlign="between" wrap="wrap">
           <HStack gap={3} vAlign="center">
             <Avatar
@@ -81,7 +81,7 @@ export const BookmarkCard = memo(function BookmarkCard({
         {postText ? <Text type="body" textWrap="pretty">{postText}</Text> : null}
 
         {item.note ? (
-          <Section variant="muted" padding={3}>
+          <Section className="nook-bookmark-card-section" variant="muted" padding={3}>
             <VStack gap={1}>
               <Text type="supporting" weight="semibold">Your note</Text>
               <Text type="body">{item.note}</Text>
@@ -90,7 +90,7 @@ export const BookmarkCard = memo(function BookmarkCard({
         ) : null}
 
         {item.quote ? (
-          <Section variant="muted" padding={3}>
+          <Section className="nook-bookmark-card-section" variant="muted" padding={3}>
             <VStack gap={2}>
               <Text type="supporting" weight="semibold">
                 {item.quote.creator?.name || item.quote.creator?.handle || 'Quoted post'}
@@ -168,26 +168,25 @@ export const BookmarkCard = memo(function BookmarkCard({
             />
           ) : <Text key={tag} type="supporting" color="secondary">#{tag}</Text>)}
         </HStack>
-
-        <HStack gap={2} vAlign="center" wrap="wrap">
-          {url ? (
-            <Link
-              href={url}
-              isExternalLink
-              isStandalone
-              onClick={onOpenUrl ? event => {
-                event.preventDefault();
-                onOpenUrl(url, item);
-              } : undefined}
-            >
-              Open source
-            </Link>
-          ) : null}
-          {onOpenDetails ? <Button label="Details" size="sm" onClick={() => onOpenDetails(item)} /> : null}
-          {onCopy ? <Button label="Copy" variant="ghost" size="sm" icon={<Icon icon="copy" />} onClick={() => onCopy(item)} /> : null}
-          {onDelete ? <Button label="Delete" variant="ghost" size="sm" onClick={() => onDelete(item)} /> : null}
-        </HStack>
       </VStack>
+      <HStack className="nook-bookmark-card-actions" gap={2} vAlign="center" wrap="wrap">
+        {url ? (
+          <Link
+            href={url}
+            isExternalLink
+            isStandalone
+            onClick={onOpenUrl ? event => {
+              event.preventDefault();
+              onOpenUrl(url, item);
+            } : undefined}
+          >
+            Open source
+          </Link>
+        ) : null}
+        {onOpenDetails ? <Button label="Details" size="sm" onClick={() => onOpenDetails(item)} /> : null}
+        {onCopy ? <Button label="Copy" variant="ghost" size="sm" icon={<Icon icon="copy" />} onClick={() => onCopy(item)} /> : null}
+        {onDelete ? <Button label="Delete" variant="ghost" size="sm" onClick={() => onDelete(item)} /> : null}
+      </HStack>
     </Card>
   );
 });

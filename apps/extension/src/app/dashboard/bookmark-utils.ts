@@ -13,6 +13,10 @@ export const DEFAULT_TABLE_PAGE_SIZE = 25;
 export const DEFAULT_VIEW: LibraryView = { kind: "all" };
 export const LIST_EMOJIS = ["📁", "✦", "♡", "✈️", "☕", "🎨", "📚", "🌿"];
 
+export function hasNote(item: Bookmark) {
+  return Boolean(item.note?.trim());
+}
+
 export function hasMedia(item: Bookmark) {
   return Boolean(
     (item.media?.length || item.attachments?.length || 0) > 0 ||

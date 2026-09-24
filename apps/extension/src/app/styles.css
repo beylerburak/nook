@@ -148,6 +148,11 @@ body {
 }
 
 .nook-bookmark-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+  max-block-size: 72dvh;
+  break-inside: avoid;
   background-color: color-mix(in srgb, var(--color-background-card) 82%, transparent);
   backdrop-filter: blur(var(--spacing-4));
   box-shadow: var(--shadow-low);
@@ -157,6 +162,32 @@ body {
 .nook-bookmark-card:hover {
   background-color: color-mix(in srgb, var(--color-background-card) 94%, transparent);
   box-shadow: var(--shadow-med);
+}
+
+.nook-bookmark-card .nook-bookmark-card-section {
+  margin-inline: 0;
+}
+
+.nook-bookmark-card-content {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.nook-bookmark-card-actions {
+  flex: 0 0 auto;
+}
+
+.nook-bookmark-masonry.nook-bookmark-masonry {
+  display: block;
+  columns: 300px 4;
+  column-gap: var(--spacing-4);
+}
+
+.nook-bookmark-masonry > * {
+  margin-block-end: var(--spacing-4);
 }
 
 .nook-media-thumbnail {
