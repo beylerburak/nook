@@ -694,9 +694,10 @@ function DashboardScreen({
             if (!open) setLightbox(null);
           }}
           media={lightbox.media.map((media) => ({
-            src: media.url,
+            // Without a playable file (DOM-captured videos) show the poster image.
+            src: media.type === "video" && media.videoUrl ? media.videoUrl : media.url,
             alt: media.alt || "Saved media",
-            type: media.type === "video" ? "video" : "image",
+            type: media.type === "video" && media.videoUrl ? "video" : "image",
           }))}
           index={lightbox.index}
           onIndexChange={(index) => setLightbox((current) => current ? { ...current, index } : current)}

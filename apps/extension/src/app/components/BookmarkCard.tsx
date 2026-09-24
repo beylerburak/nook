@@ -150,7 +150,7 @@ export const BookmarkCard = memo(function BookmarkCard({
                   {item.quote.media.map((media, index) => (
                     <LazyThumbnail
                       key={media.url + '-quote-' + index}
-                      src={media.type === 'image' ? media.url : undefined}
+                      src={media.url}
                       alt={media.alt || 'Quoted post media ' + (index + 1)}
                       label={media.alt || 'Quoted post media ' + (index + 1)}
                       onClick={onMedia ? () => onMedia(media, item) : undefined}
@@ -166,8 +166,8 @@ export const BookmarkCard = memo(function BookmarkCard({
           <Grid columns={{minWidth: 80, repeat: 'fit'}} gap={2}>
             {mediaItems.map((media, index) => {
               const preview = media as PreviewMedia;
-              const previewUrl = preview.thumbnailUrl || preview.previewUrl ||
-                (media.type === 'image' ? media.url : undefined);
+              // Every media type stores a displayable image in `url` (videos: the poster).
+              const previewUrl = preview.thumbnailUrl || preview.previewUrl || media.url;
               const label = media.alt || `${media.type} preview ${index + 1}`;
               return (
                 <LazyThumbnail
