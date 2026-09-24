@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+node_modules
+data
+apps/api/dist
+apps/web/dist
+apps/extension/.output
+apps/extension/.wxt
+apps/extension/web-ext-artifacts

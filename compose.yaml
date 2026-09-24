@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nook
+      POSTGRES_USER: nook
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${NOOK_DB_HOST_PORT:-15481}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nook -d nook"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://nook:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/nook
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost:18481}
+      NOOK_ALLOWED_ORIGINS: ${NOOK_ALLOWED_ORIGINS:-}
+      NOOK_ALLOW_SIGNUP: ${NOOK_ALLOW_SIGNUP:-false}
+      PORT: 3000
+    ports:
+      - "127.0.0.1:${NOOK_API_HOST_PORT:-18482}:3000"
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:${NOOK_WEB_HOST_PORT:-18481}:80"
+
+volumes:
+  postgres_data:

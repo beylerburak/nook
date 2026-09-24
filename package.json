@@ -4,10 +4,12 @@
   "description": "Save what matters.",
   "private": true,
   "workspaces": [
-    "apps/extension"
+    "apps/extension",
+    "apps/api",
+    "apps/web"
   ],
   "scripts": {
-    "test": "npm run test -w @nook/extension",
+    "test": "npm run test -w @nook/extension && npm run test -w @nook/api",
     "typecheck": "npm run typecheck -w @nook/extension",
     "build": "npm run build -w @nook/extension",
     "zip": "npm run zip -w @nook/extension",
