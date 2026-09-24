@@ -204,3 +204,44 @@ test("migrateFromChromeStorage imports legacy items/lists and is idempotent", as
     vi.unstubAllGlobals();
   }
 });
+
+test("findBookmarkByUrl matches through tracking params and hash", async () => {
+  freshDb();
+  await NookDB.putBookmark({ id: "web:1", source: "web", url: "https://example.com/post?utm_source=x&id=7#top" });
+
+  const found = await NookDB.findBookmarkByUrl("https://example.com/post?id=7");
+  assert.equal(found?.id, "web:1");
+  assert.equal(found?.url, "https://example.com/post?utm_source=x&id=7#top", "stored URL is kept as saved");
+});
+
+test("findBookmarkByUrl can return the removed bookmark so re-saving restores it", async () => {
+  freshDb();
+  await NookDB.putBookmark({ id: "web:1", source: "web", url: "https://example.com", note: "keep me" });
+  await NookDB.softDeleteBookmark("web:1");
+
+  assert.equal(await NookDB.findBookmarkByUrl("https://example.com"), null);
+  const removed = await NookDB.findBookmarkByUrl("https://example.com", { includeDeleted: true });
+  assert.equal(removed?.id, "web:1");
+  assert.equal(removed?.note, "keep me");
+});
+
+test("upgrading a v1 database backfills urlKey for existing bookmarks", async () => {
+  const name = `nook-upgrade-${Date.now()}`;
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.open(name, 1);
+    request.onupgradeneeded = () => {
+      const bookmarks = request.result.createObjectStore("bookmarks", { keyPath: "id" });
+      bookmarks.createIndex("url", "url");
+      bookmarks.put({ id: "chrome:old", source: "chrome", url: "https://legacy.example/a?fbclid=abc" });
+    };
+    request.onsuccess = () => {
+      request.result.close();
+      resolve();
+    };
+    request.onerror = () => reject(request.error);
+  });
+
+  NookDB._resetForTests(name);
+  const found = await NookDB.findBookmarkByUrl("https://legacy.example/a");
+  assert.equal(found?.id, "chrome:old");
+});

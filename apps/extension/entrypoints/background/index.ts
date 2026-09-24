@@ -1,11 +1,23 @@
 import { defineBackground } from "wxt/utils/define-background";
 import * as NookDB from "../../lib/db";
 import { initBookmarkToastDelivery, sendBookmarkToast } from "../../lib/toast";
-import type { ContentToBackgroundMessage, MessageResponse } from "../../lib/types";
+import type {
+  ActivePageStateResponse,
+  BookmarkPatch,
+  ContentToBackgroundMessage,
+  MessageResponse,
+  PopupToBackgroundMessage,
+} from "../../lib/types";
+import { getActivePageState, notifyActiveTabBookmarkState, saveActivePage } from "./active-page-state";
+import { refreshBadgeForActiveTab, refreshBadgeForTab } from "./badge";
+import { handleContextMenuClick, registerContextMenus } from "./context-menu";
+import { classifyUnsavableUrl } from "./page-access";
+import { saveCurrentTab, savePage } from "./save-page";
 // Nook Background Service Worker
-// Listens for Chrome bookmark creation and captures web pages automatically
+// Listens for Chrome bookmark creation and captures web pages automatically,
+// and backs the popup's page-state / save / organize messages.
 
-
+type BackgroundMessage = ContentToBackgroundMessage | PopupToBackgroundMessage;
 
 export default defineBackground(() => {
 console.log("[Nook Background] Service Worker initialized");
@@ -19,255 +31,96 @@ NookDB.ready().catch((err) => {
   console.error("[Nook Background] NookDB.ready() failed:", err);
 });
 
+// Set the badge for whichever tab is active right now — tabs.onActivated/
+// onUpdated only fire on the *next* switch/navigation, which would otherwise
+// leave a stale (or missing) badge after the service worker wakes up fresh.
+refreshBadgeForActiveTab().catch(() => {});
+
 // Cached X Bookmarks GraphQL queryId (captured from network by inject.js)
 let _cachedBookmarkQueryId: string | null = null;
 
+// -- native Chrome bookmark capture ----------------------------------------
 
 chrome.bookmarks.onCreated.addListener(async (id, bookmark) => {
   try {
-    // 1. Validate bookmark
     if (!bookmark.url) return; // Skip folders
 
     const urlStr = bookmark.url;
-    if (
-      urlStr.startsWith("javascript:") ||
-      urlStr.startsWith("chrome://") ||
-      urlStr.startsWith("chrome-extension://") ||
-      urlStr.startsWith("about:") ||
-      urlStr.startsWith("edge://") ||
-      urlStr.startsWith("brave://")
-    ) {
-      return; // Skip browser-internal URLs
-    }
+    if (await classifyUnsavableUrl(urlStr)) return;
 
     console.log("[Nook Background] New Chrome bookmark detected:", bookmark.title, urlStr);
 
-    let urlObj;
-    try {
-      urlObj = new URL(urlStr);
-    } catch (e) {
-      return;
-    }
-
-    const hostname = urlObj.hostname.replace(/^www\./, "");
-
-    // 2. Try to extract metadata from the active tab or matching tab
-    let metadata = null;
+    // Find a tab actually showing this URL, if any, for live metadata + toast.
     let targetTab: chrome.tabs.Tab | undefined;
-
     try {
       const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (activeTabs[0] && activeTabs[0].url && activeTabs[0].url.split("#")[0] === urlStr.split("#")[0]) {
+      if (activeTabs[0]?.url && activeTabs[0].url.split("#")[0] === urlStr.split("#")[0]) {
         targetTab = activeTabs[0];
       } else {
         const matchingTabs = await chrome.tabs.query({ url: urlStr.split("#")[0] + "*" });
-        if (matchingTabs.length > 0) {
-          targetTab = matchingTabs[0];
-        }
-      }
-
-      if (targetTab?.id && !targetTab.url?.startsWith("chrome://")) {
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: targetTab.id },
-          func: extractPageMetadataInTab
-        });
-        if (results && results[0] && results[0].result) {
-          metadata = results[0].result;
-        }
+        targetTab = matchingTabs[0];
       }
     } catch (tabErr) {
-      console.log("[Nook Background] Could not extract from tab, will use fallback:", tabErr instanceof Error ? tabErr.message : String(tabErr));
+      console.log(
+        "[Nook Background] Could not find a matching tab, will capture without one:",
+        tabErr instanceof Error ? tabErr.message : String(tabErr)
+      );
     }
+    const scriptableTabId =
+      targetTab?.id !== undefined && targetTab.url && !(await classifyUnsavableUrl(targetTab.url))
+        ? targetTab.id
+        : undefined;
 
-    // 3. Fallback: If no metadata extracted from tab, fetch the page HTML
-    if (!metadata) {
-      metadata = await fetchPageMetadata(urlStr);
-    }
-
-    // 4. Construct Nook Bookmark Item
-    const title = (metadata?.title || bookmark.title || hostname).trim();
-    const description = (metadata?.description || "").trim();
-    const ogImage = metadata?.image || null;
-    const siteName = metadata?.siteName || hostname;
-    const avatar =
-      metadata?.iconHref ||
-      targetTab?.favIconUrl ||
-      `https://www.google.com/s2/favicons?domain=${hostname}&sz=128`;
-
-    const media = ogImage
-      ? [{ type: "image", url: ogImage, alt: title }]
-      : [];
-
-    const newItem = {
-      id: `chrome:${bookmark.id || crypto.randomUUID()}`,
-      source: "chrome",
-      title,
-      shortDescription: description ? description.slice(0, 180) : "",
-      description,
-      category: null,
-      tags: ["web"],
-      listId: null,
-      listName: null,
-      media,
-      attachments: media,
-      urls: [urlStr],
+    const { bookmark: saved } = await savePage({
       url: urlStr,
-      creator: {
-        name: siteName,
-        handle: hostname,
-        avatar
-      },
+      id: `chrome:${id}`,
+      source: "chrome",
+      metadataTabId: scriptableTabId,
+      toastTabId: scriptableTabId,
+      favIconUrl: targetTab?.favIconUrl,
+      fallbackTitle: bookmark.title,
       createdAt: new Date(bookmark.dateAdded || Date.now()).toISOString(),
-      savedAt: new Date().toISOString()
-    };
-
-    // 5. Save to IndexedDB (deduplicate by URL, ignoring soft-deleted rows)
-    const existing = await NookDB.findBookmarkByUrl(urlStr);
-    if (existing) {
-      // Update existing item with new metadata/saved time, keep its id
-      await NookDB.putBookmark({ ...existing, ...newItem, id: existing.id });
-    } else {
-      await NookDB.putBookmark(newItem);
-    }
-    console.log("[Nook Background] Bookmark successfully saved to Nook:", newItem);
-
-    // 6. Visual Feedback: Action badge on extension icon
-    chrome.action.setBadgeText({ text: "✓" });
-    chrome.action.setBadgeBackgroundColor({ color: "#10b981" });
-    setTimeout(() => {
-      chrome.action.setBadgeText({ text: "" });
-    }, 2400);
-
-    // 7. In-page Toast notification on the tab
-    if (targetTab?.id && !targetTab.url?.startsWith("chrome://")) {
-      const toastMsg = ogImage
-        ? `Nook: Saved "${siteName}" with image ✓`
-        : `Nook: Saved "${siteName}" to bookmarks ✓`;
-
-      sendBookmarkToast(targetTab.id, {
-        type: "SHOW_BOOKMARK_TOAST",
-        message: toastMsg,
-        bookmarkId: savedBookmarkId(existing, newItem),
-      }).catch(() => {});
-    }
+    });
+    console.log("[Nook Background] Bookmark successfully saved to Nook:", saved);
   } catch (err) {
     console.error("[Nook Background] Error capturing bookmark:", err);
   }
 });
 
-// Function executed inside the web page tab to extract OpenGraph & Meta info
-function extractPageMetadataInTab() {
-  try {
-    const getMeta = (selectors: string[]) => {
-      for (const sel of selectors) {
-        const el = document.querySelector<HTMLMetaElement>(`meta[property="${sel}"], meta[name="${sel}"]`);
-        if (el && el.content) {
-          const val = el.content.trim();
-          if (val) return val;
-        }
-      }
-      return null;
-    };
+// -- toolbar badge: reflects whether the active tab's page is saved -------
 
-    const title =
-      getMeta(["og:title", "twitter:title"]) ||
-      document.title ||
-      "";
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  chrome.tabs.get(tabId, (tab) => {
+    if (chrome.runtime.lastError || !tab) return;
+    refreshBadgeForTab(tabId, tab.url).catch(() => {});
+  });
+});
 
-    const description =
-      getMeta(["og:description", "twitter:description", "description"]) ||
-      "";
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete") return;
+  refreshBadgeForTab(tabId, tab.url).catch(() => {});
+});
 
-    const siteName =
-      getMeta(["og:site_name"]) ||
-      window.location.hostname.replace(/^www\./, "");
+// -- context menu: "Save page/link/image to Nook" --------------------------
 
-    let image = getMeta(["og:image", "twitter:image", "twitter:image:src"]);
-    if (image) {
-      try {
-        image = new URL(image, window.location.href).href;
-      } catch (e) {}
-    }
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  handleContextMenuClick(info, tab).catch((err) => {
+    console.error("[Nook Background] Context menu save failed:", err);
+  });
+});
 
-    // High resolution favicon
-    let iconHref = null;
-    const iconEl =
-      document.querySelector<HTMLLinkElement>('link[rel*="apple-touch-icon"]') ||
-      document.querySelector<HTMLLinkElement>('link[rel*="icon"][sizes="192x192"]') ||
-      document.querySelector<HTMLLinkElement>('link[rel*="icon"][sizes="32x32"]') ||
-      document.querySelector<HTMLLinkElement>('link[rel*="icon"]');
+// -- keyboard shortcut: save the active tab directly ------------------------
 
-    if (iconEl && iconEl.href) {
-      try {
-        iconHref = new URL(iconEl.href, window.location.href).href;
-      } catch (e) {}
-    }
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command !== "save-page" || !tab) return;
+  saveCurrentTab(tab).catch((err) => {
+    console.error("[Nook Background] Save-page command failed:", err);
+  });
+});
 
-    return { title, description, siteName, image, iconHref };
-  } catch (e) {
-    return null;
-  }
-}
+// -- message listener: content scripts (X) + extension pages (popup) -------
 
-function savedBookmarkId(existing: { id: string } | null, item: { id: string }) {
-  return existing?.id || item.id;
-}
-
-// Fallback: Fetch page HTML and extract OpenGraph tags via regex
-async function fetchPageMetadata(url: string) {
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3500);
-
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      }
-    });
-    clearTimeout(timeoutId);
-
-    if (!res.ok) return null;
-
-    const html = await res.text();
-
-    const getTagContent = (pattern: RegExp) => {
-      const match = html.match(pattern);
-      return match ? match[1].trim() : null;
-    };
-
-    const title =
-      getTagContent(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i) ||
-      getTagContent(/<title[^>]*>([^<]+)<\/title>/i) ||
-      "";
-
-    const description =
-      getTagContent(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i) ||
-      getTagContent(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']/i) ||
-      "";
-
-    let image =
-      getTagContent(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
-      getTagContent(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
-
-    if (image) {
-      try {
-        image = new URL(image, url).href;
-      } catch (e) {}
-    }
-
-    const siteName =
-      getTagContent(/<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']+)["']/i);
-
-    return { title, description, siteName, image, iconHref: null };
-  } catch (e) {
-    return null;
-  }
-}
-
-// Message listener from content script
-chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sender, sendResponse: (response?: MessageResponse) => void) => {
+chrome.runtime.onMessage.addListener((message: BackgroundMessage, sender, sendResponse: (response?: MessageResponse | ActivePageStateResponse) => void) => {
   if (message?.type === "SHOW_BOOKMARK_TOAST") {
     const tabId = sender.tab?.id;
     if (tabId === undefined) {
@@ -289,7 +142,7 @@ chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sende
     return true;
   }
 
-  if (message && message.type === "SAVE_ITEM") {
+  if (message?.type === "SAVE_ITEM") {
     (async () => {
       try {
         const item = message.item;
@@ -298,17 +151,7 @@ chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sende
           return;
         }
 
-        const existing = await NookDB.getBookmark(item.id);
-        if (existing && !existing.deletedAt) {
-          // Already saved and not deleted: nothing to do.
-        } else if (existing && existing.deletedAt) {
-          // A deliberate re-click of X's bookmark button on a post the user
-          // had removed from Nook should restore it, with fresh content.
-          await NookDB.putBookmark({ ...existing, ...item, deletedAt: null });
-        } else {
-          await NookDB.putBookmark(item);
-        }
-
+        await NookDB.saveOrRestoreBookmark(item);
         const count = (await NookDB.getAllBookmarks()).length;
         sendResponse({ success: true, count });
       } catch (err) {
@@ -319,7 +162,7 @@ chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sende
     return true; // Keep channel open for async response
   }
 
-  if (message && message.type === "GET_NOOK_BOOKMARK_STATES") {
+  if (message?.type === "GET_NOOK_BOOKMARK_STATES") {
     (async () => {
       try {
         const states: Record<string, boolean> = {};
@@ -335,7 +178,7 @@ chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sende
     return true;
   }
 
-  if (message && message.type === "TOGGLE_NOOK_BOOKMARK") {
+  if (message?.type === "TOGGLE_NOOK_BOOKMARK") {
     (async () => {
       try {
         const item = message.item;
@@ -349,7 +192,7 @@ chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sende
           sendResponse({ success: true, saved: false });
           return;
         }
-        await NookDB.putBookmark(existing ? { ...existing, ...item, deletedAt: null } : item);
+        await NookDB.saveOrRestoreBookmark(item);
         sendResponse({ success: true, saved: true });
       } catch (err) {
         sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
@@ -358,7 +201,7 @@ chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sende
     return true;
   }
 
-  if (message && message.type === "SYNC_ITEMS_BATCH") {
+  if (message?.type === "SYNC_ITEMS_BATCH") {
     // mergeBatch() runs the whole batch inside a single IndexedDB
     // transaction, so the page's own Bookmarks fetch and auto sync arriving
     // together can no longer race the way parallel get/set on a single
@@ -385,7 +228,7 @@ chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sende
     return true; // Keep channel open
   }
 
-  if (message && message.type === "STORE_QUERY_ID") {
+  if (message?.type === "STORE_QUERY_ID") {
     // Content script reports a captured queryId from inject.js interception
     if (message.queryId) {
       _cachedBookmarkQueryId = message.queryId;
@@ -395,12 +238,12 @@ chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sende
     return true;
   }
 
-  if (message && message.type === "GET_QUERY_ID") {
+  if (message?.type === "GET_QUERY_ID") {
     sendResponse({ queryId: _cachedBookmarkQueryId });
     return true;
   }
 
-  if (message && message.type === "START_AUTO_SYNC_X") {
+  if (message?.type === "START_AUTO_SYNC_X") {
     chrome.tabs.create({ url: "https://x.com/i/bookmarks", active: true }, (tab) => {
       const syncTabId = tab.id;
       if (syncTabId === undefined) return;
@@ -472,11 +315,61 @@ chrome.runtime.onMessage.addListener((message: ContentToBackgroundMessage, sende
     return true;
   }
 
-  if (message && message.type === "CLOSE_CURRENT_TAB") {
+  if (message?.type === "CLOSE_CURRENT_TAB") {
     if (sender.tab && sender.tab.id) {
       chrome.tabs.remove(sender.tab.id).catch(() => {});
     }
     sendResponse({ success: true });
+    return true;
+  }
+
+  // -- popup (control center) messages --------------------------------------
+
+  if (message?.type === "GET_ACTIVE_PAGE_STATE") {
+    getActivePageState()
+      .then((state) => sendResponse({ success: true, state }))
+      .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+    return true;
+  }
+
+  if (message?.type === "SAVE_ACTIVE_PAGE") {
+    saveActivePage()
+      .then(sendResponse)
+      .catch((err) => sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) }));
+    return true;
+  }
+
+  if (message?.type === "REMOVE_BOOKMARK") {
+    (async () => {
+      try {
+        await NookDB.softDeleteBookmark(message.id);
+        sendResponse({ success: true });
+        notifyActiveTabBookmarkState(message.id, false).catch(() => {});
+        refreshBadgeForActiveTab().catch(() => {});
+      } catch (err) {
+        sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "UPDATE_BOOKMARK") {
+    (async () => {
+      try {
+        const patch: BookmarkPatch = { ...message.patch };
+        if (patch.listId) {
+          const lists = await NookDB.getAllLists();
+          const matchedList = lists.find((list) => list.id === patch.listId);
+          if (matchedList) patch.listName = matchedList.name;
+        } else if (patch.listId === null) {
+          patch.listName = null;
+        }
+        const item = await NookDB.updateBookmark(message.id, patch);
+        sendResponse({ success: Boolean(item) });
+      } catch (err) {
+        sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
     return true;
   }
 });
@@ -487,6 +380,8 @@ chrome.runtime.onInstalled.addListener(() => {
   NookDB.ready().catch((err) => {
     console.error("[Nook Background] NookDB.ready() failed:", err);
   });
+
+  registerContextMenus();
 
   chrome.tabs.query({ url: ["*://x.com/*", "*://twitter.com/*"] }, (tabs) => {
     for (const tab of tabs) {

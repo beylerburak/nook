@@ -23,7 +23,7 @@
 
 
 
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
   const STORE_BOOKMARKS = "bookmarks";
   const STORE_LISTS = "lists";
   const STORE_META = "meta";
@@ -67,8 +67,9 @@
     _dbPromise = new Promise((resolve, reject) => {
       const request = indexedDB.open(_dbName, DB_VERSION);
 
-      request.onupgradeneeded = () => {
+      request.onupgradeneeded = (event) => {
         const db = request.result;
+        const upgrade = request.transaction!;
 
         if (!db.objectStoreNames.contains(STORE_BOOKMARKS)) {
           const bookmarks = db.createObjectStore(STORE_BOOKMARKS, { keyPath: "id" });
@@ -77,6 +78,13 @@
           bookmarks.createIndex("listId", "listId");
           bookmarks.createIndex("savedAt", "savedAt");
           bookmarks.createIndex("updatedAt", "updatedAt");
+        }
+
+        // v2: urlKey (normalized URL) index for duplicate-free page lookups.
+        const bookmarkStore = upgrade.objectStore(STORE_BOOKMARKS);
+        if (!bookmarkStore.indexNames.contains("urlKey")) {
+          bookmarkStore.createIndex("urlKey", "urlKey");
+          if (event.oldVersion > 0) backfillUrlKeys(bookmarkStore);
         }
 
         if (!db.objectStoreNames.contains(STORE_LISTS)) {
@@ -130,19 +138,68 @@
 
   // Non-deleted only — used for dedupe on save, so a soft-deleted bookmark
   // never silently blocks re-saving the same URL.
-  async function findBookmarkByUrl(url: string): Promise<Bookmark | null> {
+  //
+  // Tries an exact match first (cheap index lookup, and backward compatible
+  // with rows saved before URL normalization existed). Falls back to
+  // comparing normalized URLs across the whole store so a link that gained
+  // or lost a tracking param/hash since it was saved still dedupes.
+  /**
+   * Finds the bookmark for a page URL by its normalized form (tracking params and
+   * hash ignored), via the urlKey index. A live bookmark always wins; with
+   * `includeDeleted`, a soft-deleted one is returned when no live one exists, so
+   * re-saving restores it with its note, tags and collection.
+   */
+  async function findBookmarkByUrl(url: string, options: { includeDeleted?: boolean } = {}): Promise<Bookmark | null> {
     const db = await open();
     const tx = db.transaction(STORE_BOOKMARKS, "readonly");
-    const matches = await promisifyRequest<Bookmark[]>(tx.objectStore(STORE_BOOKMARKS).index("url").getAll(url));
-    return matches.find((item) => !item.deletedAt) || null;
+    const index = tx.objectStore(STORE_BOOKMARKS).index("urlKey");
+    const matches = await promisifyRequest<Bookmark[]>(index.getAll(normalizeUrlForDedupe(url)));
+    const live = matches.find((item) => !item.deletedAt);
+    if (live) return live;
+    if (!options.includeDeleted || matches.length === 0) return null;
+    // Most recently removed first: that's the one the user means to bring back.
+    return [...matches].sort((a, b) => String(b.deletedAt).localeCompare(String(a.deletedAt)))[0];
   }
 
+
+
   function withWriteDefaults<T extends Bookmark | BookmarkList>(item: T): T {
-    return {
+    return withUrlKey({
       ...item,
       updatedAt: nowIso(),
       deletedAt: item.deletedAt === undefined ? null : item.deletedAt
+    });
+  }
+
+  /** Keeps a bookmark's `urlKey` (its normalized URL, indexed) in sync with `url`. */
+  function withUrlKey<T extends Bookmark | BookmarkList>(item: T): T {
+    if (!("url" in item)) return item;
+    const url = typeof item.url === "string" ? item.url : "";
+    return { ...item, urlKey: url ? normalizeUrlForDedupe(url) : undefined };
+  }
+
+  function backfillUrlKeys(store: IDBObjectStore): void {
+    const cursorRequest = store.openCursor();
+    cursorRequest.onsuccess = () => {
+      const cursor = cursorRequest.result;
+      if (!cursor) return;
+      cursor.update(withUrlKey(cursor.value as Bookmark));
+      cursor.continue();
     };
+  }
+
+  // Saves `item` under its own id, restoring it if it previously existed and
+  // was soft-deleted (a deliberate re-save should win over an old tombstone),
+  // and leaving it untouched if it's already saved and not deleted. Shared by
+  // the X "SAVE_ITEM" flow (Nook action-bar button / native bookmark) and the
+  // popup's SAVE_ACTIVE_PAGE path so both save X posts the same way.
+  async function saveOrRestoreBookmark(item: Bookmark): Promise<Bookmark> {
+    const existing = await getBookmark(item.id);
+    if (existing && !existing.deletedAt) return existing;
+    if (existing && existing.deletedAt) {
+      return putBookmark({ ...existing, ...item, id: existing.id, deletedAt: null });
+    }
+    return putBookmark(item);
   }
 
   async function putBookmark(item: Bookmark): Promise<Bookmark> {
@@ -178,7 +235,7 @@
       await promisifyTransaction(tx);
       return null;
     }
-    const record = { ...existing, ...patch, id, updatedAt: nowIso() };
+    const record = withUrlKey({ ...existing, ...patch, id, updatedAt: nowIso() });
     await promisifyRequest(store.put(record));
     await promisifyTransaction(tx);
     notifyChange([STORE_BOOKMARKS], [id]);
@@ -322,7 +379,7 @@
 
       const merged = mergeFn(existing, incoming);
       if (merged) {
-        const record = { ...merged, updatedAt: now, deletedAt: null };
+        const record = withUrlKey({ ...merged, updatedAt: now, deletedAt: null });
         store.put(record);
         updated.push(record);
       }
@@ -390,11 +447,11 @@
       const store = tx.objectStore(STORE_BOOKMARKS);
       for (const item of items) {
         if (!item || !item.id) continue;
-        store.put({
+        store.put(withUrlKey({
           ...item,
           updatedAt: item.savedAt || nowIso(),
           deletedAt: null
-        });
+        }));
       }
       await promisifyTransaction(tx);
     }
@@ -449,6 +506,7 @@ export {
   getAllBookmarks,
   getBookmark,
   findBookmarkByUrl,
+  saveOrRestoreBookmark,
   putBookmark,
   putBookmarks,
   updateBookmark,
@@ -467,3 +525,4 @@ export {
   _resetForTests
 };
 import type { Bookmark, BookmarkList } from "./types";
+import { normalizeUrlForDedupe } from "./url";
