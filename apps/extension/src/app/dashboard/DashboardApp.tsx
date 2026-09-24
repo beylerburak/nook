@@ -16,22 +16,20 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { Toolbar } from "@astryxdesign/core/Toolbar";
 import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
 import { ToastViewport, useToast } from "@astryxdesign/core/Toast";
+import { ToggleButton } from "@astryxdesign/core/ToggleButton";
 import { Theme, type ThemeMode } from "@astryxdesign/core/theme";
 import { nookTheme } from "../theme/nook.js";
 import { CanvasEditorShell } from "../canvas-editor/page";
-import { AppearanceMenu } from "../components/AppearanceMenu";
 import { useAppearance } from "../components/useAppearance";
 import { BookmarkCard } from "../components/BookmarkCard";
+import { SyncStatusIndicator } from "../components/SyncStatusIndicator";
+import { UserMenu } from "../components/UserMenu";
 import { BookmarkTable, BOOKMARK_TABLE_VIEW_CONFIG } from "../data-table/BookmarkTable";
 import { DataTableViewOptions } from "../data-table/view-options";
 import { DataTableViewProvider } from "../data-table/view-state";
+import { SettingsDialog, type SettingsSection } from "../settings-dialog/SettingsDialog";
 import { BookmarkDetailPanel } from "./BookmarkDetailPanel";
-import {
-  ClearAllBookmarksDialog,
-  CreateListDialog,
-  DeleteListDialog,
-  ImportBookmarksDialog,
-} from "./dialogs";
+import { CreateListDialog, DeleteListDialog } from "./dialogs";
 import { BookmarkGlyph } from "./glyphs";
 import { LibrarySideNav } from "./LibrarySideNav";
 import { useBookmarkLibrary } from "./useBookmarkLibrary";
@@ -42,6 +40,7 @@ import {
   LIST_EMOJIS,
   allItemMedia,
   getTags,
+  hasNote,
   hasMedia,
   itemTitle,
   matchesSearch,
@@ -79,6 +78,7 @@ function DashboardScreen({
   const [search, setSearch] = useState("");
   const [view, setView] = useState<LibraryView>(DEFAULT_VIEW);
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>("all");
+  const [notesOnly, setNotesOnly] = useState(false);
   const [viewMode, setViewMode] = useState<BookmarkViewMode>("cards");
   const [cardPage, setCardPage] = useState(1);
   const [tablePage, setTablePage] = useState(1);
@@ -90,12 +90,16 @@ function DashboardScreen({
   const [tagDraft, setTagDraft] = useState("");
   const [lightbox, setLightbox] = useState<LightboxState>(null);
   const [isListDialogOpen, setIsListDialogOpen] = useState(false);
-  const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
-  const [isClearDialogOpen, setIsClearDialogOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSection | undefined>(undefined);
   const [pendingDeleteList, setPendingDeleteList] = useState<BookmarkList | null>(null);
   const [listNameDraft, setListNameDraft] = useState("");
   const [listEmoji, setListEmoji] = useState(LIST_EMOJIS[0]);
-  const [importFile, setImportFile] = useState<File | null>(null);
+
+  const openSettings = useCallback((section?: SettingsSection) => {
+    setSettingsSection(section);
+    setIsSettingsOpen(true);
+  }, []);
 
   const resetPagination = useCallback(() => {
     setCardPage(1);
@@ -107,11 +111,18 @@ function DashboardScreen({
     resetPagination();
   }, [resetPagination]);
 
-  // Search-focus shortcut and whole-page JSON drag & drop. Purely UI
-  // wiring — the bookmark data effects (initial load, cross-tab refresh)
-  // live in useBookmarkLibrary.
+  // Search-focus / Settings shortcuts and whole-page JSON drag & drop.
+  // Purely UI wiring — the bookmark data effects (initial load, cross-tab
+  // refresh) live in useBookmarkLibrary. A dropped file imports straight
+  // away (importBookmarks toasts its own result); there's no confirmation
+  // dialog to stage it in anymore now that import lives in Settings → Data.
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+        event.preventDefault();
+        openSettings(undefined);
+        return;
+      }
       if (event.key === "/" && !event.metaKey && !event.ctrlKey) {
         const target = event.target as HTMLElement | null;
         if (target?.matches("input, textarea, [contenteditable=true]")) return;
@@ -128,8 +139,7 @@ function DashboardScreen({
       const file = event.dataTransfer?.files?.[0];
       if (!file || (!file.name.endsWith(".json") && file.type !== "application/json")) return;
       event.preventDefault();
-      setImportFile(file);
-      setIsImportDialogOpen(true);
+      void importBookmarks(file);
     };
     const preventFileNavigation = (event: DragEvent) => {
       if (Array.from(event.dataTransfer?.types || []).includes("Files")) event.preventDefault();
@@ -142,7 +152,7 @@ function DashboardScreen({
       window.removeEventListener("dragover", preventFileNavigation);
       window.removeEventListener("drop", handleDrop);
     };
-  }, []);
+  }, [importBookmarks, openSettings]);
 
   const counts = useMemo(() => {
     const mediaCount = items.filter(hasMedia).length;
@@ -169,10 +179,11 @@ function DashboardScreen({
       ) return false;
       if (mediaFilter === "media" && !hasMedia(item)) return false;
       if (mediaFilter === "text" && hasMedia(item)) return false;
+      if (notesOnly && !hasNote(item)) return false;
       return matchesSearch(item, search.trim());
     });
     return NookShared.sortBookmarksByDate(filtered, sort);
-  }, [items, view, mediaFilter, search, sort]);
+  }, [items, view, mediaFilter, notesOnly, search, sort]);
 
   const listsById = useMemo(
     () => new Map(lists.map((list) => [list.id, list])),
@@ -258,10 +269,14 @@ function DashboardScreen({
   }, [deleteBookmarkRecord]);
 
   const openUrl = useCallback((url: string) => {
-    chrome.tabs.create({ url }).catch((error) => {
-      console.error("[Nook] Failed to open URL:", error);
-      toast({ body: "Could not open this link.", type: "error" });
-    });
+    if (typeof chrome !== "undefined" && chrome.tabs?.create) {
+      chrome.tabs.create({ url }).catch((error) => {
+        console.error("[Nook] Failed to open URL:", error);
+        toast({ body: "Could not open this link.", type: "error" });
+      });
+    } else {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
   }, [toast]);
 
   const copyText = useCallback(async (item: Bookmark) => {
@@ -335,20 +350,6 @@ function DashboardScreen({
     }
   };
 
-  const handleClearAll = async () => {
-    const success = await clearAllBookmarks();
-    if (success) setIsClearDialogOpen(false);
-  };
-
-  const handleImport = async () => {
-    if (!importFile) return;
-    const success = await importBookmarks(importFile);
-    if (success) {
-      setImportFile(null);
-      setIsImportDialogOpen(false);
-    }
-  };
-
   const exportBookmarks = () => {
     const file = new Blob(
       [JSON.stringify({ items, lists, exportedAt: new Date().toISOString() }, null, 2)],
@@ -389,26 +390,10 @@ function DashboardScreen({
       }
       endContent={
         <HStack gap={2} align="center">
-          <AppearanceMenu mode={appearance} onChange={onAppearanceChange} />
-          <Button
-            label="Import"
-            variant="secondary"
-            size="sm"
-            icon={<Icon icon="arrowDown" size="sm" />}
-            onClick={() => setIsImportDialogOpen(true)}
-          />
-          <Button
-            label="Export"
-            variant="secondary"
-            size="sm"
-            icon={<Icon icon="arrowUp" size="sm" />}
-            onClick={exportBookmarks}
-          />
-          <Button
-            label="Clear all"
-            variant="ghost"
-            size="sm"
-            onClick={() => setIsClearDialogOpen(true)}
+          <SyncStatusIndicator onOpenSync={() => openSettings("sync")} />
+          <UserMenu
+            onOpenProfile={() => openSettings("profile")}
+            onOpenSettings={() => openSettings(undefined)}
           />
         </HStack>
       }
@@ -550,21 +535,34 @@ function DashboardScreen({
                 <Tab value="media" label="With media" endContent={<Badge label={counts.media} />} />
                 <Tab value="text" label="Text only" endContent={<Badge label={counts.text} />} />
               </TabList>
-              <Selector
-                label="Sort bookmarks"
-                isLabelHidden
-                size="sm"
-                variant="ghost"
-                options={[
-                  { value: "newest", label: "Newest first" },
-                  { value: "oldest", label: "Oldest first" },
-                ]}
-                value={sort}
-                onChange={(value) => {
-                  setSort(value as "newest" | "oldest");
-                  resetPagination();
-                }}
-              />
+              <HStack align="center" gap={2} wrap="wrap">
+                <ToggleButton
+                  label="With notes"
+                  isPressed={notesOnly}
+                  onPressedChange={(pressed) => {
+                    setNotesOnly(pressed);
+                    resetPagination();
+                  }}
+                  size="sm"
+                >
+                  With notes
+                </ToggleButton>
+                <Selector
+                  label="Sort bookmarks"
+                  isLabelHidden
+                  size="sm"
+                  variant="ghost"
+                  options={[
+                    { value: "newest", label: "Newest first" },
+                    { value: "oldest", label: "Oldest first" },
+                  ]}
+                  value={sort}
+                  onChange={(value) => {
+                    setSort(value as "newest" | "oldest");
+                    resetPagination();
+                  }}
+                />
+              </HStack>
             </HStack>
 
             {isLoading ? (
@@ -587,6 +585,7 @@ function DashboardScreen({
                       onClick={() => {
                         selectLibraryView(DEFAULT_VIEW);
                         setMediaFilter("all");
+                        setNotesOnly(false);
                         setSearch("");
                         resetPagination();
                       }}
@@ -602,7 +601,7 @@ function DashboardScreen({
                 onOpenUrl={openUrl}
               />
             ) : (
-              <Grid className="nook-card-grid" columns={{ minWidth: 300, max: 4, repeat: "fit" }} gap={4}>
+              <Grid className="nook-bookmark-masonry">
                 {pageItems.map((item) => (
                   <BookmarkCard
                     key={item.id}
@@ -661,22 +660,20 @@ function DashboardScreen({
         onCreate={() => void handleCreateList()}
       />
 
-      <ImportBookmarksDialog
-        isOpen={isImportDialogOpen}
-        onOpenChange={(open) => {
-          setIsImportDialogOpen(open);
-          if (!open) setImportFile(null);
+      <SettingsDialog
+        isOpen={isSettingsOpen}
+        onOpenChange={setIsSettingsOpen}
+        initialSection={settingsSection}
+        appearance={appearance}
+        onAppearanceChange={onAppearanceChange}
+        library={{
+          bookmarkCount: items.length,
+          collectionCount: lists.length,
+          isImporting,
+          importBookmarks,
+          exportBookmarks,
+          clearAllBookmarks,
         }}
-        file={importFile}
-        onFileChange={setImportFile}
-        isImporting={isImporting}
-        onImport={() => void handleImport()}
-      />
-
-      <ClearAllBookmarksDialog
-        isOpen={isClearDialogOpen}
-        onOpenChange={setIsClearDialogOpen}
-        onConfirm={() => void handleClearAll()}
       />
 
       <DeleteListDialog

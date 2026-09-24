@@ -11,6 +11,11 @@ type ToastFn = ReturnType<typeof useToast>;
  * (import, update, delete, create/delete collection, clear all). Every
  * operation reports failures through `toast` and never throws, so a
  * rejected IndexedDB write can't become an unhandled promise rejection.
+ *
+ * Used by both the extension and the web app — the web app is local-first
+ * too, and syncs this same IndexedDB library to the cloud out of band (see
+ * lib/cloud-sync.ts / lib/cloud-runner.ts), rather than reading through a
+ * separate network-backed hook.
  */
 export function useBookmarkLibrary(toast: ToastFn) {
   const [items, setItems] = useState<Bookmark[]>([]);

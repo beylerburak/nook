@@ -21,8 +21,12 @@ function isExtensionPage(): boolean {
   return location.protocol === "chrome-extension:";
 }
 
+function hasExtensionStorage(): boolean {
+  return typeof chrome !== "undefined" && Boolean(chrome.storage?.local);
+}
+
 function writeCachedAppearance(mode: ThemeMode): void {
-  if (!isExtensionPage()) return;
+  if (!isExtensionPage() && hasExtensionStorage()) return;
   try {
     localStorage.setItem(APPEARANCE_STORAGE_KEY, mode);
   } catch {
@@ -32,7 +36,7 @@ function writeCachedAppearance(mode: ThemeMode): void {
 
 /** Synchronous best guess for the first render. Content scripts always get "system". */
 export function readCachedAppearance(): ThemeMode {
-  if (!isExtensionPage()) return "system";
+  if (!isExtensionPage() && hasExtensionStorage()) return "system";
   try {
     return toThemeMode(localStorage.getItem(APPEARANCE_STORAGE_KEY));
   } catch {
@@ -41,6 +45,7 @@ export function readCachedAppearance(): ThemeMode {
 }
 
 export async function loadAppearance(): Promise<ThemeMode> {
+  if (!hasExtensionStorage()) return readCachedAppearance();
   const stored: unknown = (await chrome.storage.local.get(APPEARANCE_STORAGE_KEY))[APPEARANCE_STORAGE_KEY];
   if (stored !== undefined) return toThemeMode(stored);
 
@@ -52,11 +57,19 @@ export async function loadAppearance(): Promise<ThemeMode> {
 
 export async function saveAppearance(mode: ThemeMode): Promise<void> {
   writeCachedAppearance(mode);
+  if (!hasExtensionStorage()) return;
   await chrome.storage.local.set({ [APPEARANCE_STORAGE_KEY]: mode });
 }
 
 /** Fires when any surface changes the preference. Returns an unsubscribe function. */
 export function subscribeToAppearance(listener: (mode: ThemeMode) => void): () => void {
+  if (!hasExtensionStorage()) {
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === APPEARANCE_STORAGE_KEY) listener(toThemeMode(event.newValue));
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }
   const handleChange = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
     if (areaName !== "local" || !(APPEARANCE_STORAGE_KEY in changes)) return;
     const mode = toThemeMode(changes[APPEARANCE_STORAGE_KEY].newValue);
