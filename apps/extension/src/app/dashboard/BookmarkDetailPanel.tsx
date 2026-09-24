@@ -7,9 +7,9 @@ import { Selector } from "@astryxdesign/core/Selector";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
-import { Thumbnail } from "@astryxdesign/core/Thumbnail";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { Token } from "@astryxdesign/core/Token";
+import { MediaThumbnail } from "../components/MediaThumbnail";
 import { allItemMedia, itemTitle, visibleText } from "./bookmark-utils";
 import type { Bookmark, BookmarkList, Media } from "../../../lib/types";
 
@@ -95,8 +95,9 @@ export function BookmarkDetailPanel({
         {allItemMedia(item).length > 0 ? (
           <Grid columns={{ minWidth: 96, repeat: "fit" }} gap={2}>
             {allItemMedia(item).map((media, index) => (
-              <Thumbnail
+              <MediaThumbnail
                 key={media.url + "-" + index}
+                mediaType={media.type}
                 src={media.url}
                 alt={media.alt || itemTitle(item) + " media " + (index + 1)}
                 label={media.alt || "Media " + (index + 1)}

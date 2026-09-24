@@ -159,6 +159,26 @@ body {
   box-shadow: var(--shadow-med);
 }
 
+.nook-media-thumbnail {
+  position: relative;
+  /* Grid items stretch to fill their column by default; keep this wrapper
+     hugging the Thumbnail it wraps instead, exactly like the bare
+     Thumbnail it replaces. */
+  justify-self: start;
+}
+
+.nook-media-thumbnail-badge {
+  position: absolute;
+  inset-inline-start: 50%;
+  inset-block-start: 50%;
+  transform: translate(-50%, -50%);
+  border-radius: var(--radius-full);
+  background-color: var(--color-overlay);
+  color: var(--color-on-dark);
+  /* Decorative overlay only — clicks must reach the Thumbnail beneath it. */
+  pointer-events: none;
+}
+
 .nook-popup-shell {
   background-color: color-mix(in srgb, var(--color-background-surface) 86%, transparent);
   backdrop-filter: blur(var(--spacing-5));

@@ -1,4 +1,4 @@
-import {memo, useEffect, useRef, useState} from 'react';
+import {memo} from 'react';
 import {Avatar} from '@astryxdesign/core/Avatar';
 import {Button} from '@astryxdesign/core/Button';
 import {Card} from '@astryxdesign/core/Card';
@@ -8,9 +8,8 @@ import {HStack, VStack} from '@astryxdesign/core/Layout';
 import {Link} from '@astryxdesign/core/Link';
 import {Section} from '@astryxdesign/core/Section';
 import {Text} from '@astryxdesign/core/Text';
-import {Thumbnail} from '@astryxdesign/core/Thumbnail';
-import type {ThumbnailProps} from '@astryxdesign/core/Thumbnail';
 import {Timestamp} from '@astryxdesign/core/Timestamp';
+import {MediaThumbnail} from './MediaThumbnail';
 import type {Bookmark, Media} from '../../../lib/types';
 
 export interface BookmarkCardProps {
@@ -26,41 +25,6 @@ export interface BookmarkCardProps {
 }
 
 type PreviewMedia = Media & {thumbnailUrl?: string; previewUrl?: string};
-
-function LazyThumbnail({src, ...props}: Omit<ThumbnailProps, 'ref' | 'isLoading'>) {
-  const targetRef = useRef<HTMLDivElement>(null);
-  const [isNearViewport, setIsNearViewport] = useState(false);
-
-  useEffect(() => {
-    const target = targetRef.current;
-    if (!src || !target || isNearViewport) return;
-    if (!("IntersectionObserver" in window)) {
-      setIsNearViewport(true);
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      entries => {
-        if (entries.some(entry => entry.isIntersecting)) {
-          setIsNearViewport(true);
-          observer.disconnect();
-        }
-      },
-      {rootMargin: '240px'},
-    );
-    observer.observe(target);
-    return () => observer.disconnect();
-  }, [isNearViewport, src]);
-
-  return (
-    <Thumbnail
-      {...props}
-      ref={targetRef}
-      src={isNearViewport ? src : undefined}
-      isLoading={!isNearViewport && Boolean(src)}
-    />
-  );
-}
 
 function getBookmarkText(item: Bookmark): string | undefined {
   return item.description || item.shortDescription || item.title;
@@ -148,8 +112,10 @@ export const BookmarkCard = memo(function BookmarkCard({
               {item.quote.media?.length ? (
                 <Grid columns={{minWidth: 80, repeat: 'fit'}} gap={2}>
                   {item.quote.media.map((media, index) => (
-                    <LazyThumbnail
+                    <MediaThumbnail
                       key={media.url + '-quote-' + index}
+                      mediaType={media.type}
+                      isLazy
                       src={media.url}
                       alt={media.alt || 'Quoted post media ' + (index + 1)}
                       label={media.alt || 'Quoted post media ' + (index + 1)}
@@ -170,8 +136,10 @@ export const BookmarkCard = memo(function BookmarkCard({
               const previewUrl = preview.thumbnailUrl || preview.previewUrl || media.url;
               const label = media.alt || `${media.type} preview ${index + 1}`;
               return (
-                <LazyThumbnail
+                <MediaThumbnail
                   key={`${media.url}-${index}`}
+                  mediaType={media.type}
+                  isLazy
                   src={previewUrl}
                   alt={media.alt || (previewUrl ? label : '')}
                   label={label}
