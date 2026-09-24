@@ -18,6 +18,14 @@ export function findQuoteBox(article: Element): HTMLElement | null {
   );
 }
 
+/**
+ * Dedupe key for a pbs.twimg.com image: X serves the same poster as both
+ * `…/abc.jpg` (video poster) and `…/abc?format=jpg&name=small` (<img>).
+ */
+function mediaKey(src: string): string {
+  return src.split("?")[0].replace(/\.(jpe?g|png|webp)$/i, "");
+}
+
 export function extractMedia(article: Element, exclude: Element | null = null): Media[] {
   const media: Media[] = [];
   const seenUrls = new Set();
@@ -45,7 +53,7 @@ export function extractMedia(article: Element, exclude: Element | null = null): 
       }
     } catch (e) {}
 
-    const baseId = src.split("?")[0];
+    const baseId = mediaKey(src);
     if (!seenUrls.has(baseId)) {
       seenUrls.add(baseId);
       media.push({
@@ -61,7 +69,7 @@ export function extractMedia(article: Element, exclude: Element | null = null): 
   for (const video of videos) {
     const poster = video.getAttribute("poster") || (video as HTMLVideoElement).poster;
     if (poster) {
-      const baseId = poster.split("?")[0];
+      const baseId = mediaKey(poster);
       if (!seenUrls.has(baseId)) {
         seenUrls.add(baseId);
         media.push({
@@ -82,7 +90,7 @@ export function extractMedia(article: Element, exclude: Element | null = null): 
   for (const img of cardImgs) {
     const src = img.getAttribute("src") || (img as HTMLImageElement).src;
     if (src && !src.includes("profile_images")) {
-      const baseId = src.split("?")[0];
+      const baseId = mediaKey(src);
       if (!seenUrls.has(baseId)) {
         seenUrls.add(baseId);
         media.push({
