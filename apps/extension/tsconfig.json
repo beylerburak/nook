@@ -8,7 +8,7 @@
     "strict": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["chrome", "vitest/globals", "node"]
+    "types": ["chrome", "vitest/globals", "node", "vite/client"]
   },
   "include": ["**/*.ts", "**/*.tsx", "**/*.d.ts", ".wxt/wxt.d.ts"],
   "exclude": [".output", ".wxt", "node_modules"]

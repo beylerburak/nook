@@ -111,6 +111,10 @@
   // which only fired for whole-array chrome.storage.local writes. Guarded
   // because BroadcastChannel doesn't exist in the Node test environment.
   function notifyChange(stores: string[], ids: string[] = []) {
+    // Alarms wake the MV3 service worker even when all Nook pages are closed.
+    if (typeof chrome !== "undefined" && chrome.alarms?.create) {
+      void chrome.alarms.create("nook-cloud-sync-soon", { delayInMinutes: 0.1 });
+    }
     if (typeof BroadcastChannel === "undefined") return;
     try {
       const channel = new BroadcastChannel("nook-db");
@@ -344,6 +348,24 @@
     return value;
   }
 
+  // Remote rows keep the server's record timestamps. Using putBookmark/putList
+  // here would stamp a new local updatedAt and incorrectly queue an echo write.
+  async function applyRemoteRecords(bookmarks: Bookmark[], lists: BookmarkList[]): Promise<void> {
+    if (bookmarks.length === 0 && lists.length === 0) return;
+    const db = await open();
+    const tx = db.transaction([STORE_BOOKMARKS, STORE_LISTS], "readwrite");
+    const bookmarkStore = tx.objectStore(STORE_BOOKMARKS);
+    const listStore = tx.objectStore(STORE_LISTS);
+    for (const item of bookmarks) bookmarkStore.put(withUrlKey(item));
+    for (const list of lists) listStore.put(list);
+    await promisifyTransaction(tx);
+    if (typeof BroadcastChannel !== "undefined") {
+      const channel = new BroadcastChannel("nook-db");
+      channel.postMessage({ type: "changed", stores: [STORE_BOOKMARKS, STORE_LISTS], ids: [...bookmarks, ...lists].map((row) => row.id) });
+      channel.close();
+    }
+  }
+
   // Inserts brand-new items and merges incoming content into existing ones
   // via mergeFn(existing, incoming) => merged|null, all inside ONE
   // readwrite transaction (so a batch from the X bookmarks sync can't
@@ -439,6 +461,29 @@
       }
     }
     return changed ? merged : null;
+  }
+
+  // -- account switch / sign-out --------------------------------------------
+
+  // Clears bookmarks, lists and every `cloud:`-namespaced meta key (token,
+  // owner, cached user, sync state — for every server namespace, not just
+  // the currently configured one) in this origin's NookDB, keeping every
+  // other meta key (appearance preference, device id, the migration flag).
+  // Used when switching cloud accounts or signing out of the web app, where
+  // the local copy is only a cache of the account and must not bleed into
+  // whatever gets bound/synced next.
+  async function wipeLocalLibrary(): Promise<void> {
+    const db = await open();
+    const tx = db.transaction([STORE_BOOKMARKS, STORE_LISTS, STORE_META], "readwrite");
+    const metaStore = tx.objectStore(STORE_META);
+    const metaKeys = await promisifyRequest<IDBValidKey[]>(metaStore.getAllKeys());
+    tx.objectStore(STORE_BOOKMARKS).clear();
+    tx.objectStore(STORE_LISTS).clear();
+    for (const key of metaKeys) {
+      if (typeof key === "string" && key.startsWith("cloud:")) metaStore.delete(key);
+    }
+    await promisifyTransaction(tx);
+    notifyChange([STORE_BOOKMARKS, STORE_LISTS], []);
   }
 
   // -- migration from chrome.storage.local -----------------------------------
@@ -540,6 +585,8 @@ export {
   getChangesSince,
   getMeta,
   setMeta,
+  applyRemoteRecords,
+  wipeLocalLibrary,
   mergeBatch,
   mergeTweetContent,
   TWEET_CONTENT_FIELDS,

@@ -296,3 +296,42 @@ test("upgrading a v1 database backfills urlKey for existing bookmarks", async ()
   const found = await NookDB.findBookmarkByUrl("https://legacy.example/a");
   assert.equal(found?.id, "chrome:old");
 });
+
+test("wipeLocalLibrary clears bookmarks, lists and cloud:-namespaced meta, keeping everything else", async () => {
+  freshDb();
+  await NookDB.putBookmark({ id: "b1", source: "web", url: "https://a.example", title: "A" });
+  await NookDB.putList({ id: "l1", name: "Reading" });
+
+  // cloud:-namespaced meta (any server namespace, not just one) must be cleared.
+  await NookDB.setMeta("cloud:https://a.example:token", "token-a");
+  await NookDB.setMeta("cloud:https://b.example:owner", "owner-b");
+  await NookDB.setMeta("cloud:https://b.example:state", { cursor: "1" });
+  // Everything else must survive.
+  await NookDB.setMeta("cloud.deviceId", "device-1");
+  await NookDB.setMeta("nook.appearance", "dark");
+
+  await NookDB.wipeLocalLibrary();
+
+  assert.deepEqual(await NookDB.getAllBookmarks({ includeDeleted: true }), []);
+  assert.deepEqual(await NookDB.getAllLists({ includeDeleted: true }), []);
+  assert.equal(await NookDB.getMeta("cloud:https://a.example:token"), undefined);
+  assert.equal(await NookDB.getMeta("cloud:https://b.example:owner"), undefined);
+  assert.equal(await NookDB.getMeta("cloud:https://b.example:state"), undefined);
+  assert.equal(await NookDB.getMeta("cloud.deviceId"), "device-1");
+  assert.equal(await NookDB.getMeta("nook.appearance"), "dark");
+});
+
+test("wipeLocalLibrary notifies like other writes", async () => {
+  freshDb();
+  await NookDB.putBookmark({ id: "b1", source: "web", url: "https://a.example", title: "A" });
+
+  const received: unknown[] = [];
+  const channel = new BroadcastChannel("nook-db");
+  channel.onmessage = (event) => received.push(event.data);
+
+  await NookDB.wipeLocalLibrary();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.ok(received.length > 0);
+  channel.close();
+});
