@@ -10,7 +10,8 @@ import {
   parseGraphQLTweet,
   extractBottomCursor,
   parseGraphQLBookmarks,
-  diagnoseGraphQLResponse
+  diagnoseGraphQLResponse,
+  extractVideoMediaEntries
 } from "../lib/x-parser";
 
 function loadFixture(filename: string) {
@@ -18,6 +19,126 @@ function loadFixture(filename: string) {
   const content = fs.readFileSync(filePath, "utf-8");
   return JSON.parse(content);
 }
+
+test("extractVideoMediaEntries finds video media nested in a non-Bookmarks (HomeTimeline-shaped) response", () => {
+  // Deliberately not a Bookmarks shape: HomeTimeline nests entries under
+  // data.home.home_timeline_urt, and the video lives two levels deep — once
+  // in the top tweet's media, and again inside a quoted tweet — to prove the
+  // scan doesn't rely on any particular known path to get there.
+  const response = {
+    data: {
+      home: {
+        home_timeline_urt: {
+          instructions: [
+            {
+              type: "TimelineAddEntries",
+              entries: [
+                {
+                  entryId: "tweet-111",
+                  content: {
+                    itemContent: {
+                      tweet_results: {
+                        result: {
+                          __typename: "Tweet",
+                          rest_id: "111",
+                          legacy: {
+                            id_str: "111",
+                            full_text: "top-level video",
+                            extended_entities: {
+                              media: [
+                                {
+                                  type: "video",
+                                  media_url_https: "https://pbs.twimg.com/amplify_video_thumb/111/img/thumb.jpg",
+                                  video_info: {
+                                    variants: [
+                                      { content_type: "application/x-mpegURL", url: "https://video.twimg.com/111/playlist.m3u8" },
+                                      { content_type: "video/mp4", bitrate: 632000, url: "https://video.twimg.com/111/low.mp4" },
+                                      { content_type: "video/mp4", bitrate: 2176000, url: "https://video.twimg.com/111/high.mp4" }
+                                    ]
+                                  }
+                                }
+                              ]
+                            }
+                          },
+                          quoted_status_result: {
+                            result: {
+                              __typename: "Tweet",
+                              rest_id: "222",
+                              legacy: {
+                                id_str: "222",
+                                full_text: "quoted gif",
+                                extended_entities: {
+                                  media: [
+                                    {
+                                      type: "animated_gif",
+                                      media_url_https: "https://pbs.twimg.com/tweet_video_thumb/222.jpg",
+                                      video_info: {
+                                        variants: [{ content_type: "video/mp4", bitrate: 0, url: "https://video.twimg.com/222/gif.mp4" }]
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  };
+
+  const entries = extractVideoMediaEntries(response);
+  assert.equal(entries.length, 2);
+
+  const byPoster = new Map(entries.map((e) => [e.poster, e.videoUrl]));
+  // Picks the highest-bitrate MP4, never the .m3u8 playlist variant.
+  assert.equal(byPoster.get("https://pbs.twimg.com/amplify_video_thumb/111/img/thumb.jpg"), "https://video.twimg.com/111/high.mp4");
+  assert.equal(byPoster.get("https://pbs.twimg.com/tweet_video_thumb/222.jpg"), "https://video.twimg.com/222/gif.mp4");
+});
+
+test("extractVideoMediaEntries ignores photo media and returns nothing for a response with no video", () => {
+  const response = {
+    data: {
+      home: {
+        home_timeline_urt: {
+          instructions: [
+            {
+              entries: [
+                {
+                  entryId: "tweet-333",
+                  content: {
+                    itemContent: {
+                      tweet_results: {
+                        result: {
+                          legacy: {
+                            extended_entities: {
+                              media: [{ type: "photo", media_url_https: "https://pbs.twimg.com/media/333.jpg" }]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  };
+
+  assert.deepEqual(extractVideoMediaEntries(response), []);
+  assert.deepEqual(extractVideoMediaEntries(null), []);
+  assert.deepEqual(extractVideoMediaEntries("not an object"), []);
+});
 
 test("X Parser — Standard Tweet (timeline-v2-standard)", () => {
   const fixture = loadFixture("timeline-v2-standard.json");

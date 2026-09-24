@@ -1,5 +1,5 @@
 import type { ParseFocalTweetResponse } from "../../lib/types";
-import { parseTweet } from "./tweet-dom";
+import { parseTweet, type VideoUrlLookup } from "./tweet-dom";
 
 /** True when `href` is a status permalink for exactly `statusId` (not just a numeric prefix match). */
 function linkMatchesStatusId(href: string, statusId: string): boolean {
@@ -20,7 +20,7 @@ export function findFocalTweetArticle(statusId: string, doc: Document = document
 }
 
 /** Handles PARSE_FOCAL_TWEET: parse the focal tweet on the current status page, reusing tweet-dom's parseTweet. */
-export function parseFocalTweet(doc: Document = document): ParseFocalTweetResponse {
+export function parseFocalTweet(doc: Document = document, lookupVideoUrl?: VideoUrlLookup): ParseFocalTweetResponse {
   const statusId = doc.location.pathname.match(/\/status\/(\d+)/)?.[1];
   if (!statusId) return { success: false, error: "Not on a post page" };
 
@@ -28,7 +28,7 @@ export function parseFocalTweet(doc: Document = document): ParseFocalTweetRespon
   if (!article) return { success: false, error: "Could not find this post on the page" };
 
   try {
-    return { success: true, item: parseTweet(article) };
+    return { success: true, item: parseTweet(article, lookupVideoUrl) };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }

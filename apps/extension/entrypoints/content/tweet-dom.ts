@@ -21,12 +21,21 @@ export function findQuoteBox(article: Element): HTMLElement | null {
 /**
  * Dedupe key for a pbs.twimg.com image: X serves the same poster as both
  * `…/abc.jpg` (video poster) and `…/abc?format=jpg&name=small` (<img>).
+ * Also used (see video-media-registry.ts) to key the poster->MP4 cache, so
+ * both DOM forms of the same poster resolve to the same lookup.
  */
-function mediaKey(src: string): string {
+export function mediaKey(src: string): string {
   return src.split("?")[0].replace(/\.(jpe?g|png|webp)$/i, "");
 }
 
-export function extractMedia(article: Element, exclude: Element | null = null): Media[] {
+/** Looks up the playable MP4 for a video poster, learned from X's own GraphQL responses (see video-media-registry.ts). */
+export type VideoUrlLookup = (poster: string) => string | undefined;
+
+export function extractMedia(
+  article: Element,
+  exclude: Element | null = null,
+  lookupVideoUrl?: VideoUrlLookup
+): Media[] {
   const media: Media[] = [];
   const seenUrls = new Set();
 
@@ -56,10 +65,14 @@ export function extractMedia(article: Element, exclude: Element | null = null): 
     const baseId = mediaKey(src);
     if (!seenUrls.has(baseId)) {
       seenUrls.add(baseId);
+      const isVideo = /video_thumb\//.test(src);
+      // baseId is already mediaKey(src), so it's safe to look up directly.
+      const videoUrl = isVideo ? lookupVideoUrl?.(baseId) : undefined;
       media.push({
-        type: /video_thumb\//.test(src) ? "video" : "image",
+        type: isVideo ? "video" : "image",
         url: src,
-        alt: img.getAttribute("alt") || ""
+        alt: img.getAttribute("alt") || "",
+        ...(videoUrl ? { videoUrl } : {})
       });
     }
   }
@@ -72,10 +85,12 @@ export function extractMedia(article: Element, exclude: Element | null = null): 
       const baseId = mediaKey(poster);
       if (!seenUrls.has(baseId)) {
         seenUrls.add(baseId);
+        const videoUrl = lookupVideoUrl?.(baseId);
         media.push({
           type: "video",
           url: poster,
-          alt: "Video thumbnail"
+          alt: "Video thumbnail",
+          ...(videoUrl ? { videoUrl } : {})
         });
       }
     }
@@ -130,7 +145,7 @@ export function parseUserName(userElement: HTMLElement | null): { handle: string
   };
 }
 
-export function parseQuoteBox(box: HTMLElement): Quote {
+export function parseQuoteBox(box: HTMLElement, lookupVideoUrl?: VideoUrlLookup): Quote {
   const { handle, name } = parseUserName(box.querySelector<HTMLElement>('[data-testid="User-Name"]'));
   const text = box.querySelector<HTMLElement>('[data-testid="tweetText"]')?.innerText?.trim() || "";
 
@@ -145,7 +160,7 @@ export function parseQuoteBox(box: HTMLElement): Quote {
     url,
     text,
     creator: { name, handle, avatar: extractAvatar(box) },
-    media: extractMedia(box),
+    media: extractMedia(box, null, lookupVideoUrl),
     createdAt: box.querySelector("time")?.getAttribute("datetime") || null
   };
 }
@@ -206,7 +221,7 @@ export function extractTweetUrl(
   }
 }
 
-export function parseTweet(article: Element): Bookmark {
+export function parseTweet(article: Element, lookupVideoUrl?: VideoUrlLookup): Bookmark {
   // Everything inside the quoted tweet box belongs to the quote, not the main tweet
   const quoteBox = findQuoteBox(article);
 
@@ -226,9 +241,9 @@ export function parseTweet(article: Element): Bookmark {
     url = `https://x.com/${userSlug}/status/${statusId}`;
   }
 
-  const media = extractMedia(article, quoteBox);
+  const media = extractMedia(article, quoteBox, lookupVideoUrl);
   const avatar = extractAvatar(article, quoteBox);
-  const quote = quoteBox ? parseQuoteBox(quoteBox) : null;
+  const quote = quoteBox ? parseQuoteBox(quoteBox, lookupVideoUrl) : null;
 
   return {
     id: `x:${statusId}`,

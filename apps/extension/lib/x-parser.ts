@@ -57,9 +57,6 @@ interface ParseDiagnostic {
   }
 
   /**
-   * Parses media items from tweet entities / extended_entities
-   */
-  /**
    * Picks the highest-bitrate MP4 from a video's variants. The other variants
    * are HLS playlists (.m3u8) that a plain <video> element can't play.
    */
@@ -73,6 +70,60 @@ interface ParseDiagnostic {
     return best?.url ?? null;
   }
 
+  /**
+   * Generic best-effort scan for video/GIF media anywhere in an X GraphQL
+   * JSON response — HomeTimeline, TweetDetail, UserTweets, SearchTimeline,
+   * etc., not just Bookmarks. X nests tweets differently per surface, so
+   * rather than following a known shape this walks every object looking for
+   * the `media_url_https` + `video_info` pair that marks a video/GIF media
+   * entity, wherever it lives (top-level tweet, quoted tweet, retweet, …).
+   * Iterative (no recursion) since responses can nest deeply; walking
+   * already-parsed JSON is cheap next to the network request that produced
+   * it, and nothing is posted/copied besides the small {poster, videoUrl}
+   * pairs found.
+   */
+  function extractVideoMediaEntries(input: unknown): Array<{ poster: string; videoUrl: string }> {
+    const entries: Array<{ poster: string; videoUrl: string }> = [];
+    if (!input || typeof input !== "object") return entries;
+
+    const seenPosters = new Set<string>();
+    const stack: unknown[] = [input];
+
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node || typeof node !== "object") continue;
+
+      if (Array.isArray(node)) {
+        for (const child of node) stack.push(child);
+        continue;
+      }
+
+      const record = node as XRecord;
+      if (typeof record.media_url_https === "string" && record.video_info && typeof record.video_info === "object") {
+        const poster = record.media_url_https;
+        if (!seenPosters.has(poster)) {
+          const videoUrl = pickVideoUrl(record.video_info as XRecord);
+          if (videoUrl) {
+            seenPosters.add(poster);
+            entries.push({ poster, videoUrl });
+          }
+        }
+        // A media entity's own fields (video_info variants, etc.) don't nest
+        // further tweets/media, so no need to descend into it.
+        continue;
+      }
+
+      for (const key in record) {
+        if (Object.prototype.hasOwnProperty.call(record, key)) stack.push(record[key]);
+      }
+    }
+
+    return entries;
+  }
+
+  /**
+   * Parses media items from tweet entities / extended_entities
+   */
   type ParsedMedia = { type: "image" | "video"; url: string; alt: string; videoUrl?: string };
 
   function parseTweetMedia(legacy: XRecord | null | undefined): ParsedMedia[] {
@@ -352,9 +403,11 @@ interface ParseDiagnostic {
 export {
   unwrapTweetResult,
   cleanTweetText,
+  pickVideoUrl,
   parseTweetMedia,
   parseGraphQLTweet,
   extractBottomCursor,
   parseGraphQLBookmarks,
-  diagnoseGraphQLResponse
+  diagnoseGraphQLResponse,
+  extractVideoMediaEntries
 };

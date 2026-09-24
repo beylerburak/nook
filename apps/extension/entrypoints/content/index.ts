@@ -7,6 +7,7 @@ import { createNookButtonController } from "./nook-button";
 import { attachNativeBookmarkAutoSave } from "./auto-save";
 import { initBookmarkSync } from "./bookmark-sync";
 import { parseFocalTweet } from "./focal-tweet";
+import { initVideoMediaRegistry, lookupVideoUrl } from "./video-media-registry";
 
 export default defineContentScript({
   matches: ["https://x.com/*", "https://twitter.com/*"],
@@ -17,9 +18,15 @@ export default defineContentScript({
     const notify: Notify = (message, bookmarkId, toastType) =>
       showNotification(sendNookMessage, message, bookmarkId, toastType);
 
+    // Learns poster->MP4 mappings from X's own GraphQL responses (relayed by
+    // entrypoints/inject.content), so DOM-parsed video/GIF media below can
+    // carry `videoUrl` too, not just media synced from the Bookmarks API.
+    initVideoMediaRegistry();
+    const parseTweetWithVideo = (article: Element) => parseTweet(article, lookupVideoUrl);
+
     // The Nook action-bar button: its own saved/unsaved state per tweet.
     const nookButtons = createNookButtonController({
-      parseTweet,
+      parseTweet: parseTweetWithVideo,
       sendMessage: sendNookMessage,
       isExtensionValid,
       notify
@@ -29,7 +36,7 @@ export default defineContentScript({
     // Clicking X's own bookmark button also saves to Nook, and should be
     // reflected on the Nook button for the same tweet.
     attachNativeBookmarkAutoSave({
-      parseTweet,
+      parseTweet: parseTweetWithVideo,
       sendMessage: sendNookMessage,
       isExtensionValid,
       notify,
@@ -45,7 +52,7 @@ export default defineContentScript({
     // back here so that button reflects saves/removes made from the popup.
     chrome.runtime.onMessage.addListener((message: BackgroundToContentMessage, _sender, sendResponse) => {
       if (message?.type === "PARSE_FOCAL_TWEET") {
-        sendResponse(parseFocalTweet());
+        sendResponse(parseFocalTweet(document, lookupVideoUrl));
         return true;
       }
       if (message?.type === "NOOK_BOOKMARK_STATE_CHANGED") {
