@@ -104,6 +104,8 @@ test("X Parser — Video Tweet (video-tweet)", () => {
   assert.equal(item.media[0].type, "video");
   assert.equal(item.media[0].alt, "Demo video");
   assert.match(item.media[0].url, /amplify_video_thumb/);
+  // Highest-bitrate MP4 wins; the HLS playlist is skipped
+  assert.equal(item.media[0].videoUrl, "https://video.twimg.com/amplify_video/2102069315943940096/vid/avc1/1280x720/high.mp4");
 });
 
 test("X Parser — Legacy User Format & HTML Entity Unescaping (legacy-user-format)", () => {

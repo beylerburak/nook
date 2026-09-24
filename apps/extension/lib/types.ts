@@ -39,8 +39,11 @@ export interface BookmarkList {
 
 export interface Media {
   type: "image" | "video" | string;
+  /** For videos this is the poster image; the playable file is `videoUrl`. */
   url: string;
   alt?: string;
+  /** Playable MP4 for X videos/GIFs. Only the X API provides it; DOM saves carry just the poster. */
+  videoUrl?: string;
   [field: string]: unknown;
 }
 

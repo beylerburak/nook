@@ -38,7 +38,35 @@
                                 "id_str": "2102069315943940096",
                                 "media_url_https": "https://pbs.twimg.com/amplify_video_thumb/2102069315943940096/img/B4cpdqzchqH_b3NH.jpg",
                                 "type": "video",
-                                "ext_alt_text": "Demo video"
+                                "ext_alt_text": "Demo video",
+                                "video_info": {
+                                  "aspect_ratio": [
+                                    16,
+                                    9
+                                  ],
+                                  "duration_millis": 30000,
+                                  "variants": [
+                                    {
+                                      "content_type": "application/x-mpegURL",
+                                      "url": "https://video.twimg.com/amplify_video/2102069315943940096/pl/abc.m3u8"
+                                    },
+                                    {
+                                      "bitrate": 832000,
+                                      "content_type": "video/mp4",
+                                      "url": "https://video.twimg.com/amplify_video/2102069315943940096/vid/avc1/640x360/low.mp4"
+                                    },
+                                    {
+                                      "bitrate": 2176000,
+                                      "content_type": "video/mp4",
+                                      "url": "https://video.twimg.com/amplify_video/2102069315943940096/vid/avc1/1280x720/high.mp4"
+                                    },
+                                    {
+                                      "bitrate": 256000,
+                                      "content_type": "video/mp4",
+                                      "url": "https://video.twimg.com/amplify_video/2102069315943940096/vid/avc1/480x270/tiny.mp4"
+                                    }
+                                  ]
+                                }
                               }
                             ]
                           }

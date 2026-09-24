@@ -59,8 +59,24 @@ interface ParseDiagnostic {
   /**
    * Parses media items from tweet entities / extended_entities
    */
-  function parseTweetMedia(legacy: XRecord | null | undefined): Array<{ type: "image" | "video"; url: string; alt: string }> {
-    const media: Array<{ type: "image" | "video"; url: string; alt: string }> = [];
+  /**
+   * Picks the highest-bitrate MP4 from a video's variants. The other variants
+   * are HLS playlists (.m3u8) that a plain <video> element can't play.
+   */
+  function pickVideoUrl(videoInfo: XRecord | null | undefined): string | null {
+    const variants = Array.isArray(videoInfo?.variants) ? videoInfo.variants : [];
+    let best: XRecord | null = null;
+    for (const v of variants) {
+      if (v?.content_type !== "video/mp4" || !v.url) continue;
+      if (!best || (v.bitrate ?? 0) > (best.bitrate ?? 0)) best = v;
+    }
+    return best?.url ?? null;
+  }
+
+  type ParsedMedia = { type: "image" | "video"; url: string; alt: string; videoUrl?: string };
+
+  function parseTweetMedia(legacy: XRecord | null | undefined): ParsedMedia[] {
+    const media: ParsedMedia[] = [];
     if (!legacy) return media;
 
     const mediaEntities = legacy.extended_entities?.media || legacy.entities?.media || [];
@@ -74,10 +90,14 @@ interface ParseDiagnostic {
           alt: m.ext_alt_text || ""
         });
       } else if (m.type === "video" || m.type === "animated_gif") {
+        // `url` stays the poster image so every thumbnail renderer keeps working;
+        // `videoUrl` is the playable file.
+        const videoUrl = pickVideoUrl(m.video_info);
         media.push({
           type: "video",
           url: m.media_url_https,
-          alt: m.ext_alt_text || "Video"
+          alt: m.ext_alt_text || (m.type === "animated_gif" ? "GIF" : "Video"),
+          ...(videoUrl ? { videoUrl } : {})
         });
       }
     }

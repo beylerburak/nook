@@ -28,7 +28,7 @@ const X_FEATURES = JSON.stringify({
 });
 
 // Bump when parseGraphQLBookmarks extracts new fields, to trigger one full backfill sync
-const X_SYNC_PARSER_VERSION = 3;
+const X_SYNC_PARSER_VERSION = 4;
 
 function getCsrfToken(): string | null {
   const match = document.cookie.match(/(?:^|;\s*)ct0=([^;]+)/);
