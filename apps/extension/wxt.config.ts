@@ -1,5 +1,20 @@
 import { defineConfig } from "wxt";
 
+// Same default/override as lib/cloud-sync.ts's DEFAULT_CLOUD_API_URL, but
+// read from process.env here — wxt.config.ts runs in Node, not through
+// Vite, so import.meta.env.WXT_API_URL isn't populated yet.
+const CLOUD_API_URL = (process.env.WXT_API_URL || "https://nook.beyler.co").replace(/\/$/, "");
+
+// externally_connectable match patterns can't carry a path, and an omitted
+// port matches ANY port (Chrome treats a missing port as `:*`) — so
+// dropping the port here is what makes the same pattern shape work for both
+// the web app's dev server (e.g. http://localhost:18481) and prod
+// (https://nook.beyler.co), without special-casing localhost.
+function connectableMatchPattern(apiUrl: string): string {
+  const { protocol, hostname } = new URL(apiUrl);
+  return `${protocol}//${hostname}/*`;
+}
+
 export default defineConfig({
   srcDir: ".",
   entrypointsDir: "entrypoints",
@@ -29,8 +44,14 @@ export default defineConfig({
   manifest: {
     name: "Nook",
     description: "Save what matters.",
-    permissions: ["storage", "tabs", "bookmarks", "scripting", "unlimitedStorage", "contextMenus"],
+    permissions: ["storage", "tabs", "bookmarks", "scripting", "unlimitedStorage", "contextMenus", "alarms"],
     host_permissions: ["<all_urls>"],
+    // Lets the web app (and only the web app) reach the background service
+    // worker with chrome.runtime.sendMessage(NOOK_EXTENSION_ID, ...) — see
+    // lib/bridge-protocol.ts / lib/extension-bridge.ts.
+    externally_connectable: {
+      matches: [connectableMatchPattern(CLOUD_API_URL)],
+    },
     options_ui: { page: "dashboard.html", open_in_tab: true },
     commands: {
       "save-page": {

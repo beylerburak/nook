@@ -98,10 +98,15 @@ export type BookmarkPatch = Partial<Pick<Bookmark, "note" | "tags" | "listId" | 
 
 /** Messages sent by extension pages (popup / dashboard) to the background. */
 export type PopupToBackgroundMessage =
+  | { type: "SYNC_CLOUD_NOW" }
   | { type: "GET_ACTIVE_PAGE_STATE" }
   | { type: "SAVE_ACTIVE_PAGE" }
   | { type: "REMOVE_BOOKMARK"; id: string }
-  | { type: "UPDATE_BOOKMARK"; id: string; patch: BookmarkPatch };
+  | { type: "UPDATE_BOOKMARK"; id: string; patch: BookmarkPatch }
+  // best-effort server sign-out, clear token, stop alarm; library untouched
+  | { type: "CLOUD_SIGN_OUT" }
+  // clear token + owner + sync state for THIS server, stop alarm; library untouched
+  | { type: "CLOUD_RESET" };
 
 export interface ActivePageStateResponse {
   success: boolean;
@@ -141,8 +146,13 @@ export interface ParseFocalTweetResponse {
 export interface MessageResponse {
   success?: boolean;
   error?: string;
+  /** Stable machine-readable error code, e.g. "OWNER_MISMATCH" for CLOUD_SIGN_IN. */
+  code?: string;
   count?: number;
   updated?: number;
+  uploaded?: number;
+  downloaded?: number;
+  rejected?: number;
   queryId?: string | null;
   received?: boolean;
   saved?: boolean;

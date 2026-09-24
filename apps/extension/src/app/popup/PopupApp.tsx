@@ -6,14 +6,23 @@ import { Theme, type ThemeMode } from "@astryxdesign/core/theme";
 import { ToastViewport, useToast } from "@astryxdesign/core/Toast";
 import { nookTheme } from "../theme/nook.js";
 import { useAppearance } from "../components/useAppearance";
+import { useCloudStatus } from "../host/useCloudStatus";
 import * as NookDB from "../../../lib/db";
+import { cloudApiUrl } from "../../../lib/cloud-sync";
 import type { BookmarkList } from "../../../lib/types";
 import { getTags } from "../dashboard/bookmark-utils";
-import { buildDashboardBookmarkUrl, buildDashboardSearchUrl } from "./dashboardLinks";
+import {
+  buildDashboardBookmarkUrl,
+  buildDashboardSearchUrl,
+  buildWebBookmarkUrl,
+  buildWebConnectUrl,
+  buildWebSearchUrl,
+} from "./dashboardLinks";
 import { PageCard } from "./PageCard";
 import { PopupFooter } from "./PopupFooter";
 import { PopupHeader } from "./PopupHeader";
 import { QuickOrganize } from "./QuickOrganize";
+import { SyncStatusLine } from "./SyncStatusLine";
 import { useActivePage } from "./useActivePage";
 import { useSaveShortcut } from "./useSaveShortcut";
 
@@ -27,6 +36,7 @@ function PopupScreen({
   const toast = useToast();
   const activePage = useActivePage();
   const saveShortcut = useSaveShortcut();
+  const cloudStatus = useCloudStatus();
 
   const [totalCount, setTotalCount] = useState(0);
   const [lists, setLists] = useState<BookmarkList[]>([]);
@@ -69,9 +79,27 @@ function PopupScreen({
     });
   };
 
-  const openDashboard = () => openUrl(chrome.runtime.getURL("dashboard.html"));
-  const openDashboardSearch = (query: string) => openUrl(chrome.runtime.getURL(buildDashboardSearchUrl(query)));
-  const openBookmarkInDashboard = (id: string) => openUrl(chrome.runtime.getURL(buildDashboardBookmarkUrl(id)));
+  // The web app is the product once signed in (product contract §2): route
+  // "open dashboard" / search / bookmark deep links there when this device
+  // is linked to a cloud account and online, and to the local dashboard.html
+  // otherwise (offline or signed out, where the local copy already works).
+  const canUseWebApp = Boolean(cloudStatus?.signedIn) && !cloudStatus?.offline;
+  const webApiUrl = cloudStatus?.apiUrl ?? cloudApiUrl();
+
+  const openDashboard = () => openUrl(canUseWebApp ? webApiUrl : chrome.runtime.getURL("dashboard.html"));
+  const openDashboardSearch = (query: string) =>
+    openUrl(
+      canUseWebApp
+        ? buildWebSearchUrl(webApiUrl, query)
+        : chrome.runtime.getURL(buildDashboardSearchUrl(query)),
+    );
+  const openBookmarkInDashboard = (id: string) =>
+    openUrl(
+      canUseWebApp
+        ? buildWebBookmarkUrl(webApiUrl, id)
+        : chrome.runtime.getURL(buildDashboardBookmarkUrl(id)),
+    );
+  const connectToWebApp = () => openUrl(buildWebConnectUrl(webApiUrl));
 
   const handleSave = async () => {
     try {
@@ -126,6 +154,8 @@ function PopupScreen({
           onAppearanceChange={onAppearanceChange}
           onOpenDashboard={openDashboard}
         />
+
+        <SyncStatusLine status={cloudStatus} onConnect={connectToWebApp} />
 
         <PageCard
           state={activePage.state}

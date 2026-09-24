@@ -1,5 +1,17 @@
 import { defineBackground } from "wxt/utils/define-background";
 import * as NookDB from "../../lib/db";
+import {
+  cloudApiUrl,
+  cloudSession,
+  cloudStatus,
+  createJoinable,
+  createTaskQueue,
+  resetCloudSync,
+  saveCloudSession,
+  signOutCloud,
+  syncCloud,
+} from "../../lib/cloud-sync";
+import { fetchBridgeSessionProfile, handleBridgeMessage, type ExtensionBridgeDeps } from "../../lib/extension-bridge";
 import { initBookmarkToastDelivery, sendBookmarkToast } from "../../lib/toast";
 import type {
   ActivePageStateResponse,
@@ -19,6 +31,103 @@ import { saveCurrentTab, savePage } from "./save-page";
 
 type BackgroundMessage = ContentToBackgroundMessage | PopupToBackgroundMessage;
 
+const CLOUD_ALARM_PERIODIC = "nook-cloud-sync-periodic";
+// After a local write (BroadcastChannel "nook-db"), give writes a moment to
+// settle before syncing rather than firing once per record.
+const DB_WRITE_SYNC_DEBOUNCE_MS = 2000;
+
+// All cloud state-changing operations (sync, bridge connect/disconnect,
+// sign-out, reset) run through this single serial queue, so e.g. a bridge
+// CONNECT triggered from the web app can never race the periodic background
+// sync and have its result silently overwritten. A plain sync (periodic
+// alarm / debounced db-write / SYNC_CLOUD_NOW) joins an already
+// queued-or-running sync instead of enqueueing a redundant extra one;
+// connect/disconnect/sign-out/reset always get their own queue slot (see
+// cloudQueue.enqueue below).
+const cloudQueue = createTaskQueue();
+function enqueue<T>(task: () => Promise<T>): Promise<T> {
+  return cloudQueue.enqueue(task);
+}
+const queueSync = createJoinable(cloudQueue, () => syncCloud());
+
+async function ensureCloudAlarm(): Promise<void> {
+  await chrome.alarms.create(CLOUD_ALARM_PERIODIC, { periodInMinutes: 1 });
+}
+async function clearCloudAlarm(): Promise<void> {
+  await chrome.alarms.clear(CLOUD_ALARM_PERIODIC);
+}
+
+// The periodic alarm only costs anything while signed in — re-check after
+// every sync attempt so a 401 (which clears the token) stops it too.
+async function syncAlarmUpkeep(): Promise<void> {
+  if (!(await cloudSession())) await clearCloudAlarm();
+}
+
+function runCloudSync() {
+  return queueSync().then(
+    (result) => {
+      syncAlarmUpkeep().catch(() => {});
+      return result;
+    },
+    (error) => {
+      syncAlarmUpkeep().catch(() => {});
+      throw error;
+    },
+  );
+}
+
+// Same as runCloudSync(), but calls syncCloud() directly instead of going
+// through the queue again. Only for use from *inside* a task that's already
+// running as a queued slot (the bridge's CONNECT, below) — queueSync()
+// there would enqueue onto the same cloudQueue slot this task itself
+// occupies and wait for its own completion, deadlocking forever.
+async function runCloudSyncFromQueuedTask() {
+  try {
+    const result = await syncCloud();
+    syncAlarmUpkeep().catch(() => {});
+    return result;
+  } catch (error) {
+    syncAlarmUpkeep().catch(() => {});
+    throw error;
+  }
+}
+
+// -- extension <-> web bridge (chrome.runtime.onMessageExternal) -----------
+//
+// See lib/bridge-protocol.ts / lib/extension-bridge.ts. handleBridgeMessage
+// holds the actual origin-check/HELLO/CONNECT/DISCONNECT logic and is unit
+// tested there; this just wires it to the real cloud-sync + alarm APIs and
+// routes every call through the same serial queue as everything else that
+// mutates cloud state.
+const BRIDGE_API_URL = cloudApiUrl();
+const bridgeDeps: ExtensionBridgeDeps = {
+  apiUrl: BRIDGE_API_URL,
+  version: chrome.runtime.getManifest().version,
+  fetchSession: (token) => fetchBridgeSessionProfile(BRIDGE_API_URL, token),
+  currentSession: () => cloudSession(),
+  saveSession: (token, ownerId, profile) => saveCloudSession(token, ownerId, profile),
+  replaceAccount: () => resetCloudSync(),
+  // Clears this device's token only (owner + sync state are left so a later
+  // reconnect with the same owner stays incremental) — the web app already
+  // signed itself out, so this is best-effort and never blocks on it.
+  disconnect: () => signOutCloud(),
+  startAlarm: () => ensureCloudAlarm(),
+  stopAlarm: () => clearCloudAlarm(),
+  // handleBridgeMessage's own call already runs inside a cloudQueue slot
+  // (see the onMessageExternal listener below) — runCloudSync() would
+  // enqueue a second task behind that slot and deadlock waiting on itself.
+  requestSync: () => runCloudSyncFromQueuedTask(),
+  status: () => cloudStatus().then((status) => ({
+    apiUrl: status.apiUrl,
+    signedIn: status.signedIn,
+    ownerId: status.ownerId,
+    lastSyncedAt: status.lastSyncedAt,
+    pendingCount: status.pendingCount,
+    rejectedCount: status.rejected.length,
+    offline: status.offline,
+  })),
+};
+
 export default defineBackground(() => {
 console.log("[Nook Background] Service Worker initialized");
 
@@ -29,6 +138,53 @@ initBookmarkToastDelivery();
 // it doesn't pay the open+migrate cost on the critical path.
 NookDB.ready().catch((err) => {
   console.error("[Nook Background] NookDB.ready() failed:", err);
+});
+
+// The periodic alarm exists only while signed in — no point waking the
+// worker every minute for a browser that isn't syncing anything.
+cloudSession()
+  .then((session) => (session ? ensureCloudAlarm() : undefined))
+  .catch(() => {});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== CLOUD_ALARM_PERIODIC && alarm.name !== "nook-cloud-sync-soon") return;
+  void runCloudSync().catch((error) => console.error("[Nook] Cloud sync failed:", error));
+});
+// Sync once as soon as the worker wakes up — including on browser startup,
+// since defineBackground's setup runs every time the service worker spins
+// up, startup included.
+void runCloudSync().catch((error) => console.error("[Nook] Cloud sync failed:", error));
+
+// Sync automatically shortly after any local write, anywhere in the
+// extension (dashboard, popup, X content script). Debounced so a burst of
+// writes (e.g. an import) triggers one sync, not one per record. This is
+// the common case; the periodic alarm above and the "nook-cloud-sync-soon"
+// wake-up alarm (lib/db.ts) are the fallback for when the service worker
+// gets killed before this timer fires.
+let dbWriteSyncTimer: ReturnType<typeof setTimeout> | null = null;
+const dbWriteChannel = new BroadcastChannel("nook-db");
+dbWriteChannel.addEventListener("message", () => {
+  if (dbWriteSyncTimer !== null) clearTimeout(dbWriteSyncTimer);
+  dbWriteSyncTimer = setTimeout(() => {
+    dbWriteSyncTimer = null;
+    void runCloudSync().catch((error) => console.error("[Nook] Cloud sync failed:", error));
+  }, DB_WRITE_SYNC_DEBOUNCE_MS);
+});
+
+// -- extension <-> web bridge: messages from the web app -------------------
+
+function isLikelyBridgeRequest(message: unknown): boolean {
+  return Boolean(message) && typeof (message as { type?: unknown }).type === "string" &&
+    (message as { type: string }).type.startsWith("NOOK_BRIDGE_");
+}
+
+chrome.runtime.onMessageExternal.addListener((message: unknown, sender, sendResponse) => {
+  if (!isLikelyBridgeRequest(message)) return false;
+  enqueue(() => handleBridgeMessage(message, sender.origin, bridgeDeps)).then(
+    (response) => sendResponse(response),
+    (error) => sendResponse({ ok: false, code: "ERROR", error: error instanceof Error ? error.message : String(error) }),
+  );
+  return true;
 });
 
 // Set the badge for whichever tab is active right now — tabs.onActivated/
@@ -121,6 +277,36 @@ chrome.commands.onCommand.addListener((command, tab) => {
 // -- message listener: content scripts (X) + extension pages (popup) -------
 
 chrome.runtime.onMessage.addListener((message: BackgroundMessage, sender, sendResponse: (response?: MessageResponse | ActivePageStateResponse) => void) => {
+  if (message?.type === "SYNC_CLOUD_NOW") {
+    runCloudSync().then(
+      (result) => sendResponse({ success: Boolean(result), ...result }),
+      (error) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }),
+    );
+    return true;
+  }
+
+  if (message?.type === "CLOUD_SIGN_OUT") {
+    enqueue(async () => {
+      await signOutCloud();
+      await clearCloudAlarm();
+    }).then(
+      () => sendResponse({ success: true }),
+      (error) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }),
+    );
+    return true;
+  }
+
+  if (message?.type === "CLOUD_RESET") {
+    enqueue(async () => {
+      await resetCloudSync();
+      await clearCloudAlarm();
+    }).then(
+      () => sendResponse({ success: true }),
+      (error) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }),
+    );
+    return true;
+  }
+
   if (message?.type === "SHOW_BOOKMARK_TOAST") {
     const tabId = sender.tab?.id;
     if (tabId === undefined) {
