@@ -33,6 +33,13 @@ services:
       PORT: 3000
     ports:
       - "127.0.0.1:${NOOK_API_HOST_PORT:-18482}:3000"
+    networks:
+      default:
+        # The web container also joins the host's shared proxy network (e.g.
+        # Dokploy's), where a bare "api" can resolve to another stack's
+        # service. nginx proxies to this stack-unique name instead.
+        aliases:
+          - nook-api
 
   web:
     build:
