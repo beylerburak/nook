@@ -144,7 +144,7 @@ describe("NookHostProvider / useNookHost", () => {
 });
 
 describe("SettingsDialog — web host", () => {
-  it("shows all six sections and defaults to Profile", () => {
+  it("shows every available section and defaults to Profile", () => {
     renderDialog(webHost());
     for (const label of ["Profile", "Account & security", "Appearance", "Sync", "Data", "About"]) {
       expect(hasText(label)).toBe(true);

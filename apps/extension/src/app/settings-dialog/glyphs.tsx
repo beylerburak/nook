@@ -47,6 +47,16 @@ export function CloudGlyph(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/** Settings → AI: a spark, for the model that reads a bookmark and decides. */
+export function SparkGlyph(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>
+      <path d="M10.5 4q1.6 3.9 5.5 5.5-3.9 1.6-5.5 5.5Q8.9 11.1 5 9.5 8.9 7.9 10.5 4Z" strokeLinejoin="round" />
+      <path d="M18 14q.9 2.1 3 3-2.1.9-3 3-.9-2.1-3-3 2.1-.9 3-3Z" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function DatabaseGlyph(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" {...props}>

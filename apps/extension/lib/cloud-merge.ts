@@ -137,6 +137,7 @@ const BOOKMARK_SPECIAL_KEYS = new Set([
   "tags",
   "listId",
   "listName",
+  "ai",
   "savedAt",
   "createdAt",
   "updatedAt",
@@ -186,6 +187,20 @@ export function mergeBookmarks(local: Bookmark, remote: Bookmark): Bookmark {
   const listSource = newer.listId !== null && newer.listId !== undefined ? newer : older;
   result.listId = listSource.listId;
   result.listName = listSource.listName;
+
+  // AI attribution travels with the assignment it describes, or it is dropped.
+  //
+  // Generic newer-wins (pickField) is almost right here and quietly wrong in
+  // both directions. Stale: a record the model filed on device A (listId +
+  // ai.collectionConfidence 0.91) reaches device B as a plain unfiled bookmark
+  // - it was never classified there, or the attribution was cleared - and B is
+  // the newer side. pickField falls back to the older side's `ai`, producing a
+  // bookmark with no collection at all that still claims a 0.91 confidence in
+  // being filed, and whose `ai != null` means it can never be classified again.
+  // Wrong side: the newer side filed it by hand while the older side holds the
+  // model's attribution, and a generic merge would badge a manual filing as the
+  // model's work. Taking `ai` from listSource makes the two impossible.
+  result.ai = listSource.ai;
 
   result.savedAt = earliestNonEmpty(local.savedAt, remote.savedAt);
   result.createdAt = earliestNonEmpty(local.createdAt, remote.createdAt);

@@ -153,7 +153,10 @@ actually has rather than trusting stale local state.
 
 Settings (from the user menu in the top nav, on both the web app and the
 extension) covers Profile, Account & security (change password, active
-sessions with per-session revoke, delete account), Appearance, Sync, Data
-(import/export/clear the local library), and About. Deleting your account
+sessions with per-session revoke, delete account), Appearance, Sync, AI, Data
+(import/export/clear the local library), and About. AI covers the optional
+Jev-powered classification of new bookmarks into your collections and tags —
+see [ai.md](./ai.md); it is only available when signed in, because a
+classification is a server call. Deleting your account
 removes it — and everything it owns on the server — immediately; the local
 library on that device is cleared too.

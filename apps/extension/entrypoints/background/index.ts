@@ -1,4 +1,6 @@
 import { defineBackground } from "wxt/utils/define-background";
+import { loadAiSettings } from "../../lib/ai-settings";
+import { runClassification, type AiRunResult } from "../../lib/ai-runner";
 import * as NookDB from "../../lib/db";
 import {
   cloudApiUrl,
@@ -92,6 +94,70 @@ async function runCloudSyncFromQueuedTask() {
   }
 }
 
+// -- AI classification (lib/ai-runner.ts) ---------------------------------
+//
+// A second, independent tick alongside the cloud one. Deliberately not
+// serialized with it: a 25-bookmark classify batch takes seconds, and letting
+// it head-of-line block the 1-minute cloud sync (or the reverse) would let one
+// slow subsystem stall the other. The two only ever meet in the same
+// IndexedDB, which already serializes its own transactions.
+const AI_ALARM_PERIODIC = "nook-ai-classify-periodic";
+// Mirror of lib/db.ts's "nook-cloud-sync-soon": a bookmark saved just after a
+// tick should not wait out the rest of the period.
+const AI_ALARM_SOON = "nook-ai-classify-soon";
+const AI_ALARM_PERIOD_MINUTES = 5;
+
+// Both AI routes are session-guarded and the feature ships off by default, so
+// the alarm is only worth waking a service worker for while a session exists
+// and the toggle is on. Re-checked after every tick (same reasoning as
+// syncAlarmUpkeep) so a sign-out or a toggle-off tears the alarm down instead
+// of leaving it firing into a 401.
+async function aiIsArmable(): Promise<boolean> {
+  const [settings, session] = await Promise.all([loadAiSettings(), cloudSession()]);
+  return settings.autoClassify && Boolean(session);
+}
+
+async function ensureAiAlarm(): Promise<void> {
+  await chrome.alarms.create(AI_ALARM_PERIODIC, { periodInMinutes: AI_ALARM_PERIOD_MINUTES });
+}
+
+async function clearAiAlarm(): Promise<void> {
+  await chrome.alarms.clear(AI_ALARM_PERIODIC);
+  await chrome.alarms.clear(AI_ALARM_SOON);
+}
+
+async function armAiAlarmSoon(): Promise<void> {
+  if (!(await aiIsArmable())) return;
+  await chrome.alarms.create(AI_ALARM_SOON, { delayInMinutes: 0.1 });
+}
+
+async function aiAlarmUpkeep(): Promise<void> {
+  if (!(await aiIsArmable())) await clearAiAlarm();
+}
+
+// Mirrors runCloudSync(): report, then re-check whether the alarm still has a
+// reason to exist. runClassification() never rejects, but a throwing dep
+// shouldn't be allowed to take down the listener either.
+function runAiClassification(): void {
+  runClassification().then(
+    (result) => {
+      aiAlarmUpkeep().catch(() => {});
+      if (result.error) {
+        console.log("[Nook Background] AI classification stopped:", result.error);
+      } else if (result.processed > 0) {
+        console.log(
+          "[Nook Background] AI classification:",
+          `${result.assigned} filed, ${result.tagged} tagged, ${result.skipped} skipped of ${result.processed}`,
+        );
+      }
+    },
+    (error) => {
+      aiAlarmUpkeep().catch(() => {});
+      console.error("[Nook Background] AI classification failed:", error);
+    },
+  );
+}
+
 // -- extension <-> web bridge (chrome.runtime.onMessageExternal) -----------
 //
 // See lib/bridge-protocol.ts / lib/extension-bridge.ts. handleBridgeMessage
@@ -146,10 +212,24 @@ cloudSession()
   .then((session) => (session ? ensureCloudAlarm() : undefined))
   .catch(() => {});
 
+// Same deal for the AI tick, one gate stricter: signed in *and* autoClassify
+// on, because every one of these ticks is a paid, authenticated call.
+aiIsArmable()
+  .then((armable) => (armable ? ensureAiAlarm() : undefined))
+  .catch(() => {});
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== CLOUD_ALARM_PERIODIC && alarm.name !== "nook-cloud-sync-soon") return;
   void runCloudSync().catch((error) => console.error("[Nook] Cloud sync failed:", error));
 });
+
+// A separate listener rather than a branch in the one above, so the cloud
+// sync tick keeps exactly the alarm names it had.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== AI_ALARM_PERIODIC && alarm.name !== AI_ALARM_SOON) return;
+  runAiClassification();
+});
+
 // Sync once as soon as the worker wakes up — including on browser startup,
 // since defineBackground's setup runs every time the service worker spins
 // up, startup included.
@@ -238,6 +318,11 @@ chrome.bookmarks.onCreated.addListener(async (id, bookmark) => {
       createdAt: new Date(bookmark.dateAdded || Date.now()).toISOString(),
     });
     console.log("[Nook Background] Bookmark successfully saved to Nook:", saved);
+    // Armed from the save paths rather than from the "nook-db" channel above:
+    // every AI write is itself a db write, so a channel listener here would
+    // re-arm the alarm from its own run and burn a second tick finding
+    // nothing to do.
+    void armAiAlarmSoon().catch(() => {});
   } catch (err) {
     console.error("[Nook Background] Error capturing bookmark:", err);
   }
@@ -276,11 +361,38 @@ chrome.commands.onCommand.addListener((command, tab) => {
 
 // -- message listener: content scripts (X) + extension pages (popup) -------
 
-chrome.runtime.onMessage.addListener((message: BackgroundMessage, sender, sendResponse: (response?: MessageResponse | ActivePageStateResponse) => void) => {
+/**
+ * What a handler may answer with. `AiRunResult` is here for CLASSIFY_NOW,
+ * which replies with the pass itself rather than a wrapper: the panel shows what
+ * the run did (filed, left alone, and why it stopped), and `runClassification()`
+ * never rejects, so a delivered reply is the result and there is no separate
+ * success flag to invent or check.
+ */
+type BackgroundReply = MessageResponse | ActivePageStateResponse | AiRunResult;
+
+chrome.runtime.onMessage.addListener((message: BackgroundMessage, sender, sendResponse: (response?: BackgroundReply) => void) => {
   if (message?.type === "SYNC_CLOUD_NOW") {
     runCloudSync().then(
       (result) => sendResponse({ success: Boolean(result), ...result }),
       (error) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }),
+    );
+    return true;
+  }
+
+  if (message?.type === "CLASSIFY_NOW") {
+    // The same entry point the 5-minute alarm uses, so the click and the tick
+    // cannot both bill a batch: runClassification() is single-flight-guarded and
+    // a second call joins the run already in flight.
+    runClassification().then(
+      (run) => sendResponse(run),
+      (error) =>
+        sendResponse({
+          processed: 0,
+          assigned: 0,
+          tagged: 0,
+          skipped: 0,
+          error: error instanceof Error ? error.message : String(error),
+        }),
     );
     return true;
   }
@@ -338,6 +450,7 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, sender, sendRe
         }
 
         await NookDB.saveOrRestoreBookmark(item);
+        void armAiAlarmSoon().catch(() => {});
         const count = (await NookDB.getAllBookmarks()).length;
         sendResponse({ success: true, count });
       } catch (err) {
@@ -379,6 +492,7 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, sender, sendRe
           return;
         }
         await NookDB.saveOrRestoreBookmark(item);
+        void armAiAlarmSoon().catch(() => {});
         sendResponse({ success: true, saved: true });
       } catch (err) {
         sendResponse({ success: false, error: err instanceof Error ? err.message : String(err) });

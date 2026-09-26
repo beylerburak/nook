@@ -178,6 +178,74 @@ test("mergeBookmarks: every other field falls back to older's when newer's is em
   expect(merged.shortDescription).toBe("desc");
 });
 
+test("mergeBookmarks: ai attribution is taken from the side that supplied the listId", () => {
+  const filedByAi: Bookmark = {
+    id: "1", source: "x", updatedAt: "2024-01-01T00:00:00Z",
+    listId: "L1", listName: "Reading",
+    ai: { model: "jev-1.13.0", at: "2024-01-01T00:00:00Z", collectionConfidence: 0.91 },
+  };
+  // Newer side filed it by hand: the assignment is the newer side's, so the
+  // model's attribution must not survive to badge a manual filing as its work.
+  const filedByHand: Bookmark = { id: "1", source: "x", listId: "L2", listName: "Later", updatedAt: "2024-01-02T00:00:00Z" };
+  const merged = mergeBookmarks(filedByAi, filedByHand);
+  expect(merged).toMatchObject({ listId: "L2", listName: "Later" });
+  expect(merged.ai).toBeUndefined();
+  expect(mergeBookmarks(filedByHand, filedByAi)).toEqual(merged);
+
+  // Both sides filed with the model, different collections: attribution follows
+  // the assignment rather than winning on its own recency.
+  const otherAi: Bookmark = {
+    id: "1", source: "x", listId: "L2", listName: "Later", updatedAt: "2024-01-02T00:00:00Z",
+    ai: { model: "jev-1.13.1", at: "2024-01-02T00:00:00Z", collectionConfidence: 0.77 },
+  };
+  expect(mergeBookmarks(filedByAi, otherAi).ai).toEqual(otherAi.ai);
+  expect(mergeBookmarks(otherAi, filedByAi).ai).toEqual(otherAi.ai);
+
+  // The older side's assignment wins when only it has one, and its attribution
+  // comes along: a confidence whose assignment was just resurrected is not stale.
+  const unfiled: Bookmark = { id: "1", source: "x", updatedAt: "2024-01-05T00:00:00Z", listId: null, listName: null };
+  const resurrected = mergeBookmarks(filedByAi, unfiled);
+  expect(resurrected).toMatchObject({ listId: "L1", listName: "Reading" });
+  expect(resurrected.ai).toEqual(filedByAi.ai);
+  expect(mergeBookmarks(unfiled, filedByAi)).toEqual(resurrected);
+});
+
+test("mergeBookmarks: a tags-only attribution survives even when no side has a collection", () => {
+  // applyClassification writes an attribution with no listId whenever the model
+  // tagged a bookmark but filed nothing, so "no collection" must never mean
+  // "drop the attribution": that would turn an already-classified record back
+  // into a candidate and re-bill it on every single run.
+  const taggedOnly: Bookmark = {
+    id: "1", source: "x", tags: ["rust"], updatedAt: "2024-01-01T00:00:00Z",
+    ai: { model: "jev-1.13.0", at: "2024-01-01T00:00:00Z", tagConfidence: { rust: 0.9 } },
+  };
+  const unfiled: Bookmark = { id: "1", source: "x", updatedAt: "2024-01-05T00:00:00Z" };
+
+  const forward = mergeBookmarks(taggedOnly, unfiled);
+  expect(forward.listId).toBeUndefined();
+  expect(forward.ai).toEqual(taggedOnly.ai);
+  expect(mergeBookmarks(unfiled, taggedOnly)).toEqual(forward);
+  expect(forward.ai!.collectionConfidence).toBeUndefined();
+});
+
+test("mergeBookmarks: ai never survives as a generic newer-wins field", () => {
+  // A plain field would take the newer side's value and fall back to the older
+  // one's; `ai` is excluded from that loop and re-derived from listSource, so a
+  // manual filing on the newer side can't inherit the older side's model
+  // attribution. The key is always present (so a stale value is overwritten
+  // rather than left in place), never the other side's.
+  const older: Bookmark = {
+    id: "1", source: "x", updatedAt: "2024-01-01T00:00:00Z",
+    listId: "L1", listName: "Reading",
+    ai: { model: "jev-1.13.0", at: "2024-01-01T00:00:00Z", collectionConfidence: 0.91 },
+  };
+  const newer: Bookmark = { id: "1", source: "x", listId: "L9", listName: "Kept", updatedAt: "2024-01-09T00:00:00Z" };
+  const merged = mergeBookmarks(older, newer);
+  expect(merged).toMatchObject({ listId: "L9", listName: "Kept" });
+  expect(merged.ai).toBeUndefined();
+  expect(Object.keys(merged)).toContain("ai");
+});
+
 test("mergeBookmarks is commutative across a variety of record pairs", () => {
   const pairs: Array<[Bookmark, Bookmark]> = [
     [

@@ -12,6 +12,7 @@ import type { ThemeMode } from "@astryxdesign/core/theme";
 import { useNookHost, type NookHost } from "../host/NookHost";
 import { AboutPanel } from "./AboutPanel";
 import { AccountPanel } from "./AccountPanel";
+import { AiPanel } from "./AiPanel";
 import { AppearancePanel } from "./AppearancePanel";
 import { DataPanel } from "./DataPanel";
 import { ProfilePanel } from "./ProfilePanel";
@@ -40,13 +41,26 @@ export interface SettingsDialogProps {
  * Which sections apply to this host: Profile needs a signed-in user (hidden
  * in the extension's local-only mode), Account & security needs
  * `host.account` (web only — a signed-in extension manages its account on
- * the web instead, see `ProfilePanel`).
+ * the web instead, see `ProfilePanel`), and AI classification is extension-only
+ * *and* needs a session, because the pass runs in the extension's service worker
+ * and authenticates with the bearer token the cloud-sync bridge writes. A
+ * connected extension has a `user` and no `account`, so gating on `host.user`
+ * rather than `host.account` is what keeps this visible where it works.
  */
 function visibleSections(host: NookHost): SettingsSection[] {
   const sections: SettingsSection[] = [];
   if (host.user) sections.push("profile");
   if (host.account) sections.push("account");
-  sections.push("appearance", "sync", "data", "about");
+  sections.push("appearance", "sync");
+  // Extension-only, and gated on `host.user` as well. The classification pass
+  // runs in the extension's service worker (lib/ai-runner.ts is called from
+  // background/index.ts and nowhere else), and it needs a bearer token that only
+  // the cloud-sync bridge writes. The web app authenticates by cookie, so a
+  // toggle there would write `ai.settings` to a per-origin meta store that no
+  // reader ever consults — a switch that visibly does nothing. The same applies
+  // to `ai.taxonomy` and the status counters. See docs/ai.md.
+  if (host.user && host.kind === "extension") sections.push("ai");
+  sections.push("data", "about");
   return sections;
 }
 
@@ -65,6 +79,8 @@ function renderSection(section: SettingsSection, props: SettingsDialogProps): Re
       return <AppearancePanel appearance={props.appearance} onAppearanceChange={props.onAppearanceChange} />;
     case "sync":
       return <SyncPanel />;
+    case "ai":
+      return <AiPanel />;
     case "data":
       return <DataPanel library={props.library} />;
     case "about":

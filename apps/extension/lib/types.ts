@@ -1,9 +1,53 @@
+/**
+ * Provenance of an automated decision, so the UI can tell the model's work
+ * apart from the user's own. Written to `ai` by lib/ai-classify.ts; the data
+ * it describes lives in `listId`/`listName`/`tags`, not here.
+ */
+export interface AiAttribution {
+  /** Model version that made the decision, e.g. "jev-1.13.0". */
+  model: string;
+  /** ISO timestamp of the decision. */
+  at: string;
+  /** Confidence of the collection assignment. Absent when nothing was filed. */
+  collectionConfidence?: number;
+  /** noul score per applied tag name. Absent when no tag was added. */
+  tagConfidence?: Record<string, number>;
+  /** ISO date the taxonomy in force was accepted (stamped by the runner, which owns `ai.taxonomy`). */
+  taxonomyAt?: string;
+}
+
 export interface Bookmark {
   id: string;
   source: string;
   title?: string;
   shortDescription?: string;
   description?: string;
+  /**
+   * One or two sentences of plain text summarising `description`, in the
+   * content's own language. TOP-LEVEL, and deliberately not inside `ai`:
+   *
+   * The two are set independently, and `ai` is merged as a *unit* —
+   * cloud-merge.ts takes it from whichever side supplied the `listId`, so that
+   * a filing and its receipt cannot disagree. A summary is not a receipt for
+   * anything, so that rule buys it nothing and costs a real summary: a summary
+   * written to an unfiled bookmark would be silently discarded the moment
+   * another device assigned it to a collection, because the side that
+   * supplied the `listId` supplied the whole `ai` object and the summary
+   * riding along inside it went with the old copy.
+   *
+   * Top-level, it is not in cloud-merge.ts's `BOOKMARK_SPECIAL_KEYS` and
+   * therefore takes the generic `pickField` path — newer wins, with the older
+   * side filling in when the newer has none. That is the correct rule for "the
+   * newest summary of this bookmark wins", and it is the whole reason for the
+   * placement.
+   *
+   * The model's words, not the user's. The server reads records and returns
+   * summaries but never writes this field (apps/api/src/summarize.ts): it goes
+   * through the normal sync path so every device gets it and the client owns
+   * the write. `null` and `""` both mean "no summary", so a cleared one is
+   * summarised again rather than merged as a permanent blank.
+   */
+  summary?: string | null;
   note?: string;
   url?: string | null;
   /** Normalized `url` (tracking params / hash stripped), indexed for dedupe. Maintained by lib/db.ts. */
@@ -18,6 +62,14 @@ export interface Bookmark {
   tags?: string[];
   listId?: string | null;
   listName?: string | null;
+  /**
+   * AI provenance for the `listId`/`tags` above - who filed this, when, and how
+   * confident they were. The real data is written to `listId`/`listName`/`tags`;
+   * this is only the receipt, and `null` counts as "never classified" so that
+   * `ai == null` works as the once-only marker (lib/ai-classify.ts). The open
+   * index signature carries it through storage and sync with no schema change.
+   */
+  ai?: AiAttribution | null;
   category?: string | null;
   media?: Media[];
   attachments?: Media[];
@@ -103,6 +155,8 @@ export type PopupToBackgroundMessage =
   | { type: "SAVE_ACTIVE_PAGE" }
   | { type: "REMOVE_BOOKMARK"; id: string }
   | { type: "UPDATE_BOOKMARK"; id: string; patch: BookmarkPatch }
+  // Runs one AI classification pass now, and replies with the AiRunResult.
+  | { type: "CLASSIFY_NOW" }
   // best-effort server sign-out, clear token, stop alarm; library untouched
   | { type: "CLOUD_SIGN_OUT" }
   // clear token + owner + sync state for THIS server, stop alarm; library untouched

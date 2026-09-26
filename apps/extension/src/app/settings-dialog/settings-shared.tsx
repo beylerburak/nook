@@ -4,10 +4,10 @@ import { Divider } from "@astryxdesign/core/Divider";
 import { Icon } from "@astryxdesign/core/Icon";
 import { useMediaQuery } from "@astryxdesign/core/hooks";
 import { Text } from "@astryxdesign/core/Text";
-import { CloudGlyph, DatabaseGlyph, PaletteGlyph, ShieldGlyph, UserGlyph } from "./glyphs";
+import { CloudGlyph, DatabaseGlyph, PaletteGlyph, ShieldGlyph, SparkGlyph, UserGlyph } from "./glyphs";
 
 /** Sections the Settings dialog can show — see product-contract.md section 4. */
-export type SettingsSection = "profile" | "account" | "appearance" | "sync" | "data" | "about";
+export type SettingsSection = "profile" | "account" | "appearance" | "sync" | "ai" | "data" | "about";
 
 /** Anything `Icon`'s own `icon` prop accepts — a semantic name or an SVG component. */
 export type SettingsIcon = ComponentProps<typeof Icon>["icon"];
@@ -24,6 +24,7 @@ export const SETTINGS_SECTIONS: SettingsSectionConfig[] = [
   { id: "account", label: "Account & security", description: "Password, sessions and account deletion.", icon: ShieldGlyph },
   { id: "appearance", label: "Appearance", description: "Choose how Nook looks on this device.", icon: PaletteGlyph },
   { id: "sync", label: "Sync", description: "Cloud sync status and the browser extension link.", icon: CloudGlyph },
+  { id: "ai", label: "AI", description: "Let Nook file new bookmarks into collections and tags.", icon: SparkGlyph },
   { id: "data", label: "Data", description: "Import, export and clear your library.", icon: DatabaseGlyph },
   { id: "about", label: "About", description: "Version and app information.", icon: "info" },
 ];
