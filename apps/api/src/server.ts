@@ -14,12 +14,22 @@ import {
 import { getAiUserSettings, parseAiUserSettingsPatch, saveAiUserSettingsPatch } from "./ai-settings.js";
 import { readAiStatus } from "./ai-store.js";
 import {
+  ProposerCallFailedError,
+  acceptClustersForUser,
+  parseClusterAcceptance,
+  parseClusterProposeBody,
+  proposeClustersForUser,
+} from "./ai-clusters.js";
+import {
   ProposerUnavailableError,
   acceptTaxonomyForUser,
+  parseReviewResolveRequest,
   parseTaxonomyAcceptance,
   parseTaxonomyProposeBody,
   proposeTaxonomyForUser,
+  readReviewList,
   requestClassificationRun,
+  resolveReviewItems,
   startAiWorker,
 } from "./ai-jobs.js";
 import { embedTexts, reconcileIndex } from "./embeddings.js";
@@ -194,6 +204,90 @@ app.put("/api/ai/taxonomy", async (c) => {
     return c.json({ error: error instanceof Error ? error.message : "Invalid request" }, 400);
   }
   return c.json(await acceptTaxonomyForUser(pool, session.user.id, body.collections, body.tags));
+});
+
+// -- Suggestions from clusters (docs/ai.md, "Suggestions from clusters") --
+//
+// The inverted taxonomy flow: cluster the account's unfiled bookmarks by
+// embedding first (apps/api/src/cluster-math.ts, deterministic, no model
+// call), then make ONE proposer call that only has to *name* the groups
+// already formed, rather than asking a model to invent names from a sample
+// and then classifying the whole library against them one bookmark at a
+// time. Filing on acceptance is instant, because cluster membership is
+// already known — no per-bookmark classification call in this flow at all.
+// Same session guard and the same 503-when-unconfigured pattern as
+// `/api/ai/taxonomy/propose` above, on purpose: this reuses that route's
+// exact proposer (`NOOK_AI_PROPOSER` and its key), just for a different
+// prompt shape (apps/api/src/ai-clusters.ts).
+
+app.post("/api/ai/clusters/propose", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  let body;
+  try {
+    body = parseClusterProposeBody(await c.req.json());
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Invalid request" }, 400);
+  }
+  if (!aiAvailability().proposeTaxonomy) {
+    return c.json({ error: "AI cluster naming is not configured" }, 503);
+  }
+  try {
+    return c.json(await proposeClustersForUser(pool, session.user.id, body.language));
+  } catch (error) {
+    if (error instanceof ProposerUnavailableError) {
+      return c.json({ error: "AI cluster naming is not configured" }, 503);
+    }
+    // The proposer IS configured but the one naming call itself failed — a
+    // materially different signal than "nothing to cluster", so a 502 rather
+    // than folding it into an empty `proposals: []` the way `proposeTaxonomy`
+    // in ai.ts degrades a failed call.
+    if (error instanceof ProposerCallFailedError) {
+      return c.json({ error: "AI cluster naming call failed" }, 502);
+    }
+    throw error;
+  }
+});
+
+app.put("/api/ai/clusters/accept", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  let body;
+  try {
+    body = parseClusterAcceptance(await c.req.json());
+  } catch (error) {
+    // 400 for a malformed request. The review list showed the user exactly
+    // which collections and how many bookmarks each is about to file, so a
+    // client bug here is a 400, not a silent partial acceptance.
+    return c.json({ error: error instanceof Error ? error.message : "Invalid request" }, 400);
+  }
+  return c.json(await acceptClustersForUser(pool, session.user.id, body.collections));
+});
+
+// -- Review list (docs/ai.md, "Review list") -------------------------------
+//
+// The other half of "the guess is thrown away" (docs/ai.md, ai.ts's
+// `decideClassification`): a low-confidence decision keeps its top choice in
+// `nook_ai_review` rather than discarding it, and these two routes are the
+// only way anything reads or acts on that table. Same session guard as every
+// other AI route, for the same reason — the review list is account-wide.
+
+app.get("/api/ai/review", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  return c.json(await readReviewList(pool, session.user.id));
+});
+
+app.post("/api/ai/review/resolve", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  let items;
+  try {
+    items = parseReviewResolveRequest(await c.req.json());
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Invalid request" }, 400);
+  }
+  return c.json(await resolveReviewItems(pool, session.user.id, items));
 });
 
 app.post("/api/search", async (c) => {

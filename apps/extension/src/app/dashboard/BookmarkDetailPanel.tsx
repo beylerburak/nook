@@ -1,6 +1,7 @@
 import { Button } from "@astryxdesign/core/Button";
 import { Grid } from "@astryxdesign/core/Grid";
 import { Icon } from "@astryxdesign/core/Icon";
+import { IconButton } from "@astryxdesign/core/IconButton";
 import { HStack, VStack } from "@astryxdesign/core/Layout";
 import { Section } from "@astryxdesign/core/Section";
 import { Selector } from "@astryxdesign/core/Selector";
@@ -11,6 +12,7 @@ import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { Token } from "@astryxdesign/core/Token";
 import { useI18n } from "../../i18n";
 import { MediaThumbnail } from "../components/MediaThumbnail";
+import { useReviewList } from "./organize/useReviewList";
 import { allItemMedia, itemTitle, visibleText } from "./bookmark-utils";
 import type { Bookmark, BookmarkList, Media } from "../../../lib/types";
 
@@ -53,6 +55,10 @@ export function BookmarkDetailPanel({
   onMedia,
 }: BookmarkDetailPanelProps) {
   const { t } = useI18n();
+  // Same shared list BookmarkCard's chip reads (useReviewList.tsx) — one
+  // fetch for the whole dashboard, not a route of this panel's own.
+  const reviewList = useReviewList();
+  const suggestion = reviewList.items.find((entry) => entry.bookmarkId === item.id);
   const addDraftTag = () => {
     const tag = tagDraft.trim().replace(/^#/, "");
     if (!tag) return;
@@ -158,6 +164,25 @@ export function BookmarkDetailPanel({
                 ))}
             </HStack>
           </VStack>
+        ) : null}
+        {suggestion ? (
+          <HStack gap={2} vAlign="center" wrap="wrap">
+            <Token label={t("dashboard.card.suggestedCollection", { name: suggestion.listName })} size="sm" color="blue" />
+            <IconButton
+              label={t("dashboard.card.acceptSuggestion")}
+              icon={<Icon icon="check" />}
+              variant="ghost"
+              size="sm"
+              onClick={() => void reviewList.resolve([{ bookmarkId: item.id, action: "accept" }])}
+            />
+            <IconButton
+              label={t("dashboard.card.dismissSuggestion")}
+              icon={<Icon icon="close" />}
+              variant="ghost"
+              size="sm"
+              onClick={() => void reviewList.resolve([{ bookmarkId: item.id, action: "reject" }])}
+            />
+          </HStack>
         ) : null}
         <Selector
           label={t("dashboard.detail.collectionLabel")}

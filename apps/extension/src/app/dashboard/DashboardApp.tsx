@@ -37,6 +37,7 @@ import { CreateListDialog, DeleteListDialog } from "./dialogs";
 import { BookmarkGlyph } from "./glyphs";
 import { LibrarySideNav } from "./LibrarySideNav";
 import { OrganizePage } from "./organize/OrganizePage";
+import { ReviewListProvider, useReviewList } from "./organize/useReviewList";
 import { useBookmarkLibrary } from "./useBookmarkLibrary";
 import {
   DEFAULT_CARD_PAGE_SIZE,
@@ -73,6 +74,7 @@ function DashboardScreen({
   const toast = useToast();
   const { t } = useI18n();
   const host = useNookHost();
+  const reviewList = useReviewList();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const {
     items,
@@ -436,6 +438,11 @@ function DashboardScreen({
     <LibrarySideNav
       view={view}
       counts={counts}
+      // The Organize badge is the review count when there's anything waiting
+      // to review, and the unfiled count otherwise — reviewing what Jev
+      // already guessed is a smaller, more specific ask than organizing
+      // everything unfiled, so it takes priority whenever it's non-zero.
+      organizeBadge={reviewList.items.length > 0 ? reviewList.items.length : counts.unorganized}
       lists={lists}
       listCounts={listCounts}
       tags={tags}
@@ -791,10 +798,17 @@ export function DashboardApp() {
     <I18nProvider>
       <Theme theme={nookTheme} mode={appearance.mode}>
         <ToastViewport position="bottomEnd">
-          <DashboardScreen
-            appearance={appearance.mode}
-            onAppearanceChange={appearance.setMode}
-          />
+          {/* One `GET /api/ai/review` for the whole dashboard — the Organize
+              page's "Needs your review" block, the side nav's Organize badge
+              and every BookmarkCard's suggestion chip all read this same
+              context rather than each fetching their own copy (see
+              useReviewList.tsx). */}
+          <ReviewListProvider>
+            <DashboardScreen
+              appearance={appearance.mode}
+              onAppearanceChange={appearance.setMode}
+            />
+          </ReviewListProvider>
         </ToastViewport>
       </Theme>
     </I18nProvider>

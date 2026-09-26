@@ -12,16 +12,21 @@
 // genuine failure does, and what the queue's SQL has to exclude to stay free.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AI_TICK_INTERVAL_MS,
   CLASSIFY_BATCH_SIZE,
   CLASSIFY_CONCURRENCY,
   applyClassificationPatch,
   applyServerWrite,
   claimJobs,
   enqueueClassification,
+  parseReviewResolveRequest,
   parseTaxonomyAcceptance,
   parseTaxonomyProposeBody,
+  readReviewList,
   requestClassificationRun,
+  resolveReviewItems,
   runClassificationPass,
+  tickAiWorker,
   topUpClassificationQueue,
 } from "../src/ai-jobs.js";
 import { UNAVAILABLE_MODEL, type ClassifyResponse } from "../src/ai.js";
@@ -247,8 +252,8 @@ describe("topUpClassificationQueue", () => {
     expect(statement).toContain("r.deleted_at IS NULL");
     // The eligibility rule, in SQL: a bookmark a human filed, or one the model has
     // already ruled on, is not re-offered.
-    expect(statement).toContain("r.data->'ai' IS NULL");
-    expect(statement).toContain("r.data->'listId' IS NULL");
+    expect(statement).toContain("COALESCE(r.data->'ai', 'null'::jsonb) = 'null'::jsonb");
+    expect(statement).toContain("r.data->>'listId' IS NULL");
     // One row per bookmark, not one per enqueue.
     expect(statement).toContain("NOT EXISTS (SELECT 1 FROM nook_ai_jobs");
     // The money: a "nothing fit" verdict wrote nothing to the record, so this is
@@ -336,6 +341,45 @@ describe("runClassificationPass", () => {
     // no amount of reading will make a 30-character post worth a request.
     const decided = stub.poolStatements.find((statement) => statement.sql.includes("nook_ai_decided"));
     expect(decided?.params).toEqual(["u1", ["b1", "b2"]]);
+  });
+
+  it("keeps a low-confidence decision's top choice for the review list, in one statement", async () => {
+    process.env.TYPESAFE_API_KEY = "test-key";
+    const stub = passPool({ claims: ["b1"], library: [libraryRow("b1")] });
+    const result = await runClassificationPass(stub.pool, "u1", {
+      classify: vi.fn(async () => ({
+        response: decision({
+          collection: { assign: false, id: null, name: null, confidence: 0.6, probabilities: { l1: 0.6 } },
+          skipped: "low-confidence",
+          guess: { id: "l1", name: "Reading", confidence: 0.6 },
+        }),
+        throttled: false,
+      })),
+      now: () => Date.parse("2026-09-26T12:00:00Z"),
+    });
+
+    expect(result.processed).toBe(1);
+    const upsert = stub.poolStatements.find((statement) => statement.sql.startsWith("INSERT INTO nook_ai_review"));
+    expect(upsert).toBeDefined();
+    // One statement for the whole batch, same as `rememberDecided` — and an
+    // upsert rather than `DO NOTHING`, because a decided bookmark can be
+    // reconsidered after a taxonomy acceptance and a fresher guess should
+    // replace the stale one rather than lose to it.
+    expect(upsert?.sql).toContain("ON CONFLICT (user_id, bookmark_id) DO UPDATE");
+    expect(upsert?.params).toEqual(["u1", ["b1"], ["l1"], [0.6]]);
+  });
+
+  it("never writes to the review list for an assigned or none-fit decision", async () => {
+    process.env.TYPESAFE_API_KEY = "test-key";
+    // The default `decision()` fixture assigns (assign: true) — no `guess` at all.
+    const stub = passPool({ claims: ["b1"], library: [libraryRow("b1")] });
+    await runClassificationPass(stub.pool, "u1", {
+      classify: vi.fn(async () => ({ response: decision(), throttled: false })),
+      now: () => Date.parse("2026-09-26T12:00:00Z"),
+    });
+    expect(stub.poolStatements.some((statement) => statement.sql.startsWith("INSERT INTO nook_ai_review"))).toBe(
+      false,
+    );
   });
 
   it("does not read the library when there is nothing queued", async () => {
@@ -741,5 +785,279 @@ describe("parseTaxonomyAcceptance", () => {
         ],
       }).tags,
     ).toEqual([{ name: "arayuz", definition: "Arayüz." }]);
+  });
+});
+
+// -- the review list (docs/ai.md, "Review list") ---------------------------
+
+describe("readReviewList", () => {
+  it("prunes stale rows before counting and reading, and maps the result", async () => {
+    const calls: Recorded[] = [];
+    const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+      const statement = { sql: flatten(sql), params };
+      calls.push(statement);
+      if (statement.sql.startsWith("DELETE FROM nook_ai_review")) return { rows: [], rowCount: 2 };
+      if (statement.sql.startsWith("SELECT count(*)::int AS count FROM nook_ai_review")) {
+        return { rows: [{ count: 2 }] };
+      }
+      if (statement.sql.startsWith("SELECT r.bookmark_id")) {
+        return {
+          rows: [
+            { bookmark_id: "b2", list_id: "l1", list_name: "Reading", confidence: 0.7 },
+            { bookmark_id: "b1", list_id: "l2", list_name: "Cooking", confidence: 0.5 },
+          ],
+        };
+      }
+      return { rows: [] };
+    });
+
+    const result = await readReviewList({ query } as never, "u1");
+
+    // The prune runs first, and its predicate is exactly the "still pending"
+    // rule GET /api/ai/status's reviewCount also reads by (REVIEW_ROW_LIVE in
+    // ai-store.ts): a row is stale when its bookmark is gone, already filed, or
+    // its guessed collection itself got deleted.
+    expect(calls[0].sql).toMatch(/^DELETE FROM nook_ai_review/);
+    expect(calls[0].sql).toContain("b.data->>'listId' IS NULL");
+    expect(calls[0].sql).toContain("l.deleted_at IS NULL");
+    expect(calls[0].params).toEqual(["u1"]);
+
+    expect(result).toEqual({
+      total: 2,
+      items: [
+        { bookmarkId: "b2", listId: "l1", listName: "Reading", confidence: 0.7 },
+        { bookmarkId: "b1", listId: "l2", listName: "Cooking", confidence: 0.5 },
+      ],
+    });
+
+    // Ordered and capped in SQL, not re-sorted or re-sliced in JS.
+    const select = calls.find((c) => c.sql.startsWith("SELECT r.bookmark_id")) as Recorded;
+    expect(select.sql).toContain("ORDER BY r.confidence DESC");
+    expect(select.params).toEqual(["u1", 200]);
+  });
+
+  it("clamps a corrupt confidence and falls back to the id for a blank name", async () => {
+    const query = vi.fn(async (sql: string) => {
+      const statement = flatten(sql);
+      if (statement.startsWith("DELETE")) return { rows: [] };
+      if (statement.includes("count(*)")) return { rows: [{ count: 1 }] };
+      return { rows: [{ bookmark_id: "b1", list_id: "l1", list_name: "  ", confidence: 5 }] };
+    });
+    const result = await readReviewList({ query } as never, "u1");
+    expect(result.items[0]).toEqual({ bookmarkId: "b1", listId: "l1", listName: "l1", confidence: 1 });
+  });
+});
+
+describe("parseReviewResolveRequest", () => {
+  it("accepts a well-formed batch, with and without a listId override", () => {
+    expect(
+      parseReviewResolveRequest({
+        items: [
+          { bookmarkId: "b1", action: "accept" },
+          { bookmarkId: "b2", action: "accept", listId: "l2" },
+          { bookmarkId: "b3", action: "reject" },
+        ],
+      }),
+    ).toEqual([
+      { bookmarkId: "b1", action: "accept" },
+      { bookmarkId: "b2", action: "accept", listId: "l2" },
+      { bookmarkId: "b3", action: "reject" },
+    ]);
+  });
+
+  it("rejects anything that is not 1-200 well-formed items, rather than dropping one", () => {
+    expect(() => parseReviewResolveRequest(null)).toThrow("Invalid request");
+    expect(() => parseReviewResolveRequest({})).toThrow("Invalid items array");
+    expect(() => parseReviewResolveRequest({ items: [] })).toThrow("Invalid items array");
+    expect(() =>
+      parseReviewResolveRequest({ items: Array.from({ length: 201 }, () => ({ bookmarkId: "b", action: "reject" })) }),
+    ).toThrow("Invalid items array");
+    expect(() => parseReviewResolveRequest({ items: [{ action: "accept" }] })).toThrow("Invalid bookmarkId");
+    expect(() => parseReviewResolveRequest({ items: [{ bookmarkId: "", action: "accept" }] })).toThrow(
+      "Invalid bookmarkId",
+    );
+    expect(() => parseReviewResolveRequest({ items: [{ bookmarkId: "b1", action: "maybe" }] })).toThrow(
+      "Invalid action",
+    );
+    expect(() => parseReviewResolveRequest({ items: [{ bookmarkId: "b1", action: "accept", listId: 5 }] })).toThrow(
+      "Invalid listId",
+    );
+    expect(() => parseReviewResolveRequest({ items: ["b1"] })).toThrow("Invalid item");
+  });
+});
+
+/** A fake pool for `resolveReviewItems`: the review row lookup/delete, the
+ *  target list's live name, and — for `accept` — `applyServerWrite`'s own
+ *  transaction on a `client` from `pool.connect()`. Modelled on `passPool`
+ *  above, narrowed to the statements this path actually issues. */
+function reviewResolvePool(
+  options: {
+    reviewRow?: { list_id: string; confidence: number } | null;
+    listName?: string | null;
+    record?: { data: Record<string, unknown>; deleted_at?: string | null } | null;
+  } = {},
+) {
+  const poolStatements: Recorded[] = [];
+  const clientStatements: Recorded[] = [];
+
+  const client = {
+    query: vi.fn(async (sql: string, params: unknown[] = []) => {
+      const statement = { sql: flatten(sql), params };
+      clientStatements.push(statement);
+      if (statement.sql.includes("SELECT data, deleted_at FROM nook_records")) {
+        const record = options.record === undefined ? { data: { id: "b1", listId: null }, deleted_at: null } : options.record;
+        return { rows: record ? [record] : [], rowCount: record ? 1 : 0 };
+      }
+      return { rows: [], rowCount: 0 };
+    }),
+    release: vi.fn(),
+  };
+
+  const connect = vi.fn(async () => client);
+  const pool = {
+    connect,
+    query: vi.fn(async (sql: string, params: unknown[] = []) => {
+      const statement = { sql: flatten(sql), params };
+      poolStatements.push(statement);
+      if (statement.sql.startsWith("SELECT list_id, confidence FROM nook_ai_review")) {
+        const row = options.reviewRow === undefined ? { list_id: "l1", confidence: 0.6 } : options.reviewRow;
+        return { rows: row ? [row] : [] };
+      }
+      if (statement.sql.startsWith("DELETE FROM nook_ai_review")) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (statement.sql.includes("kind = 'list'")) {
+        const name = options.listName === undefined ? "Reading" : options.listName;
+        return { rows: name === null ? [] : [{ name }] };
+      }
+      return { rows: [], rowCount: 0 };
+    }),
+  };
+
+  return { pool: pool as never, poolStatements, clientStatements, connect };
+}
+
+describe("resolveReviewItems", () => {
+  it("accept files through the exact same write path a classification decision uses", async () => {
+    const stub = reviewResolvePool();
+    const result = await resolveReviewItems(stub.pool, "u1", [{ bookmarkId: "b1", action: "accept" }], {
+      now: () => Date.parse("2026-09-26T12:00:00.000Z"),
+    });
+
+    expect(result).toEqual({ filed: 1, rejected: 0, skipped: 0 });
+    // The same transaction shape `applyServerWrite`'s own tests pin: the lock,
+    // the re-read FOR UPDATE, and the UPDATE — nothing here is a second copy
+    // of that mechanism.
+    expect(stub.clientStatements.map((s) => s.sql)).toEqual([
+      "BEGIN",
+      "SELECT pg_advisory_xact_lock(hashtext($1))",
+      "SELECT data, deleted_at FROM nook_records WHERE user_id=$1 AND kind=$2 AND id=$3 FOR UPDATE",
+      "UPDATE nook_records SET data=$4::jsonb, deleted_at=$5, version=nextval('nook_sync_version_seq'), updated_at=now() WHERE user_id=$1 AND kind=$2 AND id=$3",
+      "COMMIT",
+    ]);
+    const update = stub.clientStatements.find((s) => s.sql.startsWith("UPDATE nook_records")) as Recorded;
+    const merged = JSON.parse(update.params[3] as string) as Record<string, unknown>;
+    // Files into the stored guess's collection, with a receipt shaped like a
+    // classification's own but marked as user-confirmed.
+    expect(merged).toMatchObject({
+      listId: "l1",
+      listName: "Reading",
+      ai: { model: "jev", at: "2026-09-26T12:00:00.000Z", collectionConfidence: 0.6, source: "review" },
+    });
+
+    // The review row is gone either way — see the next two tests for "either
+    // way" — but here in particular, gone because it was accepted.
+    const del = stub.poolStatements.find((s) => s.sql.startsWith("DELETE FROM nook_ai_review")) as Recorded;
+    expect(del.params).toEqual(["u1", "b1"]);
+  });
+
+  it("an explicit listId overrides the stored guess's collection", async () => {
+    const stub = reviewResolvePool({ listName: "Cooking" });
+    await resolveReviewItems(stub.pool, "u1", [{ bookmarkId: "b1", action: "accept", listId: "l2" }]);
+    const listNameQuery = stub.poolStatements.find((s) => s.sql.includes("kind = 'list'")) as Recorded;
+    expect(listNameQuery.params).toEqual(["u1", "l2"]);
+  });
+
+  it("counts a bookmark filed meanwhile as skipped, not filed — the re-check", async () => {
+    // The guard re-reads `listId` on the FRESH row: already non-null means a
+    // human (or another pass) got there first, and the write must not clobber it.
+    const stub = reviewResolvePool({ record: { data: { id: "b1", listId: "someone-else" }, deleted_at: null } });
+    const result = await resolveReviewItems(stub.pool, "u1", [{ bookmarkId: "b1", action: "accept" }]);
+    expect(result).toEqual({ filed: 0, rejected: 0, skipped: 1 });
+    // The row is still cleared — a stale guess about an already-filed bookmark
+    // must not be offered again on the next read.
+    expect(stub.poolStatements.some((s) => s.sql.startsWith("DELETE FROM nook_ai_review"))).toBe(true);
+    // Never reached the UPDATE: the guard refused before build was even asked.
+    expect(stub.clientStatements.some((s) => s.sql.startsWith("UPDATE nook_records"))).toBe(false);
+  });
+
+  it("skips without touching the write path when the guessed collection is gone", async () => {
+    const stub = reviewResolvePool({ listName: null });
+    const result = await resolveReviewItems(stub.pool, "u1", [{ bookmarkId: "b1", action: "accept" }]);
+    expect(result).toEqual({ filed: 0, rejected: 0, skipped: 1 });
+    expect(stub.connect).not.toHaveBeenCalled();
+    expect(stub.poolStatements.some((s) => s.sql.startsWith("DELETE FROM nook_ai_review"))).toBe(true);
+  });
+
+  it("reject deletes the review row and never touches nook_ai_decided", async () => {
+    const stub = reviewResolvePool();
+    const result = await resolveReviewItems(stub.pool, "u1", [{ bookmarkId: "b1", action: "reject" }]);
+    expect(result).toEqual({ filed: 0, rejected: 1, skipped: 0 });
+    expect(stub.connect).not.toHaveBeenCalled();
+    expect(stub.poolStatements.some((s) => s.sql.startsWith("DELETE FROM nook_ai_review"))).toBe(true);
+    // Rejecting must not make the bookmark billable again: nook_ai_decided,
+    // written when the pass first decided on it, is left completely alone.
+    expect(stub.poolStatements.some((s) => s.sql.includes("nook_ai_decided"))).toBe(false);
+  });
+
+  it("skips a bookmarkId with no stored guess, for either action, without deleting anything", async () => {
+    const stub = reviewResolvePool({ reviewRow: null });
+    const result = await resolveReviewItems(stub.pool, "u1", [
+      { bookmarkId: "gone", action: "accept" },
+      { bookmarkId: "gone", action: "reject" },
+    ]);
+    expect(result).toEqual({ filed: 0, rejected: 0, skipped: 2 });
+    expect(stub.poolStatements.some((s) => s.sql.startsWith("DELETE FROM nook_ai_review"))).toBe(false);
+  });
+});
+
+// -- the tick's clock and its re-entrancy guard ----------------------------
+
+describe("AI_TICK_INTERVAL_MS", () => {
+  it("defaults to 10 seconds — a faster meter at the same per-bookmark cost (docs/ai.md, \"The rate\")", () => {
+    expect(AI_TICK_INTERVAL_MS).toBe(10_000);
+  });
+});
+
+describe("tickAiWorker", () => {
+  it("does not start a second tick while one is still running", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("AS candidates")) {
+        await gate;
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+    const pool = { query } as never;
+
+    const first = tickAiWorker(pool);
+    const second = tickAiWorker(pool);
+    // The second call returned without ever querying: `tickInFlight` was set
+    // before `first`'s own accounts query even resolved.
+    await second;
+    expect(query).toHaveBeenCalledTimes(1);
+
+    release();
+    await first;
+
+    // The guard resets once the tick actually finishes, so the worker is not
+    // parked forever by one slow tick.
+    const third = tickAiWorker(pool);
+    await third;
+    expect(query).toHaveBeenCalledTimes(2);
   });
 });

@@ -8,11 +8,15 @@ import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   _resetAiClientForTests,
+  acceptClusters,
   acceptTaxonomy,
   announceAiStatusChange,
   loadAiStatus,
+  loadReview,
   requestClassificationRun,
+  requestClusterProposals,
   requestTaxonomyProposals,
+  resolveReview,
   subscribeToAiStatus,
   type AiStatus,
 } from "../lib/ai-client";
@@ -106,6 +110,10 @@ describe("the session gate", () => {
     expect(await requestClassificationRun(deps({ session }))).toBeNull();
     expect((await requestTaxonomyProposals(deps({ session }))).kind).toBe("signed-out");
     expect((await acceptTaxonomy({ collections: ["Tasarım"], tags: [] }, deps({ session }))).kind).toBe("signed-out");
+    expect((await loadReview(deps({ session }))).kind).toBe("signed-out");
+    expect((await resolveReview({ items: [{ bookmarkId: "b-1", action: "accept" }] }, deps({ session }))).kind).toBe("signed-out");
+    expect((await requestClusterProposals(deps({ session }))).kind).toBe("signed-out");
+    expect((await acceptClusters({ collections: [{ name: "Design", memberIds: ["b-1"] }] }, deps({ session }))).kind).toBe("signed-out");
     // The point of the gate: a signed-out browser must not reach the network.
     expect(route.calls).toHaveLength(0);
   });
@@ -139,18 +147,26 @@ describe("status mapping", () => {
     expect(await requestClassificationRun(deps())).toBeNull();
     expect((await requestTaxonomyProposals(deps())).kind).toBe("signed-out");
     expect((await acceptTaxonomy({ collections: ["a"], tags: [] }, deps())).kind).toBe("signed-out");
+    expect((await loadReview(deps())).kind).toBe("signed-out");
+    expect((await resolveReview({ items: [{ bookmarkId: "b-1", action: "accept" }] }, deps())).kind).toBe("signed-out");
+    expect((await requestClusterProposals(deps())).kind).toBe("signed-out");
+    expect((await acceptClusters({ collections: [{ name: "Design", memberIds: ["b-1"] }] }, deps())).kind).toBe("signed-out");
   });
 
   test("503 is unavailable — a missing server key, not a failure", async () => {
     route.response = () => json({ error: "not configured" }, 503);
     expect((await requestTaxonomyProposals(deps())).kind).toBe("unavailable");
     expect((await acceptTaxonomy({ collections: ["a"], tags: [] }, deps())).kind).toBe("unavailable");
+    expect((await requestClusterProposals(deps())).kind).toBe("unavailable");
+    expect((await acceptClusters({ collections: [{ name: "Design", memberIds: ["b-1"] }] }, deps())).kind).toBe("unavailable");
   });
 
   test("429 and 529 are throttled", async () => {
     for (const status of [429, 529]) {
       route.response = () => json({ error: "slow down" }, status);
       expect((await requestTaxonomyProposals(deps())).kind).toBe("throttled");
+      expect((await loadReview(deps())).kind).toBe("throttled");
+      expect((await requestClusterProposals(deps())).kind).toBe("throttled");
     }
   });
 
@@ -208,6 +224,7 @@ describe("loadAiStatus", () => {
       // summarisation pass renders as the missing deploy it is rather than
       // crashing the panel.
       summarize: NO_SUMMARISER,
+      reviewCount: 0,
     });
   });
 
@@ -477,6 +494,181 @@ describe("acceptTaxonomy", () => {
     route.response = () => json({ createdCollections: 1, addedTags: 0, dropped: 2, taxonomy: { acceptedAt: null, collections: [], tags: [] } });
     const result = await acceptTaxonomy({ collections: ["a"], tags: [] }, deps());
     expect(result).toMatchObject({ kind: "accepted", createdCollections: 1, addedTags: 0, dropped: 2 });
+  });
+});
+
+describe("loadReview", () => {
+  test("reads the review list, highest confidence first as the server sent it", async () => {
+    route.response = () =>
+      json({
+        items: [
+          { bookmarkId: "b-1", listId: "list-1", listName: "Design", confidence: 0.72 },
+          { bookmarkId: "b-2", listId: "list-2", listName: "Reading", confidence: 0.55 },
+        ],
+        total: 2,
+      });
+    const outcome = await loadReview(deps());
+    expect(outcome).toEqual({
+      kind: "items",
+      items: [
+        { bookmarkId: "b-1", listId: "list-1", listName: "Design", confidence: 0.72 },
+        { bookmarkId: "b-2", listId: "list-2", listName: "Reading", confidence: 0.55 },
+      ],
+      total: 2,
+    });
+    expect(route.calls[0]).toMatchObject({ url: `${API_URL}/api/ai/review`, method: "GET" });
+  });
+
+  test("drops a row missing a bookmark id or a collection id", async () => {
+    route.response = () =>
+      json({
+        items: [
+          { bookmarkId: "b-1", listId: "list-1", confidence: 0.6 },
+          { bookmarkId: "", listId: "list-2", confidence: 0.9 },
+          { listId: "list-3", confidence: 0.9 },
+        ],
+        total: 3,
+      });
+    const outcome = await loadReview(deps());
+    expect(outcome.kind).toBe("items");
+    expect(outcome.kind === "items" && outcome.items).toEqual([{ bookmarkId: "b-1", listId: "list-1", listName: "list-1", confidence: 0.6 }]);
+  });
+
+  test("fills a missing or nonsense body with an empty list", async () => {
+    route.response = () => json({});
+    expect(await loadReview(deps())).toEqual({ kind: "items", items: [], total: 0 });
+  });
+
+  test("any other non-2xx is failed, with the status in the message", async () => {
+    route.response = () => json({ error: "boom" }, 418);
+    const outcome = await loadReview(deps());
+    expect(outcome.kind).toBe("failed");
+    expect(outcome.kind === "failed" && outcome.message).toContain("418");
+  });
+});
+
+describe("resolveReview", () => {
+  test("POSTs the batch and reports the three-way split", async () => {
+    route.response = () => json({ filed: 3, rejected: 1, skipped: 0 });
+    const result = await resolveReview(
+      { items: [{ bookmarkId: "b-1", action: "accept" }, { bookmarkId: "b-2", action: "reject" }] },
+      deps(),
+    );
+    expect(result).toEqual({ kind: "resolved", filed: 3, rejected: 1, skipped: 0 });
+    expect(route.calls[0]).toMatchObject({
+      url: `${API_URL}/api/ai/review/resolve`,
+      method: "POST",
+      body: { items: [{ bookmarkId: "b-1", action: "accept" }, { bookmarkId: "b-2", action: "reject" }] },
+    });
+  });
+
+  test("sends an accept into a different collection than the one Jev guessed", async () => {
+    route.response = () => json({ filed: 1, rejected: 0, skipped: 0 });
+    await resolveReview({ items: [{ bookmarkId: "b-1", action: "accept", listId: "list-9" }] }, deps());
+    expect(route.calls[0].body).toEqual({ items: [{ bookmarkId: "b-1", action: "accept", listId: "list-9" }] });
+  });
+
+  test("a thrown fetch is failed rather than an unhandled rejection", async () => {
+    route.throws = new TypeError("offline");
+    const outcome = await resolveReview({ items: [{ bookmarkId: "b-1", action: "accept" }] }, deps());
+    expect(outcome).toEqual({ kind: "failed", message: "Could not reach Nook's server to save that." });
+  });
+});
+
+describe("requestClusterProposals", () => {
+  test("sends the language only when it is not `auto`", async () => {
+    route.response = () => json({ proposals: [], unclustered: 0, considered: 0 });
+    await requestClusterProposals({ ...deps(), language: "auto" });
+    expect(route.calls[0]).toMatchObject({ url: `${API_URL}/api/ai/clusters/propose`, method: "POST", body: {} });
+
+    await requestClusterProposals({ ...deps(), language: "tr" });
+    expect(route.calls[1].body).toEqual({ language: "tr" });
+  });
+
+  test("reads a well-formed response, including an existing-collection match", async () => {
+    route.response = () =>
+      json({
+        proposals: [
+          {
+            id: "c1",
+            name: "Design",
+            why: "Design systems and UI craft.",
+            size: 12,
+            memberIds: ["b-1", "b-2"],
+            sampleTitles: ["A design system", "On grids"],
+            existingListId: "list-design",
+          },
+        ],
+        unclustered: 87,
+        considered: 412,
+      });
+    const outcome = await requestClusterProposals(deps());
+    expect(outcome).toEqual({
+      kind: "proposals",
+      proposals: [
+        {
+          id: "c1",
+          name: "Design",
+          why: "Design systems and UI craft.",
+          size: 12,
+          memberIds: ["b-1", "b-2"],
+          sampleTitles: ["A design system", "On grids"],
+          existingListId: "list-design",
+        },
+      ],
+      unclustered: 87,
+      considered: 412,
+    });
+  });
+
+  test("drops a group with no name or no members, and defaults size to the member count", async () => {
+    route.response = () =>
+      json({
+        proposals: [
+          { name: "", memberIds: ["b-1"] },
+          { name: "Empty group", memberIds: [] },
+          { name: "Reading", memberIds: ["b-3", "b-4"] },
+        ],
+        unclustered: 0,
+        considered: 0,
+      });
+    const outcome = await requestClusterProposals(deps());
+    expect(outcome.kind === "proposals" && outcome.proposals).toEqual([
+      { id: "Reading", name: "Reading", why: "", size: 2, memberIds: ["b-3", "b-4"], sampleTitles: [], existingListId: null },
+    ]);
+  });
+
+  test("503 is unavailable, same as the taxonomy proposer", async () => {
+    route.response = () => json({ error: "not configured" }, 503);
+    expect((await requestClusterProposals(deps())).kind).toBe("unavailable");
+  });
+});
+
+describe("acceptClusters", () => {
+  test("PUTs the kept groups and reports what the server filed", async () => {
+    route.response = () => json({ createdCollections: 2, filed: 18, skipped: 1 });
+    const result = await acceptClusters(
+      { collections: [{ name: "Design", memberIds: ["b-1", "b-2"] }, { name: "Reading", memberIds: ["b-3"], existingListId: "list-reading" }] },
+      deps(),
+    );
+    expect(result).toEqual({ kind: "accepted", createdCollections: 2, filed: 18, skipped: 1 });
+    expect(route.calls[0]).toMatchObject({
+      url: `${API_URL}/api/ai/clusters/accept`,
+      method: "PUT",
+      body: {
+        collections: [
+          { name: "Design", memberIds: ["b-1", "b-2"] },
+          { name: "Reading", memberIds: ["b-3"], existingListId: "list-reading" },
+        ],
+      },
+    });
+  });
+
+  test("any other non-2xx is failed, with the status in the message", async () => {
+    route.response = () => json({ error: "boom" }, 418);
+    const outcome = await acceptClusters({ collections: [{ name: "Design", memberIds: ["b-1"] }] }, deps());
+    expect(outcome.kind).toBe("failed");
+    expect(outcome.kind === "failed" && outcome.message).toContain("418");
   });
 });
 

@@ -155,6 +155,13 @@ export const dashboard = {
     openSource: "Open source",
     details: "Details",
     copy: "Copy",
+
+    /** The "Needs your review" chip (BookmarkCard.tsx) — shown only for a
+     *  bookmark in `useReviewList`'s current list, so most cards never render
+     *  this at all. `name` is the guessed collection. */
+    suggestedCollection: "Suggested: {name}",
+    acceptSuggestion: "Accept suggestion",
+    dismissSuggestion: "Dismiss suggestion",
   },
 
   detail: {
@@ -285,17 +292,19 @@ export const dashboard = {
 
   /**
    * The Organize page (dashboard/organize/OrganizePage.tsx) — reached from
-   * the side nav's "Organize" item or Settings → AI's "Open Organize"
-   * button. Everything about *suggesting* collections/tags and *filing* into
-   * them reuses the `ai.suggest`/`ai.errors`/`ai.status` keys unchanged
-   * (`dashboard/organize/useSuggestCollections.ts` is the same flow that used
-   * to live in Settings); this namespace is only the page's own copy —
-   * header, progress, and the plain-language explanation of what got left
-   * out.
+   * the side nav's "Organize" item or Settings → AI's "Open Organize" button.
+   * Three blocks, in order of prominence: `clusters` ("Suggest collections",
+   * the primary action — groups of unfiled bookmarks Jev found), `review`
+   * ("Needs your review" — guesses that came in below the confidence
+   * threshold), then the page's own progress/recently-filed copy below. The
+   * secondary "Suggest tags" action reuses the `ai.suggest`/`ai.errors`/
+   * `ai.status` keys unchanged (`dashboard/organize/useSuggestCollections.ts`
+   * is the same flow that used to be this page's primary one, kept as the
+   * tags-only fallback — see its own header comment).
    */
   organize: {
     title: "Organize your library",
-    description: "Nook can sort your bookmarks into collections on its own. Ask for suggestions, keep the ones you like, and Nook does the filing.",
+    description: "Nook groups your unfiled bookmarks into collections on its own. Review what it finds, keep what's useful, and it files the rest.",
 
     filedCount: { one: "{count} bookmark filed", other: "{count} bookmarks filed" },
     unfiledCount: { one: "{count} left to organize", other: "{count} left to organize" },
@@ -305,13 +314,6 @@ export const dashboard = {
       one: "About {count} bookmark left — about {minutes} min.",
       other: "About {count} bookmarks left — about {minutes} min.",
     },
-
-    suggestPrompt: {
-      one: "Suggest a collection for the {count} bookmark that's still unfiled.",
-      other: "Suggest collections for the {count} bookmarks that are still unfiled.",
-    },
-    suggestMoreButton: "Suggest more collections",
-    allCaughtUp: "Everything is filed. Nice work.",
     autoFileEnabledNote: "Filing is now on too, so new bookmarks keep getting sorted.",
 
     recentlyFiledTitle: "Recently filed",
@@ -326,5 +328,74 @@ export const dashboard = {
     },
 
     openAiSettings: "AI settings",
+    suggestTagsTrigger: "Suggest tags",
+
+    empty: {
+      title: "Everything is organized",
+      suggestAgain: "Suggest again",
+    },
+
+    // "Suggest collections" — the cluster-proposal flow (useSuggestClusters.ts,
+    // ClusterProposals.tsx). Copy rule: no "cluster"/"confidence score" here —
+    // a proposal is a "group", reviewing it is plain English.
+    clusters: {
+      cta: { one: "Find groups in your {count} unfiled bookmark.", other: "Find groups in your {count} unfiled bookmarks." },
+      button: "Suggest collections",
+      buttonTooltip: "Nook looks through your unfiled bookmarks and groups them.",
+      signedOutTooltip: "Sign in to ask for groups.",
+      reading: "Looking for groups",
+      readingBody: "Looking through your unfiled bookmarks…",
+      nothingNew: "Nothing new to suggest right now.",
+      nothingToRead: "Nothing unfiled to look at yet. Save a few bookmarks and try again.",
+
+      nameLabel: "Collection name",
+      renameAction: "Rename",
+      showAll: "Show all {count}",
+      showLess: "Show less",
+      selectAll: "Select all",
+      selectNone: "Select none",
+      existingBadge: "Adds to {name}",
+
+      collectionsCount: { one: "{count} collection", other: "{count} collections" },
+      bookmarksCount: { one: "{count} bookmark", other: "{count} bookmarks" },
+      createLabel: "Create {collections} and file {bookmarks}",
+      fileOnlyLabel: "File {bookmarks}",
+      consideredNote: { one: "Nook looked at {count} unfiled bookmark.", other: "Nook looked at {count} unfiled bookmarks." },
+      nothingSelected: "Pick at least one group to create it.",
+
+      unclusteredNote: {
+        one: "{count} bookmark didn't form a clear group — you can file it by hand below or suggest again later.",
+        other: "{count} bookmarks didn't form a clear group — you can file them by hand below or suggest again later.",
+      },
+
+      acceptedToast: {
+        one: "Created {collections} and filed {count} bookmark.",
+        other: "Created {collections} and filed {count} bookmarks.",
+      },
+    },
+
+    // "Needs your review" — guesses below the confidence threshold
+    // (useReviewList.tsx, ReviewList.tsx). Same chip appears on the bookmark
+    // card itself (dashboard.card.suggestedCollection).
+    review: {
+      heading: "Needs your review",
+      description: "Nook wasn't fully sure about these — take a look.",
+      likely: "Likely",
+      maybe: "Maybe",
+      accept: "Accept",
+      reject: "Dismiss",
+      moveTo: "Move to…",
+      acceptAllLikely: "Accept all likely",
+      resolvedToast: {
+        one: "{count} bookmark filed.",
+        other: "{count} bookmarks filed.",
+      },
+      dismissedToast: {
+        one: "{count} dismissed.",
+        other: "{count} dismissed.",
+      },
+      loadFailed: "Could not load what needs review.",
+      actionFailed: "Could not save that — try again.",
+    },
   },
 } as const;

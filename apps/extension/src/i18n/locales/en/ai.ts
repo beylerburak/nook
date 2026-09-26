@@ -33,10 +33,21 @@ export const ai = {
   openOrganize: "Open Organize",
   openOrganizeDescription: "Review suggestions, watch progress, and see what got filed — in its own page.",
 
+  // The secondary "Suggest tags" action on the Organize page
+  // (dashboard/organize/useSuggestCollections.ts, tagsOnly mode) — new
+  // collection names are the cluster-suggestion flow's job now
+  // (dashboard.organize.clusters), so this one only ever reviews and accepts
+  // tags, even though the route it calls (`POST /api/ai/taxonomy/propose`)
+  // still names collections too; those are simply never shown here.
+  // `button`'s own text is deliberately not "Suggest tags" a second time —
+  // that's the collapsed section's own trigger label
+  // (dashboard.organize.suggestTagsTrigger), immediately above this button,
+  // and the two must read as different things (and stay distinguishable to a
+  // test clicking by label).
   suggest: {
-    button: "Suggest collections",
-    buttonTooltip: "Nook looks at your unfiled bookmarks and suggests names for them.",
-    signedOutTooltip: "Sign in to ask for suggestions.",
+    button: "Look for tags",
+    buttonTooltip: "Nook looks at your library for tag ideas.",
+    signedOutTooltip: "Sign in to ask for tag ideas.",
     reading: "Reading your library",
     readingBody: "Looking through your library…",
     newCollections: "New collections",

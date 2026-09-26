@@ -31,6 +31,10 @@ apps/api  — the feature
   src/ai-classify.ts  PURE: build the request, apply a decision, build the patch
   src/ai-taxonomy.ts  PURE: sampling, proposals, the accepted-taxonomy record,
                       planning the BookmarkList rows
+  src/cluster-math.ts PURE: k-means over cosine-normalized embeddings, merging,
+                      the membership floor, matching an existing collection
+  src/ai-clusters.ts  "Suggestions from clusters": reads the embeddings, the
+                      one per-cluster naming call, the accept write path
   src/ai-store.ts     the account rows: run state + decision log for BOTH passes,
                       the accepted taxonomy, the leases, readAiStatus
   src/ai.ts           the Jev call and the proposer calls, the thresholds, the
@@ -54,12 +58,22 @@ apps/api  — the feature
         POST /api/ai/taxonomy/propose   the server samples its own library
         PUT  /api/ai/taxonomy           accept reviewed names: create the
                                          lists, store the taxonomy
+        --- the inverted flow — see "Suggestions from clusters" ---
+        POST /api/ai/clusters/propose   cluster the unfiled library, name
+                                         only what isn't already a match
+        PUT  /api/ai/clusters/accept    file every member instantly, no
+                                         per-bookmark classify call
+        --- kept guesses the pass used to throw away — see "Review list" ---
+        GET  /api/ai/review             low-confidence guesses still worth a
+                                         human's yes/no
+        POST /api/ai/review/resolve     accept (files it) or reject each one
 
   the tables, all one row per account unless noted:
         nook_ai_jobs      the classification queue
         nook_ai_state     run history for BOTH passes, and two lease columns
         nook_ai_taxonomy  the accepted taxonomy
         nook_ai_decided   every id a decision has been bought for
+        nook_ai_review    kept low-confidence guesses, one row per bookmark
         nook_ai_summaries every id a summary has been *attempted* on and got
                           nothing — see "The job queue"
 ```
@@ -335,28 +349,57 @@ titles and hostnames and classification sends titles, a 300-character preview,
 notes, hostnames and an author handle. The toggle says so on its own face, which
 is the only place it is worth saying.
 
-### The rate, and why a 12× faster tick is not a cost problem
+### The rate, and why a faster tick is not a cost problem
 
-25 bookmarks per minute, against the extension's 25 per 5-minute alarm.
+**≈150 bookmarks a minute**, against the extension's 25 per 5-minute alarm —
+and, until this section was last revised, this server's own earlier default of
+25 a minute. `AI_TICK_INTERVAL_MS` defaults to **10 seconds** now rather than
+60: a full batch is still `CLASSIFY_BATCH_SIZE` (25) per account per tick, and
+25 bookmarks every 10 seconds is 150 a minute. **1,000 bookmarks clears in
+roughly 7 minutes**, where the 60-second default took roughly 40.
 
-The total is unchanged, because cost is per bookmark and not per tick. A
+The total cost is unchanged, because cost is per bookmark and not per tick. A
 classification is a measured **1,466 input tokens** at `$42` per billion, and
-5,000 bookmarks is **$0.31**, once. A 1,000-bookmark library costs the same
-~$0.06 whether it clears in **roughly 40 minutes** or in **roughly 3.5 hours**.
-It just feels like a feature instead of a background chore.
+5,000 bookmarks is **$0.31**, once, whether it clears in 40 minutes or in 7.
+The once-a-minute tick was never a cost guard — it was an unexamined holdover
+from the extension's own polling cadence, and the artificial ceiling it
+imposed (docs's earlier text put it at "25 bookmarks per minute") had nothing
+underneath it once `nook_ai_decided` made billing per-bookmark rather than
+per-cap. The real ceiling is `CLASSIFY_CONCURRENCY` (4, unchanged) against the
+upstream's 1,200-requests/minute limit, and that is nowhere near saturated by
+how often a tick fires.
 
-The reason the faster tick is safe rather than reckless is `nook_ai_decided`.
-With the old capped cursor, 12 passes an hour would have multiplied a permanent
-re-billing leak by 12.
+The reason a faster tick is safe rather than reckless is still
+`nook_ai_decided`: with the old capped cursor, a faster tick would have
+multiplied a permanent re-billing leak; with the unbounded table, a bookmark is
+bought exactly once no matter how many ticks pass while it sits queued. See
+"The tick and its ceiling" below for the other half of the safety argument —
+the per-account lease, and the re-entrancy guard that keeps an overrunning tick
+from piling up rather than merely running back-to-back.
 
 ### The tick and its ceiling
 
-`AI_TICK_INTERVAL_MS` is 60 seconds, overridable with `NOOK_AI_TICK_MS` and
+`AI_TICK_INTERVAL_MS` is 10 seconds, overridable with `NOOK_AI_TICK_MS` and
 floored at a second so a typo cannot turn the worker into a spin loop. The first
 run is delayed 30 seconds, because the container may still be applying
 `schema.sql` and a tick that reads before `nook_ai_jobs` exists only logs a
 failure — the same reason the embedding reconciler waits 30 seconds for its
 first run.
+
+A tick can legitimately take longer than 10 seconds — a busy deployment's
+sequential pass over several accounts, each up to 25 classify calls, is not
+bounded to fit inside the interval — so `tickAiWorker` guards its own
+re-entrancy: a tick that is still running when the next one is due returns
+immediately rather than starting a second one. This is a throughput guard, not
+a correctness one. Nothing about an overlapping tick could have double-billed
+even without the guard: the claim in `nook_ai_jobs` is one atomic
+`DELETE ... RETURNING`, so two ticks can never claim the same row, and a second
+tick that reaches an account already mid-pass fails `acquireRunLease` and
+returns before claiming anything. The guard exists so a slow tick does not also
+re-run the accounts query and a doomed lease attempt per account for as long as
+it stays slow, and so `lastReconcileAt` is only ever updated by one tick at a
+time — without it, two overlapping ticks could each decide they are the
+15-minute reconcile tick and run the larger top-up and prune twice.
 
 Each tick considers at most 50 accounts, ordered by how much work each has, and
 works them **one at a time**. That is a bound on how long one tick may take, not
@@ -473,6 +516,122 @@ are also why a no-op write would be a real cost. `patchChangesSomething` gates
 the write, because bumping the version of a record whose content did not change
 would push a no-op change to every device and resurface the bookmark in the
 dashboard as freshly edited, for nothing.
+
+## Review list
+
+Production data made the gap concrete: after accepting 8 collections, a real
+account's classification pass filed 17 of 75 bookmarks and left roughly 33 more
+with a plausible top collection under `collectionMinConfidence` — a guess
+`decideClassification` already computes and, until this section, threw away
+outright. `collection.id` is `null` on a `skipped: "low-confidence"` response
+either way, so the near-miss and the model's own uncertainty looked identical
+from the outside. Those ~33 are worth a one-click "file it or not" prompt
+instead of silence, and this is the machinery that keeps them rather than
+discarding them.
+
+### The guess
+
+`decideClassification` (ai.ts) already knows the top choice on a low-confidence
+skip — it is the same `choice`/`name` that would have been assigned had
+confidence cleared the real threshold. It is now kept on the response as
+`guess: { id, name, confidence }`, gated on a second, much lower floor,
+`REVIEW_MIN_CONFIDENCE` (0.35): a filing threshold decides what to act on
+automatically, but 0.35 decides whether a number is worth showing a human at
+all, since a response near zero is noise no one could use to decide between
+"probably" and "probably not". **This changes nothing about what gets filed** —
+`collection.assign` stays `false` and `collection.id` stays `null` on the exact
+same response `guess` rides on. Never populated for a `skipped: "none-fit"`
+response (the model confidently said no collection fits, at a median confidence
+of 0.99 — see "`__none__` is the model's most confident answer" above) and
+never for tags: this is collections only, because a tag is additive and
+non-exclusive, and there is no equivalent "maybe" worth surfacing for one.
+
+### The table
+
+`nook_ai_review` (schema.sql) is one row per bookmark: `bookmark_id`, the
+guessed `list_id`, its `confidence`, `created_at`. `runClassificationPass`
+(ai-jobs.ts) collects every kept guess from a batch and upserts them in one
+statement, the same batching `rememberDecided` already uses for
+`nook_ai_decided` — not written per-bookmark inside the loop.
+
+It is deliberately not permanent bookkeeping the way `nook_ai_decided` is. A
+bookmark reaches this table only once under ordinary operation (a decided
+bookmark is never reconsidered), but a taxonomy acceptance wipes
+`nook_ai_decided` and makes previously-decided bookmarks eligible again — and
+when that happens, a fresher guess against the new option set should replace
+the stale one rather than lose to it, so the upsert is `ON CONFLICT ... DO
+UPDATE`, not `DO NOTHING`. It is also, deliberately, not a field on
+`nook_records`, for the same reason `nook_ai_decided` is not one: writing there
+would bump the sync version for a guess nobody has acted on yet, resurfacing
+the bookmark on every device as freshly edited.
+
+Nothing sweeps this table on a schedule the way `pruneDecided` sweeps
+`nook_ai_decided`. A stale row — its bookmark filed some other way, deleted, or
+its guessed collection itself deleted — costs nothing sitting there unread, so
+the read that is about to show the list to a human (`readReviewList`) prunes it
+first: one `DELETE` against the same liveness predicate (`REVIEW_ROW_LIVE` in
+ai-store.ts) that `readReviewCount` uses for the status route's `reviewCount`,
+so the two numbers can never quietly disagree about what "still pending" means.
+
+### The routes
+
+Both session-guarded like every other `/api/ai/*` route.
+
+```ts
+// GET /api/ai/review -> { items: AiReviewItem[]; total: number }
+//   Highest confidence first, limit 200. `total` is the count before the
+//   limit, so a client can show "200 of 340" instead of silently truncating.
+interface AiReviewItem {
+  bookmarkId: string;
+  listId: string;
+  listName: string;
+  confidence: number;
+}
+
+// POST /api/ai/review/resolve
+//   <- { items: Array<{ bookmarkId: string; action: "accept" | "reject"; listId?: string }> }
+//      (1 to 200 items; a malformed one 400s the whole request rather than
+//      being silently dropped, because the caller is about to render "N filed,
+//      M rejected" and a quietly ignored item would make that count a lie.)
+//   -> { filed: number; rejected: number; skipped: number }
+```
+
+`accept` files the bookmark through **the exact same write path a
+classification decision uses**, `applyServerWrite` — the same advisory lock,
+the same `SELECT ... FOR UPDATE`, the same re-check against the row read
+*inside* the lock rather than the one read at the start of the request. The
+guard is deliberately narrower than `bookmarkNeedsClassification`: it checks
+only `listId == null` on the fresh row, not `ai == null` too, because a
+bookmark whose *tags* were already filed by this same low-confidence decision
+already carries a non-null `ai` and must still be acceptable here — only the
+collection assignment is what "still unfiled" means for this route. A bookmark
+some other write filed in the meantime is reported `skipped`, not `filed`
+— the same "a human wins" rule the classification pass's own re-check follows.
+`listId` defaults to the stored guess and may be overridden in the request, for
+a reviewer who agrees the item is worth filing but not into that collection.
+
+The receipt written on accept is shaped like the one a classification decision
+writes (`model`, `at`, `collectionConfidence`), plus `source: "review"` so it
+can be told apart from a decision the pass filed on its own — `model` is the
+generic `"jev"` rather than a specific version string, because
+`nook_ai_review` never stored which exact model version answered, only the
+confidence, and restating a version here would be a guess dressed as a fact.
+
+`reject` only deletes the review row. `nook_ai_decided` — written when the pass
+first decided on this bookmark — is left completely alone, which is the entire
+point: rejecting a suggestion must not make the bookmark billable again.
+
+The review row is deleted in **both** outcomes of an accept, whether or not the
+file actually lands, and on every reject — a resolved item must never reappear
+on the next `GET /api/ai/review`.
+
+`reviewCount` — the same count `GET /api/ai/review`'s `total` reports — is
+additive on `GET /api/ai/status`, so the client can badge the review list
+cheaply without a second round trip. Unlike `readReviewList`, it never prunes:
+the status route is polled every few seconds while a pass drains, and a
+`DELETE` on every one of those polls would be pruning a table nothing has
+necessarily changed since the last poll. The much rarer "open the review list"
+read is where the lazy prune actually happens.
 
 ## Non-English content
 
@@ -637,6 +796,217 @@ fuzzy dedupe was deliberately not added — silently dropping a proposal the use
 would have wanted is worse than offering two similar collections, and only the
 user can tell which is the one they meant.
 
+## Suggestions from clusters
+
+Taxonomy growth above has a real ceiling, and it is not the threshold: the
+proposer only ever sees a 200-bookmark *sample*, and the classifier files the
+whole library against whatever names came back from that sample, one bookmark
+at a time. On a real 1,063-bookmark library of saved X posts this filed only
+**~24%** — not because the model was wrong about any one bookmark, but because
+the sample never covered the library the classifier was then asked to file.
+A generative model is bad at exactly the thing that ceiling depends on: TR-MTEB
+puts `text-embedding-3-small` weakest on *similarity* of the three models
+measured (docs/retrieval.md), which is precisely why naming was never combined
+with grouping until now — "Clustering the library without a naming step" was
+listed as deliberately out of scope in that same document, for the one thing
+the embedding model measures worst at. The fix is not a better prompt; it is
+not asking the model to do that job at all.
+
+Every bookmark already carries an embedding (`nook_embeddings`,
+`text-embedding-3-small`, docs/retrieval.md), so the flow inverts:
+
+```
+unfiled bookmarks' embeddings
+  -> cluster by cosine similarity (apps/api/src/cluster-math.ts, pure, deterministic)
+  -> merge near-duplicate clusters, drop outliers and tiny clusters
+  -> match a cluster against an existing collection's own centroid, if close
+  -> ONE proposer call: name every cluster that isn't already a match
+  -> preview in Organize: each proposal shown with its real member bookmarks
+  -> you accept; the members are filed INSTANTLY — no per-bookmark classify call
+```
+
+The word doing the work is "instantly". Taxonomy growth creates *names*, and
+still has to wait for the classification pass to go bookmark by bookmark
+deciding who belongs where. Here, membership is already known the moment the
+cluster was formed — accepting a proposal is a write, not a queue.
+
+### The algorithm, and why each number is what it is
+
+`clusterEmbeddings` in `cluster-math.ts` is pure: no `fetch`, no `pg`, no clock,
+a seeded PRNG standing in for every random choice. Reproducibility matters more
+than raw quality here — the same library clustered twice has to produce the
+same groups, or "Suggest collections" run again would look like a bug rather
+than a repeat of the same answer.
+
+1. **Normalize, then spherical k-means.** Every vector is scaled to unit
+   length, which makes ordinary Euclidean k-means and "maximize cosine
+   similarity" the same optimization (`||a-b||² = 2 - 2·cos(a,b)` for unit
+   vectors), so no custom distance metric is needed. `k = clamp(round(√(n/2)),
+   4, 30)` — the standard rule-of-thumb estimate of "how many natural groups",
+   clamped so a tiny library isn't asked to review one collection and a huge
+   one isn't asked to review thirty in one naming call. Seeded k-means++,
+   restarts scaled down as the library grows (5 under 1,000 points, down to 1
+   past 4,000) so a 10,000-bookmark account still finishes in a few seconds —
+   restarts defend against a bad random seed, and k-means++ already starts
+   close enough to the answer that even one restart recovers well-separated
+   structure (measured in `ai-clusters-math.unit.test.ts`).
+2. **Merge near-duplicate clusters** (cosine of their centroids `> 0.9`). `k`
+   is an estimate, and k-means routinely splits one real theme into two
+   adjacent clusters; presenting both as separate suggestions would just be
+   the same collection proposed twice.
+3. **Drop low-similarity members** (cosine to their own cluster's centroid
+   `< 0.35`) into "unclustered". These are the points k-means was forced to
+   assign *somewhere* — every point gets an assignment — that do not actually
+   belong, and they are the majority of what makes a raw k-means assignment
+   look wrong on inspection. `0.35` sits below docs/retrieval.md's search floor
+   (`0.40`, measured against nonsense queries topping out at `0.41`) because
+   the two floors answer different questions — one gates whether a *match*
+   means anything, this one gates whether a member belongs in a group at
+   all — and is a starting point to tune against a real account's library
+   rather than a value measured the way the two documents' other thresholds
+   were; see the note in `cluster-math.ts`.
+4. **Drop clusters smaller than `max(5, 2% of n)`** into "unclustered" — a
+   group that small is not worth a proposal of its own, and a 10,000-bookmark
+   account should not be shown two hundred near-singleton "collections".
+5. **Match against existing collections.** Each live collection's centroid is
+   the mean of its own filed, embedded members' vectors. A cluster whose
+   centroid is within `0.85` cosine of an existing collection's is proposed as
+   *that* collection rather than a new name — deliberately a higher bar than
+   the merge threshold above, because the two questions are not equally safe
+   to get wrong: proposing a redundant new collection costs one unticked
+   checkbox, and folding a cluster into the wrong existing collection is not
+   something the review list lets the user catch at a glance.
+
+Verified on synthetic data (`ai-clusters-math.unit.test.ts`): four
+well-separated blobs recover as four clusters at 100% purity; scattered,
+mutually-dissimilar points end up entirely in "unclustered", never inside a
+real group; near-duplicate clusters merge into one; a group under the size
+floor is dropped; the same input always produces the same output. Measured
+timing on a synthetic 1,000-point × 768-dimension set (`text-embedding-3-small`'s
+own shape): **~0.3 seconds**. At the stated ceiling of 10,000 points it is
+**~3.5 seconds** — inside "a few seconds" without needing pgvector or a
+Postgres extension, the same brute-force-is-fine argument docs/retrieval.md
+already makes for search at this library size.
+
+### Naming: one call, and only for what still needs a name
+
+A cluster already matched to an existing collection needs no name invented —
+the honest name for "more of what's already in Reading" is "Reading" — so it
+is never sent to the proposer at all. For every other cluster, the ~6
+representative bookmarks nearest its centroid (title or a short text snippet,
+capped at 200 characters, plus hostname or author when known) go into **one**
+request that names every remaining cluster at once, reusing the exact
+provider/model/key resolution and JSON-output hardening the taxonomy
+proposer's own call already uses (`resolveProposer`/`generate` in `ai.ts`,
+additive exports — no behaviour there changed). `gpt-4o-mini` stays the
+default; `NOOK_AI_PROPOSER`/`NOOK_AI_MODEL` are not reconfigured by this
+feature. `language` behaves exactly like the taxonomy route's own parameter:
+`"auto"` (the default) follows the representative items' own language, and the
+account's live collection names are passed so the model does not re-propose
+one that already exists.
+
+A cluster the model's response does not return a usable name for (missing, or
+missing its `why`) folds back into "unclustered" rather than surfacing as a
+proposal with no name — one bad line in the response must not cost every other
+cluster its proposal, the same principle `parseTaxonomyProposal` already
+applies per-entry.
+
+**Cost**: at most one proposer call per "Suggest collections" round, however
+many bookmarks the account has — the same "one call, however large the
+library" shape the existing taxonomy proposal already has, and **zero extra
+embedding cost**, since every embedding this feature reads was already paid for
+by the search index (docs/retrieval.md). A round where every surviving cluster
+matches an existing collection costs nothing at all: no proposer call is made.
+
+### Routes
+
+Both session-guarded, both mirroring `/api/ai/taxonomy/propose`'s own pattern
+exactly — same 401 when signed out, same 503 when `NOOK_AI_PROPOSER` and its
+key are not configured, checked before either route does anything else (the
+client has to be able to tell "this server cannot do that" from "there is
+nothing to cluster").
+
+```ts
+// POST /api/ai/clusters/propose <- { language?: TaxonomyLanguage }
+// -> {
+//      proposals: Array<{
+//        id: string; name: string; why: string; size: number;
+//        memberIds: string[];
+//        sampleTitles: string[];     // at most 5, nearest-to-centroid first
+//        existingListId: string | null;
+//      }>;
+//      unclustered: number;
+//      considered: number;          // unfiled bookmarks with an embedding
+//    }
+// `considered` under 20 short-circuits to `{ proposals: [], unclustered:
+// considered, considered }` before the proposer is even resolved — a library
+// this small has nothing worth clustering, and saying so costs one read.
+// Proposals are sorted by `size` descending. 401, 400 (malformed body /
+// unknown language), 503 (no proposer configured), 502 (the proposer WAS
+// configured but the one naming call itself failed — deliberately distinct
+// from `proposeTaxonomy` in ai.ts, which silently degrades a failed call to an
+// empty result: this route's contract is that a failure is visible, not
+// folded into "nothing to cluster"), 200.
+
+// PUT /api/ai/clusters/accept <- {
+//   collections: Array<{ name: string; memberIds: string[]; existingListId?: string | null }>
+//   // at most 50 collections, at most 5,000 member ids total
+// }
+// -> { createdCollections: number; filed: number; skipped: number }
+// One transaction, under the same pg_advisory_xact_lock(hashtext(user_id))
+// every write in this feature takes (see "The write path" above) — the same
+// lock is what makes filing thousands of ids as a handful of bulk UPDATEs
+// safe rather than a race with a concurrent sync, and it is why this does NOT
+// call applyServerWrite per bookmark: that helper takes the very same lock on
+// its own connection, so calling it from inside a transaction that already
+// holds it would be a self-inflicted deadlock rather than a safety net.
+// 401, 400 (malformed body, or over either cap), 200.
+```
+
+`PUT /api/ai/clusters/accept`, in order:
+
+1. **Resolve each requested collection to a real list.** An explicit
+   `existingListId` that is still live is honoured outright, even if the
+   requested `name` disagrees with it. Otherwise, **a name that collides with
+   a live collection files into that collection instead of creating a
+   duplicate** — the same collision discipline `acceptTaxonomyForUser` already
+   applies via `planLists`, reused directly here rather than re-implemented.
+   Everything else is a new list, created the same way (same record shape, id
+   generation, version bump).
+2. **File every member id that is still live and unfiled**, re-checked on the
+   row as read *inside this same lock* — not `applyServerWrite`'s per-row
+   re-read (which would deadlock against the lock this transaction already
+   holds), but the identical guard expressed as a bulk `UPDATE ... WHERE
+   deleted_at IS NULL AND data->'listId' IS NULL`. A human who filed the
+   bookmark, or a sync that deleted it, while the request was in flight wins;
+   that id is counted in `skipped`, not overwritten. The written receipt is
+   `{ model: "nook-clusters", source: "cluster", at }` — the same three fields
+   `attribution()` in `ai-classify.ts` writes for an ordinary decision, plus
+   `source` so a filed-by-cluster bookmark is distinguishable in the log from
+   one the per-bookmark classifier decided on.
+3. **Record the accepted names in `nook_ai_taxonomy`**, the same account row
+   `acceptTaxonomyForUser` writes, so the classifier offers these collections
+   to bookmarks that are saved *after* this round — with one improvement over
+   the taxonomy flow's own record: its per-collection sample digest is a
+   word-overlap *guess* over an unrelated 200-item sample, because the
+   proposer never says which bookmarks belong to a name it invents. Here the
+   digest is the actual titles of members that were actually filed, because
+   real membership was never in question.
+4. **Clear `nook_ai_decided` when a list was created** — the same fix
+   `acceptTaxonomyForUser` already applies and for the identical reason: a
+   "nothing fit" verdict bought against a taxonomy that did not yet have this
+   collection is stale the moment the collection exists.
+
+### What this does not change
+
+The per-bookmark classifier (`ai-classify.ts`, `ai-jobs.ts`'s pass), the
+Jev thresholds, `decideClassification`, and ordinary taxonomy growth are all
+unchanged and keep working exactly as documented above. Clustering is a
+second, independent way to reach the same end state — a filed bookmark — for
+an account whose library is too large for the sampled flow to cover well; nothing about accepting a cluster proposal marks those collections as
+special, and the classifier files new bookmarks into them exactly as it would
+any other collection.
+
 ## Storage
 
 `Bookmark` has an open `[field: string]: unknown` index signature, so a new
@@ -665,6 +1035,7 @@ runner to own a cursor:
 | `nook_ai_state` | counters, last run, the two cooldown windows and a 200-entry ring buffer of decisions for classification, the same counters under a `summarize` sub-record for summarisation; plus `lease_until` and `summary_lease_until`, the two columns deliberately *outside* the jsonb | `ai.cursor` + `ai.log`, two per-origin `meta` keys, which is why the web host could show neither |
 | `nook_ai_taxonomy` | the accepted taxonomy: `collections` (name + sample titles each) and `tags` (names with no members yet, each with its definition) | `ai.taxonomy`, a per-origin `meta` key, which is why a taxonomy accepted on the web could never reach the runner |
 | `nook_ai_decided` | every id a decision has been bought for, including the ones that filed nothing. Unbounded, durable, and never synced | the tail of `ai.cursor`'s capped id list — and the money the cap leaked. See "The job queue" |
+| `nook_ai_review` | a kept low-confidence guess per bookmark: `list_id`, `confidence`. Pruned lazily, by the read that is about to show it to a human, not on a schedule | nothing — the guess used to be computed and thrown away. See "Review list" |
 | `nook_ai_summaries` | every id a summary was **attempted** on and got nothing, with a sha256 of the prompt's own text and which retry window applies. A written summary deletes its row | nothing — the summarise pass had no runner, so it had no memory to migrate |
 | `nook_ai_settings` | toggles and thresholds, one account row | `ai.settings`, moved before this one; `lib/ai-settings.ts` still keeps a short-lived local cache under that key name, but the row is the source of truth |
 
@@ -715,10 +1086,35 @@ Stepper's own rail as a stray bright bar down the left of the content. That
 was the wrong container for it — suggesting collections and watching Nook file
 them is a primary workflow, done by someone actively organizing their library,
 not a preference set once and forgotten — so it moved to its own page:
-**Organize**, in the dashboard's side nav (a sparkle icon, badged with the
-unfiled count), and reachable from the web app directly at
+**Organize**, in the dashboard's side nav (a sparkle icon, badged with
+`reviewCount` when anything is waiting for review, the unfiled count
+otherwise), and reachable from the web app directly at
 `/app/dashboard/organize`. Settings → AI is short now: the two switches, the
 "Search by meaning" info row, Advanced, and a button to Organize.
+
+The page itself grew a second primary surface on top of the first redesign:
+**suggesting collections now means grouping, not just naming.**
+`POST /api/ai/clusters/propose` (docs/ai-cloud-contract.md, and see the
+`ai-clusters*` rows in "Testing" above for the math and the route behind it)
+already knows *which* unfiled bookmarks belong to each group it found, so the
+client reviews groups with editable names and a member count, not bare names
+a classifier would later have to match bookmarks against one at a time —
+and accepting one is not "queue a pass", it *files every member in the same
+transaction that creates the collection* (`PUT /api/ai/clusters/accept`).
+That is also why the page follows a successful accept with
+`host.sync.requestSync()` rather than polling `pending`: there is no queue
+depth to watch drain for this action, only a local library that needs to
+catch up to what the server already did. Alongside it, a second block —
+**Needs your review** — surfaces the guesses the *classifier* made below
+`collectionMinConfidence` (`GET /api/ai/review`), each with a plain "Likely"/
+"Maybe" word instead of a raw decimal, an accept/reject per row and a bulk
+"Accept all likely". The same list backs a small "Suggested: X" chip on
+`BookmarkCard`, so a guess can be settled without opening Organize at all.
+The taxonomy propose/accept pair this section used to build the whole page
+around (`POST /api/ai/taxonomy/propose`, `PUT /api/ai/taxonomy`) is still
+here, but demoted to a collapsed **Suggest tags** action: naming new
+collections is the cluster flow's job now, so this one only ever reviews and
+accepts the *tags* half of what the proposer returns.
 
 Both surfaces require a signed-in session and nothing else, and both are the
 **same components on both hosts** — nothing under `settings-dialog/ai/` or
@@ -751,11 +1147,15 @@ pass:
 - A classification is an authenticated server call, so the section needs
   `host.user` (`SettingsDialog.visibleSections`). Signed out, it offers a
   sign-in banner instead.
-- **Organize now can only enqueue.** The route wakes a worker rather than
-  running a batch inline, so the toast reports how many were queued for each
-  pass and the panel then re-reads the status every few seconds while
+- **The classifier's own pass can only enqueue.** `POST /api/ai/run` wakes a
+  worker rather than running a batch inline, so the toast reports how many
+  were queued and the panel re-reads the status every few seconds while
   `pending` is above zero. A toast claiming "18 filed" would be a guess, and
-  the copy says so instead of implying it.
+  the copy says so instead of implying it. This is still true of the
+  classifier and of the tags-only "Suggest tags" acceptance below — it is
+  **not** true of accepting cluster suggestions, which files instantly (see
+  above), so the two primary-looking actions on this page report success
+  differently on purpose rather than by oversight.
 
 ### Structure — Settings → AI
 
@@ -789,30 +1189,64 @@ beside it under `settings-dialog/ai/`:
 `apps/extension/src/app/dashboard/organize/`:
 
 - **`OrganizePage.tsx`** — the page itself. Reached from the side nav's
-  "Organize" item (`LibrarySideNav.tsx`, badged with the unfiled count —
-  `dashboard/bookmark-utils.ts`'s `LibraryView` grew an `{ kind: "organize" }`
-  case that `DashboardApp.tsx` renders in place of the bookmark grid/table,
-  rather than filtering it) or from Settings' **Open Organize** button.
-  Renders, top to bottom: a header (title, one-sentence description, and a
-  progress bar + "N bookmarks filed · M left to organize" line, computed
-  straight from the local library's own `listId` — `organize-utils.ts`'s
-  `libraryProgress`); the one active thing to do — a review in progress, a
-  filing pass draining, or the next "suggest collections" prompt — chosen in
-  that priority order; then **Recently filed**; then a link back to AI
-  settings.
-- **`useSuggestCollections.ts`** — the suggest/review/accept state machine,
-  moved here from the deleted `settings-dialog/ai/SuggestCollections.tsx`
-  rather than duplicated (same routes, same phases: `idle` → `reading` →
-  `review` → `accepting` → `done`). One behavioural addition: `accept()` now
-  also makes sure `autoClassify` is on and immediately calls `POST /api/ai/run`
-  — the whole point of accepting is getting bookmarks filed, so the page does
-  not make the user find a second button for it the way Settings used to.
-- **`SuggestionReview.tsx`** — the review step's UI, full width instead of
-  squeezed into the settings dialog's column, with a sticky accept/cancel bar
-  (`position: sticky`, no ancestor-height plumbing needed since it sits inside
-  the dashboard's own scrolling content pane) that stays reachable at any
-  width — the old panel's "Accept 8 collections and 7 tags" button clipping
-  off the right edge at 880px was exactly this problem.
+  "Organize" item (`LibrarySideNav.tsx`, badged with `reviewCount` when
+  non-zero, else the unfiled count — `dashboard/bookmark-utils.ts`'s
+  `LibraryView` grew an `{ kind: "organize" }` case that `DashboardApp.tsx`
+  renders in place of the bookmark grid/table, rather than filtering it) or
+  from Settings' **Open Organize** button. Renders, top to bottom: a header
+  (title, one-sentence description, and a progress bar + "N bookmarks filed ·
+  M left to organize" line, computed straight from the local library's own
+  `listId` — `organize-utils.ts`'s `libraryProgress`); **Suggest collections**
+  (primary); **Needs your review**, shown only while there is anything in it;
+  **Recently filed**; then a link back to AI settings. Once there is nothing
+  unfiled and nothing to review, the first two collapse into one plain
+  "Everything is organized" line with a quiet "Suggest again" button, rather
+  than three panels each explaining they have nothing to say.
+- **`useSuggestClusters.ts`** + **`ClusterProposals.tsx`** — the primary
+  "Suggest collections" flow: `idle` → `reading` → `review` → `accepting` →
+  `done`, same shape as the state machine below but built around
+  `ClusterProposal.memberIds` rather than a bare name. Each proposal in
+  `review` is a row with a checkbox (default ticked), an inline-editable name
+  (`nameFor`/`rename` — edited text is kept separately from the proposal and
+  only substituted in on accept, so the server's own `why`/`sampleTitles`
+  never have to be re-fetched over a rename), the member count, the reason,
+  and a collapsed "show all" that resolves `memberIds` to titles from the
+  *local* library (`clusterMemberTitles`) rather than trusting the server's
+  own `sampleTitles` for anything past the collapsed preview — the client
+  already holds every bookmark the server could have named. A sticky footer
+  (same reasoning as the old review step's, below) reads "Create N
+  collections and file M bookmarks", counting only the ticked proposals'
+  own `memberIds` rather than trusting `size` to agree with them
+  (`tickedClusterCounts`). `unclustered` is reported plainly
+  (`describeUnclustered`) rather than folded into the count of what worked.
+  Accepting calls `PUT /api/ai/clusters/accept`, then
+  `host.sync.requestSync()` and the page's own `onAccepted` (a fresh
+  `GET /api/ai/status` and review-list read) — no queue to poll, see above.
+- **`useReviewList.tsx`** + **`ReviewList.tsx`** — "Needs your review":
+  `GET /api/ai/review` read once into a context (`ReviewListProvider`,
+  mounted in `DashboardApp.tsx` above both the page and the bookmark grid) so
+  the page's list and every `BookmarkCard`'s "Suggested: X" chip
+  (`BookmarkCard.tsx`) share one fetch and one optimistic-update path rather
+  than each holding a copy. `resolve()` removes the affected rows from state
+  immediately and calls `POST /api/ai/review/resolve`; a failure outcome
+  restores them, a success calls `host.sync.requestSync()` only when it
+  actually filed something (a pure reject changed nothing the sync layer
+  tracks). Confidence never reaches the screen as a number —
+  `reviewConfidenceLabel` renders "Likely" at or above 0.6, "Maybe" below —
+  and "Accept all likely" resolves every row at or above that same line in
+  one call.
+- **`useSuggestCollections.ts`** + **`SuggestionReview.tsx`** + **`SuggestTags.tsx`**
+  — what is left of the page's *original* primary flow
+  (`idle` → `reading` → `review` → `accepting` → `done` against
+  `POST /api/ai/taxonomy/propose` / `PUT /api/ai/taxonomy`), now the
+  secondary, collapsed **Suggest tags** action: naming collections is
+  `useSuggestClusters.ts`'s job, so `tagsOnly: true` drops whatever
+  collections the proposer names alongside the tags before they reach
+  `state`, leaving `SuggestionReview.tsx`'s "New collections" list with
+  nothing to render and `accept()` sending `collections: []` without either
+  of them needing to know why. The one behavioural addition from the old
+  primary flow survives unconditionally: accepting still makes sure
+  `autoClassify` is on and immediately calls `POST /api/ai/run`.
 - **`RecentlyFiled.tsx`** + **`organize-utils.ts`** — "Recently filed" reads
   `status.run.log` (last 200 decisions, `{ id, confidence, assigned, at }` —
   see "The job queue" above) and maps `assigned: true` entries onto the local
@@ -828,7 +1262,11 @@ beside it under `settings-dialog/ai/`:
   `"none-fit"` (the model chose `__none__`, confidently). Below the threshold
   the two outcomes are genuinely indistinguishable from the log alone, but
   both mean the same true thing to the user — "Nook wasn't confident enough" —
-  so they're one bucket rather than a guess dressed as two.
+  so they're one bucket rather than a guess dressed as two. The estimate
+  behind "about N min" (`estimateMinutesRemaining`) assumes ~150 bookmarks a
+  minute now, not 25 — the classification tick moved from once a minute to
+  once every 10 seconds (see "The rate, and why a 12× faster tick is not a
+  cost problem" above).
 
 The old **Status** card is gone as a standalone wall of rows on either surface.
 Its numbers live where they're relevant: the queue depth and progress estimate
@@ -857,24 +1295,29 @@ numbers.
 | `NOOK_AI_PROPOSER` | api | `openai` or `gemini` — which service names the new collections and tags |
 | `NOOK_AI_MODEL` | api | which model, when the proposer is OpenAI. Defaults to `gpt-4o-mini` |
 | `OPENAI_API_KEY` / `GEMINI_API_KEY` | api, `.env`, `compose.yaml` | the proposer's key |
-| `NOOK_AI_TICK_MS` | api | how often the classification worker looks for work. Defaults to 60,000; floored at 1,000 so a typo cannot turn it into a spin loop |
+| `NOOK_AI_TICK_MS` | api | how often the classification worker looks for work. Defaults to 10,000; floored at 1,000 so a typo cannot turn it into a spin loop |
 | `NOOK_AI_LEASE_SECONDS` | api | how long a pass may hold the account lease. Defaults to 120 |
 
 ## Testing
 
 | file | covers |
 | --- | --- |
-| `apps/api/test/ai.unit.test.ts` | question building, decision thresholds, response parsing, the text-length floor, throttling — pure, no network |
+| `apps/api/test/ai.unit.test.ts` | question building, decision thresholds, response parsing, the text-length floor, throttling, and the review guess — kept only on a low-confidence skip at or above `REVIEW_MIN_CONFIDENCE`, never on an assignment or a `none-fit` decline — pure, no network |
 | `apps/api/test/ai-settings.unit.test.ts` | normalizing a stored row, validating a PATCH — pure, no database |
 | `apps/api/test/ai-settings.integration.test.ts` | defaults for a new account, patch-merges-onto-existing, per-account isolation, cascade delete — needs `NOOK_TEST_DATABASE_URL`, self-skips otherwise |
 | `apps/api/test/ai-classify.unit.test.ts` | reading a `nook_records` row as a bookmark, eligibility, candidate selection, request building from raw jsonb, the patch and its union of tags, the `Noul`/definition asymmetry, `patchChangesSomething`, Turkish-aware name folding |
 | `apps/api/test/ai-taxonomy.unit.test.ts` | deterministic stride sampling and its eligibility, the accepted-taxonomy record and the digest behind each collection, the cap, collision handling, `BookmarkList` planning, the stem overlap test, reading the proposer's body |
-| `apps/api/test/ai-jobs.unit.test.ts` | the queue (claim as one DELETE, the enqueue's inline `autoClassify`, the top-up's exclusions), the pass (the pool stopping on a neutral, the 40-character floor *not* stopping it, the gates, the lease, the two cooldowns, never rejecting), the write path (the advisory lock and `FOR UPDATE`, the eligibility re-check, the union recompute, tombstones, degrading rather than throwing), and the two taxonomy route bodies |
-| `apps/api/test/ai-store.unit.test.ts` | normalizing a run-state row out of anything, the log ring buffer, resolving a cooldown against a clock, and `readAiStatus` composing the whole surface |
+| `apps/api/test/ai-clusters-math.unit.test.ts` | pure clustering on synthetic data: well-separated blobs recover at 100% purity, scattered noise ends up entirely unclustered, a zero vector is excluded rather than made a cluster of one, near-duplicate clusters merge, a cluster under the size floor is dropped, matching (and not matching) an existing collection's centroid, determinism, and the invariant that every input id ends up in exactly one place |
+| `apps/api/test/ai-clusters.unit.test.ts` | `proposeClustersForUser` (too few considered short-circuits before reading anything else, a cluster matched to an existing collection is named with no proposer call at all, the one naming call names every remaining cluster and reports each back by its own id, `ProposerUnavailableError` vs `ProposerCallFailedError`), `acceptClustersForUser` (creates a list and files every member, a name collision files into the live list instead of duplicating it, an explicit `existingListId` wins over a mismatched name, a member no longer live or unfiled is `skipped` not filed, clearing `nook_ai_decided` only when a list was actually created, rollback on failure), and `parseClusterAcceptance`'s caps and strict validation |
+| `apps/api/test/ai-jobs.unit.test.ts` | the queue (claim as one DELETE, the enqueue's inline `autoClassify`, the top-up's exclusions), the pass (the pool stopping on a neutral, the 40-character floor *not* stopping it, the gates, the lease, the two cooldowns, never rejecting, upserting a kept guess into `nook_ai_review` in one statement), the write path (the advisory lock and `FOR UPDATE`, the eligibility re-check, the union recompute, tombstones, degrading rather than throwing), the two taxonomy route bodies, the review list (`readReviewList`'s lazy prune predicate and its mapping, `parseReviewResolveRequest`'s validation, `resolveReviewItems`'s accept-via-write-path-and-re-check / reject / stale-guess / gone-collection outcomes), the `AI_TICK_INTERVAL_MS` default, and `tickAiWorker`'s re-entrancy guard |
+| `apps/api/test/ai-store.unit.test.ts` | normalizing a run-state row out of anything, the log ring buffer, resolving a cooldown against a clock, and `readAiStatus` composing the whole surface including `reviewCount` |
 | `apps/api/test/ai-summary.unit.test.ts` | the work list (a content hash over the source text that excludes `summary`, an unchanged record inside the decline window still parked, a changed hash re-admitted), the outcome-to-window table, the pass (writing through `applyServerWrite`, deleting the attempt row on a write, upserting it on a decline, refusing a write whose guard fails on the fresh row, a lease held by someone else), the `autoSummarize` gate, and the status counts |
-| `apps/extension/tests/ai-client.test.ts` | the four calls: the signed-out gate before any request, bearer vs cookie auth, the status mapping, defensive reading of every response, the "nothing to read" vs "declined" distinction, sending a tag definition back with its name, and the status subscription |
+| `apps/extension/tests/ai-client.test.ts` | all eight calls: the signed-out gate before any request, bearer vs cookie auth, the status mapping (incl. the two new routes' 503/429/529), defensive reading of every response (a review row missing a bookmark/collection id, a cluster proposal with no name or no members, `size` defaulting to `memberIds.length`), the "nothing to read" vs "declined" distinction, sending a tag definition back with its name, and the status subscription |
 | `apps/extension/tests/ai-settings.test.ts` | server fetch/cache/fallback: offline, signed-out, a failed save, cross-context invalidation |
-| `apps/extension/tests/settings-ai-panel.test.tsx` | the intro and the one "unavailable" banner, the suggest-collections step (including that `autoTaxonomy` turns on by itself on first use), the file-automatically step (**Organize unfiled bookmarks now**, its queue depth and last-pass sentence, that it still queues summaries for a summarize-only account), the summaries card and its collapsed privacy note, the advanced disclosure (thresholds, reset to defaults), the signed-in gate — and, explicitly, that all of it works on the web host with cookie auth |
+| `apps/extension/tests/settings-ai-panel.test.tsx` | the intro and the one "unavailable" banner, the file-automatically step (**Organize unfiled bookmarks now**, its queue depth and last-pass sentence, that it still queues summaries for a summarize-only account), the summaries card and its collapsed privacy note, the advanced disclosure (thresholds, reset to defaults), the signed-in gate — and, explicitly, that all of it works on the web host with cookie auth |
+| `apps/extension/tests/organize-page.test.tsx` | the outage/signed-out/empty states, the cluster-proposal block (counts and samples render, deselecting or renaming a proposal changes the footer label and the `PUT` body, accept calls `host.sync.requestSync()`, "show all" expands past the server's sample), "Needs your review" (a plain confidence word, accept/reject/bulk-accept-likely, optimistic rollback on a failed resolve), the working-progress line at the current rate, recently-filed, and the collapsed "Suggest tags" action offering only tags even though the route also names collections |
+| `apps/extension/tests/bookmark-card-review-chip.test.tsx` | the chip renders only for a bookmark actually in the review list, and its accept/reject buttons resolve and remove it |
+| `apps/extension/tests/organize-utils.test.ts` | `reviewConfidenceLabel`'s threshold, `reviewRows`/`clusterMemberTitles` mapping onto the local library and dropping an id it doesn't have, the footer-label and unclustered-note copy helpers, `tickedClusterCounts` counting ticked members rather than trusting `size`, and `estimateMinutesRemaining`'s ~150/min rate |
 | `apps/extension/tests/cloud-merge.test.ts` | attribution travels with the assignment |
 
 `apps/extension/tests/ai-classify.test.ts`, `ai-runner.test.ts` and
@@ -948,6 +1391,12 @@ interface ClassifyResponse {
   };
   tags: Array<{ name: string; noul: number }>;   // already thresholded and capped
   skipped?: "none-fit" | "low-confidence";
+  // The top choice, kept rather than thrown away, when `skipped ===
+  // "low-confidence"` and confidence still clears REVIEW_MIN_CONFIDENCE (0.35)
+  // — see "Review list". Never present alongside "none-fit", never for a
+  // choice the collections array didn't offer, and never changes `collection`
+  // above: assign stays false, id stays null.
+  guess?: { id: string; name: string; confidence: number };
   usage?: { inputTokens: number; outputTokens: number };
 }
 
@@ -979,10 +1428,14 @@ because `AiPanel.tsx` and `ai-client.ts` are written against them.
 ```ts
 // GET /api/ai/status -> AiStatusResponse
 //   available: boolean; settings: AiUserSettings; pending: number;
-//   taxonomy: AcceptedTaxonomy; run: AiRunSummary; summarize: SummarizeStatus
+//   taxonomy: AcceptedTaxonomy; run: AiRunSummary; summarize: SummarizeStatus;
+//   reviewCount: number
 // The two cooldown stamps are resolved to booleans on the wire (isUnavailable,
 // isBackingOff): "when" is a thing only the worker acts on, and "is it in effect
-// now" is the only thing a panel can render. 401 (no session) and 200.
+// now" is the only thing a panel can render. `reviewCount` is additive, like
+// `summarize` — the same count GET /api/ai/review's `total` reports, read here
+// with no pruning side effect so a panel polling this route every few seconds
+// isn't also sweeping nook_ai_review that often. 401 (no session) and 200.
 
 interface SummarizeStatus {
   /** Whether a summariser is configured: NOOK_AI_PROPOSER plus its key. */
@@ -1020,6 +1473,29 @@ interface SummarizeStatus {
 //   Names only — the sample, the existing lists and the library's own tags are
 //   read from nook_records at acceptance time. A tag's definition travels with
 //   its name because the server cannot reconstruct it. 401, 400, 200.
+
+// GET /api/ai/review -> { items: AiReviewItem[]; total: number }
+//   Only rows whose bookmark is live and still unfiled (listId still null)
+//   and whose guessed collection is still live; highest confidence first,
+//   limit 200. `total` is the count before the limit. Lazily prunes stale
+//   rows as a side effect of the read — see "Review list". 401, 200.
+interface AiReviewItem {
+  bookmarkId: string;
+  listId: string;
+  listName: string;
+  confidence: number;
+}
+
+// POST /api/ai/review/resolve
+//   <- { items: Array<{ bookmarkId: string; action: "accept" | "reject"; listId?: string }> }
+//      1 to 200 items. `listId` overrides the stored guess's collection on an
+//      accept; omitted, the guess itself is used.
+//   -> { filed: number; rejected: number; skipped: number }
+//   accept files through the same write path a classification decision uses,
+//   re-checking the fresh row is still unfiled; a bookmark filed meanwhile is
+//   `skipped`, not `filed`. reject only deletes the review row — the
+//   bookmark stays in nook_ai_decided so it is never re-billed. The review
+//   row is deleted either way. 401, 400 (malformed body), 200.
 ```
 
 `SummarizeStatus` is additive, so a panel written against the old surface keeps
@@ -1309,4 +1785,35 @@ decision rules** — a calibration result may have already been measured.
   party — up to 4,000 characters of the description, the title and the note, where
   taxonomy sends titles and hostnames — which is why the toggle now carries that
   sentence on its own face rather than leaving it to a document.
+- **2026-09-28 — the review list, and a tick fast enough for it to matter.**
+  Production data on a real account: after accepting 8 collections, the pass
+  filed 17 of 75 bookmarks and left ~33 more with a plausible top collection
+  under the confidence threshold — a guess `decideClassification` already
+  computed and threw away outright (`collection.id` is `null` on a
+  `skipped: "low-confidence"` response either way). Two changes, landed
+  together because the second makes the first worth having sooner:
+  - `decideClassification` now keeps that guess as `guess: { id, name,
+    confidence }` on the response, above a new floor, `REVIEW_MIN_CONFIDENCE`
+    (0.35), that decides whether a number is worth showing a human at all
+    rather than whether to file anything — filing is unchanged either way. A
+    new table, `nook_ai_review`, and two new routes, `GET /api/ai/review` and
+    `POST /api/ai/review/resolve`, are the only things that read or act on it;
+    see "Review list" above for the full account, including why the table is
+    pruned lazily rather than on the reconciler's schedule and why `accept`
+    reuses `applyServerWrite` rather than a second write path.
+  - `AI_TICK_INTERVAL_MS` dropped from 60,000 to 10,000. The once-a-minute
+    figure was never a cost guard — cost is per bookmark, and `nook_ai_decided`
+    is what makes billing per-bookmark safe regardless of tick rate — it was an
+    unexamined holdover from the extension's own polling cadence. ≈150
+    bookmarks a minute now, not 25; a 1,000-bookmark backlog clears in roughly
+    7 minutes instead of roughly 40. This is also why `tickAiWorker` gained a
+    re-entrancy guard: a tick busy enough to outlive 10 seconds was rare at the
+    old cadence and is not rare at this one, and while nothing about an
+    overlap could have double-billed (the claim is one atomic
+    `DELETE ... RETURNING`, and a second tick reaching an account mid-pass
+    fails `acquireRunLease` and returns before claiming anything), an
+    unguarded pile-up would still re-run the accounts query and a doomed lease
+    attempt per account for as long as the slow tick kept running, and could
+    let two overlapping ticks each believe they were the 15-minute reconcile
+    tick. See "The tick and its ceiling".
 

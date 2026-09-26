@@ -4,13 +4,16 @@ import {Button} from '@astryxdesign/core/Button';
 import {Card} from '@astryxdesign/core/Card';
 import {Grid} from '@astryxdesign/core/Grid';
 import {Icon} from '@astryxdesign/core/Icon';
+import {IconButton} from '@astryxdesign/core/IconButton';
 import {HStack, VStack} from '@astryxdesign/core/Layout';
 import {Link} from '@astryxdesign/core/Link';
 import {Section} from '@astryxdesign/core/Section';
 import {Text} from '@astryxdesign/core/Text';
 import {Timestamp} from '@astryxdesign/core/Timestamp';
+import {Token} from '@astryxdesign/core/Token';
 import {useI18n} from '../../i18n';
 import {MediaThumbnail} from './MediaThumbnail';
+import {useReviewList} from '../dashboard/organize/useReviewList';
 import type {Bookmark, Media} from '../../../lib/types';
 
 export interface BookmarkCardProps {
@@ -58,6 +61,11 @@ export const BookmarkCard = memo(function BookmarkCard({
   const date = getDate(item);
   const mediaItems = getMedia(item);
   const url = item.url || item.urls?.[0] || undefined;
+  // Loaded once for the whole dashboard (ReviewListProvider in
+  // DashboardApp.tsx), not per card — see useReviewList.tsx's header comment.
+  // Most cards have no entry here and render nothing extra.
+  const reviewList = useReviewList();
+  const suggestion = reviewList.items.find((entry) => entry.bookmarkId === item.id);
 
   return (
     <Card className="nook-bookmark-card">
@@ -150,6 +158,26 @@ export const BookmarkCard = memo(function BookmarkCard({
               );
             })}
           </Grid>
+        ) : null}
+
+        {suggestion ? (
+          <HStack gap={2} vAlign="center" wrap="wrap">
+            <Token label={t('dashboard.card.suggestedCollection', {name: suggestion.listName})} size="sm" color="blue" />
+            <IconButton
+              label={t('dashboard.card.acceptSuggestion')}
+              icon={<Icon icon="check" />}
+              variant="ghost"
+              size="sm"
+              onClick={() => void reviewList.resolve([{bookmarkId: item.id, action: 'accept'}])}
+            />
+            <IconButton
+              label={t('dashboard.card.dismissSuggestion')}
+              icon={<Icon icon="close" />}
+              variant="ghost"
+              size="sm"
+              onClick={() => void reviewList.resolve([{bookmarkId: item.id, action: 'reject'}])}
+            />
+          </HStack>
         ) : null}
 
         <HStack gap={2} vAlign="center" wrap="wrap">

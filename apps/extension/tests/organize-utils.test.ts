@@ -1,16 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { translate } from "../src/i18n/core";
-import type { AiLogEntry } from "../lib/ai-client";
+import type { AiLogEntry, ClusterProposal, ReviewItem } from "../lib/ai-client";
 import type { Bookmark, BookmarkList } from "../lib/types";
 import {
+  clusterMemberTitles,
+  describeClusterFooterLabel,
   describeProgress,
   describeRemainder,
-  describeSuggestPrompt,
+  describeUnclustered,
   describeWorking,
   estimateMinutesRemaining,
   libraryProgress,
   recentlyFiledRows,
   remainderCounts,
+  reviewConfidenceLabel,
+  reviewRows,
+  tickedClusterCounts,
 } from "../src/app/dashboard/organize/organize-utils";
 
 const t = <K extends Parameters<typeof translate>[1]>(key: K, params?: Parameters<typeof translate>[2]) =>
@@ -49,21 +54,16 @@ describe("organize-utils — estimateMinutesRemaining", () => {
 
   it("rounds up, and is never zero while something is pending", () => {
     expect(estimateMinutesRemaining(1)).toBe(1);
-    expect(estimateMinutesRemaining(25)).toBe(1);
-    expect(estimateMinutesRemaining(26)).toBe(2);
-    expect(estimateMinutesRemaining(100)).toBe(4);
+    expect(estimateMinutesRemaining(150)).toBe(1);
+    expect(estimateMinutesRemaining(151)).toBe(2);
+    expect(estimateMinutesRemaining(600)).toBe(4);
   });
 });
 
 describe("organize-utils — copy helpers", () => {
   it("describes a working queue with both the count and the minute estimate", () => {
-    expect(describeWorking(t, 30)).toBe("About 30 bookmarks left — about 2 min.");
+    expect(describeWorking(t, 300)).toBe("About 300 bookmarks left — about 2 min.");
     expect(describeWorking(t, 1)).toBe("About 1 bookmark left — about 1 min.");
-  });
-
-  it("prompts to suggest collections for the unfiled count", () => {
-    expect(describeSuggestPrompt(t, 1)).toBe("Suggest a collection for the 1 bookmark that's still unfiled.");
-    expect(describeSuggestPrompt(t, 5)).toBe("Suggest collections for the 5 bookmarks that are still unfiled.");
   });
 
   it("joins the filed and unfiled counts into one progress line", () => {
@@ -159,5 +159,82 @@ describe("organize-utils — remainderCounts and describeRemainder", () => {
 
   it("says nothing when there's nothing to report", () => {
     expect(describeRemainder(t, { noneFit: 0, unsure: 0 })).toEqual([]);
+  });
+});
+
+describe("organize-utils — reviewConfidenceLabel", () => {
+  it("is 'Likely' at or above the threshold, 'Maybe' below it — never a raw decimal", () => {
+    expect(reviewConfidenceLabel(t, 0.6)).toBe("Likely");
+    expect(reviewConfidenceLabel(t, 0.95)).toBe("Likely");
+    expect(reviewConfidenceLabel(t, 0.59)).toBe("Maybe");
+  });
+});
+
+describe("organize-utils — reviewRows", () => {
+  const items: Bookmark[] = [
+    bookmark({ id: "a", title: "Post about design" }),
+    bookmark({ id: "b", title: "Never synced locally, unused" }),
+  ];
+
+  function reviewItem(overrides: Partial<ReviewItem> & { bookmarkId: string }): ReviewItem {
+    return { listId: "list-1", listName: "Design", confidence: 0.7, ...overrides };
+  }
+
+  it("maps review items onto the local library, in the order given", () => {
+    const rows = reviewRows([reviewItem({ bookmarkId: "a", confidence: 0.82 })], items, t);
+    expect(rows).toEqual([{ bookmarkId: "a", title: "Post about design", author: null, listId: "list-1", listName: "Design", confidence: 0.82 }]);
+  });
+
+  it("drops an id the local library doesn't have", () => {
+    const rows = reviewRows([reviewItem({ bookmarkId: "unknown-id" })], items, t);
+    expect(rows).toEqual([]);
+  });
+});
+
+describe("organize-utils — clusterMemberTitles", () => {
+  const items: Bookmark[] = [
+    bookmark({ id: "a", title: "Post about design" }),
+    bookmark({ id: "b", title: "Post about servers" }),
+  ];
+
+  it("resolves member ids to local titles, dropping ids not yet synced", () => {
+    expect(clusterMemberTitles(["a", "unknown", "b"], items, t)).toEqual(["Post about design", "Post about servers"]);
+  });
+});
+
+describe("organize-utils — cluster footer helpers", () => {
+  function proposal(overrides: Partial<ClusterProposal> & { id: string; memberIds: string[] }): ClusterProposal {
+    return { name: "Design", why: "", size: overrides.memberIds.length, sampleTitles: [], existingListId: null, ...overrides };
+  }
+
+  it("composes the sticky footer's label from two independently-pluralized parts", () => {
+    expect(describeClusterFooterLabel(t, 6, 412)).toBe("Create 6 collections and file 412 bookmarks");
+    expect(describeClusterFooterLabel(t, 1, 1)).toBe("Create 1 collection and file 1 bookmark");
+  });
+
+  it("counts only the ticked proposals' own members, ignoring a possibly-stale size", () => {
+    const proposals = [
+      proposal({ id: "p1", memberIds: ["a", "b"], size: 99 }),
+      proposal({ id: "p2", memberIds: ["c"] }),
+    ];
+    expect(tickedClusterCounts(proposals, ["p1"])).toEqual({ collections: 1, bookmarks: 2 });
+    expect(tickedClusterCounts(proposals, ["p1", "p2"])).toEqual({ collections: 2, bookmarks: 3 });
+    expect(tickedClusterCounts(proposals, [])).toEqual({ collections: 0, bookmarks: 0 });
+  });
+
+  it("doesn't count a group that joins an existing collection as created", () => {
+    const proposals = [
+      proposal({ id: "p1", memberIds: ["a", "b"] }),
+      proposal({ id: "p2", memberIds: ["c"], existingListId: "list-1" }),
+    ];
+    expect(tickedClusterCounts(proposals, ["p1", "p2"])).toEqual({ collections: 1, bookmarks: 3 });
+    expect(tickedClusterCounts(proposals, ["p2"])).toEqual({ collections: 0, bookmarks: 1 });
+    expect(describeClusterFooterLabel(t, 0, 1)).toBe("File 1 bookmark");
+  });
+
+  it("says nothing once there's nothing unclustered to mention", () => {
+    expect(describeUnclustered(t, 0)).toBeNull();
+    expect(describeUnclustered(t, 1)).toBe("1 bookmark didn't form a clear group — you can file it by hand below or suggest again later.");
+    expect(describeUnclustered(t, 87)).toBe("87 bookmarks didn't form a clear group — you can file them by hand below or suggest again later.");
   });
 });

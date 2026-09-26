@@ -27,9 +27,9 @@ export const ai = {
   openOrganizeDescription: "Önerileri incele, ilerlemeyi izle ve neyin dosyalandığını gör — kendi sayfasında.",
 
   suggest: {
-    button: "Koleksiyon öner",
-    buttonTooltip: "Nook dosyalanmamış yer imlerine bakar ve isim önerir.",
-    signedOutTooltip: "Öneri istemek için giriş yap.",
+    button: "Etiketlere bak",
+    buttonTooltip: "Nook, kütüphanene bakıp etiket fikirleri bulur.",
+    signedOutTooltip: "Etiket önerisi almak için giriş yap.",
     reading: "Kütüphanen taranıyor",
     readingBody: "Kütüphanen inceleniyor…",
     newCollections: "Yeni koleksiyonlar",

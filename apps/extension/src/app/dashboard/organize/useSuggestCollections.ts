@@ -17,22 +17,31 @@ import { useNookHost } from "../../host/NookHost";
 import { type TFunction, useIsMounted } from "../../settings-dialog/ai/shared";
 
 /**
- * "Suggest collections": ask the server what to call the themes in this
- * library, show the answer for review, and turn the names the user keeps
- * into real collections plus the tag vocabulary in force (docs/ai.md,
- * "Taxonomy growth").
+ * "Suggest tags": ask the server what to call the themes in this library,
+ * show the answer for review, and turn the tags the user keeps into the tag
+ * vocabulary in force (docs/ai.md, "Taxonomy growth").
  *
- * This is the same state machine that used to live in Settings
- * (`settings-dialog/ai/SuggestCollections.tsx`, now deleted) — moved here
- * rather than duplicated, because it is a primary workflow (the Organize
- * page) now, not a setting. The one behavioural addition on top of the old
- * component: accepting is the moment the whole point of this page — getting
- * bookmarks filed — becomes possible, so `accept()` now also makes sure
- * `autoClassify` is on and immediately queues a filing pass
- * (`requestClassificationRun`), instead of leaving the user to find and
- * click a second button. `onAccepted` lets the page re-read the status right
- * away so the "working" progress view shows up without waiting for the next
- * poll.
+ * This used to be the Organize page's *primary* action — the same state
+ * machine that used to live in Settings
+ * (`settings-dialog/ai/SuggestCollections.tsx`, now deleted) — but naming new
+ * collections is `useSuggestClusters.ts`'s job now (the group-suggestion flow
+ * that replaced it): `POST /api/ai/clusters/propose` already knows which
+ * bookmarks a group means, where this route only ever named a theme and left
+ * the classifier to later decide bookmark-by-bookmark whether it applied.
+ * This hook survives as the "Suggest tags" secondary action — same route,
+ * same phases (`idle` → `reading` → `review` → `accepting` → `done`), but
+ * `tagsOnly: true` (the only thing `OrganizePage.tsx`'s caller sets) drops
+ * whatever collections the proposer named alongside the tags before they
+ * ever reach state, so there is nothing left to review or accept but tags:
+ * offering a second, redundant way to create collections would just be
+ * confusing next to the group-suggestion flow above it.
+ *
+ * One behavioural addition on top of the old component survives unconditionally:
+ * accepting also makes sure `autoClassify` is on and immediately queues a
+ * filing pass (`requestClassificationRun`), instead of leaving the user to
+ * find and click a second button. `onAccepted` lets the page re-read the
+ * status right away so the "working" progress view shows up without waiting
+ * for the next poll.
  *
  * The sample is drawn from the account's own unfiled bookmarks, so this sends
  * no library and holds no `Bookmark[]`; acceptance sends names only, and the
@@ -109,6 +118,12 @@ export interface UseSuggestCollectionsParams {
   /** Called right after a successful accept (and the filing pass it queues),
    *  so the caller can re-read `GET /api/ai/status` immediately. */
   onAccepted?(): void;
+  /** True for the Organize page's "Suggest tags" secondary action — the only
+   *  caller left. Whatever collection names the proposer returns alongside
+   *  the tags are dropped before they reach `state`, so `SuggestionReview`'s
+   *  "New collections" list never renders and `accept()` sends `collections: []`
+   *  without either of them needing to know why. */
+  tagsOnly?: boolean;
 }
 
 export interface UseSuggestCollections {
@@ -132,6 +147,7 @@ export function useSuggestCollections({
   settings,
   commit,
   onAccepted,
+  tagsOnly = false,
 }: UseSuggestCollectionsParams): UseSuggestCollections {
   const { t } = useI18n();
   const host = useNookHost();
@@ -192,19 +208,29 @@ export function useSuggestCollections({
       outcome = { kind: "failed", message: t("ai.errors.couldNotAsk") };
     }
     if (!isMounted()) return;
-    if (outcome.kind !== "proposals" || (outcome.proposals.length === 0 && outcome.tags.length === 0)) {
+    if (outcome.kind !== "proposals") {
       setState({ ...IDLE_STATE, note: outcomeNote(t, outcome) });
       return;
     }
-    const names = outcome.proposals.map((proposal) => proposal.name);
+    const nothingToShow = tagsOnly ? outcome.tags.length === 0 : outcome.proposals.length === 0 && outcome.tags.length === 0;
+    if (nothingToShow) {
+      setState({ ...IDLE_STATE, note: outcomeNote(t, outcome) });
+      return;
+    }
+    const proposals = tagsOnly ? [] : outcome.proposals;
+    const names = proposals.map((proposal) => proposal.name);
     setState({
       phase: "review",
-      proposals: outcome.proposals,
+      proposals,
       accepted: names,
       tags: outcome.tags,
       tagChoice: {},
       sampleSize: outcome.sampleSize,
-      existingCollections: outcome.existingCollections,
+      // Dropped alongside `proposals` in tagsOnly mode: "You already have
+      // Design, Reading" is a sentence about proposed collection names
+      // matching existing ones, which makes no sense once no collections are
+      // being proposed here at all.
+      existingCollections: tagsOnly ? [] : outcome.existingCollections,
       note: null,
       autoFileJustEnabled: false,
     });

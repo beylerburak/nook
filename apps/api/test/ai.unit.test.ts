@@ -16,6 +16,7 @@ import {
   parseSystemOneResponse,
   parseTaxonomyProposal,
   proposeTaxonomy,
+  REVIEW_MIN_CONFIDENCE,
   type ClassifyCollection,
   type ClassifyRequest,
   type ClassifySettings,
@@ -274,6 +275,76 @@ describe("decideClassification: collection", () => {
     const response = decideClassification(parsed({ usage: { inputTokens: 800, outputTokens: 20 } }), SETTINGS, NAMES);
     expect(response.model).toBe("jev-1.13.0");
     expect(response.usage).toEqual({ inputTokens: 800, outputTokens: 20 });
+  });
+});
+
+// The review list (docs/ai.md, "Review list"): a low-confidence skip used to
+// throw its top choice away outright (`collection.id` is `null` either way).
+// `guess` is the one thing that changed — it must never change what gets
+// filed, only what survives the skip for a human to act on later.
+describe("decideClassification: the review guess", () => {
+  it("keeps the top choice as a guess on a low-confidence skip, above the review floor", () => {
+    const response = decideClassification(
+      parsed({ collection: { choice: "c2", confidence: 0.61, probabilities: { c1: 0.39, c2: 0.61 } } }),
+      SETTINGS,
+      NAMES,
+    );
+    expect(response.skipped).toBe("low-confidence");
+    // The filing decision is unchanged: still not assigned, still no id.
+    expect(response.collection).toMatchObject({ assign: false, id: null, name: null });
+    expect(response.guess).toEqual({ id: "c2", name: "Databases", confidence: 0.61 });
+  });
+
+  it("drops the guess below REVIEW_MIN_CONFIDENCE — noise, not a cautious answer", () => {
+    const response = decideClassification(
+      parsed({ collection: { choice: "c2", confidence: 0.34, probabilities: { c2: 0.34 } } }),
+      SETTINGS,
+      NAMES,
+    );
+    expect(response.skipped).toBe("low-confidence");
+    expect(response.guess).toBeUndefined();
+  });
+
+  it("keeps a guess at exactly the review floor (>=)", () => {
+    const response = decideClassification(
+      parsed({ collection: { choice: "c2", confidence: REVIEW_MIN_CONFIDENCE, probabilities: { c2: REVIEW_MIN_CONFIDENCE } } }),
+      SETTINGS,
+      NAMES,
+    );
+    expect(response.guess).toEqual({ id: "c2", name: "Databases", confidence: REVIEW_MIN_CONFIDENCE });
+  });
+
+  it("never attaches a guess when the model declined (__none__), however confident", () => {
+    const response = decideClassification(
+      parsed({
+        collection: { choice: NO_COLLECTION_OPTION, confidence: 0.99, probabilities: { [NO_COLLECTION_OPTION]: 0.99 } },
+      }),
+      SETTINGS,
+      NAMES,
+    );
+    expect(response.skipped).toBe("none-fit");
+    expect(response.guess).toBeUndefined();
+  });
+
+  it("never attaches a guess for a choice we never offered a name for", () => {
+    const response = decideClassification(
+      parsed({ collection: { choice: "c-invented", confidence: 0.95, probabilities: {} } }),
+      SETTINGS,
+      NAMES,
+    );
+    expect(response.skipped).toBe("low-confidence");
+    expect(response.guess).toBeUndefined();
+  });
+
+  it("never attaches a guess when the collection was actually assigned", () => {
+    const response = decideClassification(
+      parsed({ collection: { choice: "c1", confidence: 0.9, probabilities: { c1: 0.9 } } }),
+      SETTINGS,
+      NAMES,
+    );
+    expect(response.collection.assign).toBe(true);
+    expect(response.skipped).toBeUndefined();
+    expect(response.guess).toBeUndefined();
   });
 });
 

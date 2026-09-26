@@ -147,6 +147,20 @@ export interface AiStatusResponse {
   /** The summarisation pass's half of the same surface. Additive, so an older
    *  panel that ignores it keeps working. */
   summarize: SummarizeStatus;
+  /**
+   * Bookmarks with a kept low-confidence guess, still unfiled, still live
+   * (docs/ai.md, "Review list"). The same count `GET /api/ai/review`'s `total`
+   * reports, so the side nav can badge the review list without a second round
+   * trip. Additive, like `summarize` — an older panel that has never heard of
+   * the review list ignores the field and keeps working.
+   *
+   * Unlike `readReviewList`, this is a plain count with no side effect: the
+   * panel that renders this polls the status route every few seconds while a
+   * pass drains, and a DELETE on every one of those polls would be pruning a
+   * table nothing has necessarily changed. `readReviewList` is where the lazy
+   * prune actually happens, on the much rarer "open the review list" read.
+   */
+  reviewCount: number;
 }
 
 /**
@@ -467,6 +481,49 @@ export async function readPendingCount(pool: Pool, userId: string): Promise<numb
   return countOr(result.rows[0]?.count);
 }
 
+// -- the review list (docs/ai.md, "Review list") ---------------------------
+
+/**
+ * The predicate a `nook_ai_review` row must satisfy to still be worth offering,
+ * shared between the status count here and `ai-jobs.ts`'s `readReviewList` /
+ * `resolveReviewItems` so the two can never disagree about what "stale" means.
+ *
+ * Assumes the row is aliased `r` in the enclosing query. A row failing this is
+ * one of three things: the bookmark it names is gone or tombstoned, the
+ * bookmark was filed some other way in the meantime (a human, or a later pass
+ * that landed a real assignment), or the collection the guess named was itself
+ * deleted after the guess was kept. None of those are "still pending review",
+ * and offering one back would either 404 on accept or silently re-file a
+ * bookmark the user already dealt with.
+ */
+export const REVIEW_ROW_LIVE = `
+  EXISTS (
+    SELECT 1 FROM nook_records b
+    WHERE b.user_id = r.user_id AND b.kind = 'bookmark' AND b.id = r.bookmark_id
+      AND b.deleted_at IS NULL AND b.data->>'listId' IS NULL
+  )
+  AND EXISTS (
+    SELECT 1 FROM nook_records l
+    WHERE l.user_id = r.user_id AND l.kind = 'list' AND l.id = r.list_id AND l.deleted_at IS NULL
+  )
+`;
+
+/**
+ * `reviewCount` on the status route: a plain, side-effect-free count against
+ * the same liveness predicate `readReviewList` prunes by, so the two numbers
+ * agree even though only one of them mutates the table. See the comment on
+ * `AiStatusResponse.reviewCount` for why this one does not prune.
+ */
+export async function readReviewCount(pool: Pool, userId: string): Promise<number> {
+  const result = await pool.query<{ count: number }>(
+    `SELECT count(*)::int AS count
+     FROM nook_ai_review r
+     WHERE r.user_id = $1 AND ${REVIEW_ROW_LIVE}`,
+    [userId],
+  );
+  return countOr(result.rows[0]?.count);
+}
+
 /** Defaults when no row exists: never accepted, nothing proposed. */
 export async function readAcceptedTaxonomy(db: Queryable, userId: string): Promise<AcceptedTaxonomy> {
   const result = await db.query<StateRow>("SELECT data FROM nook_ai_taxonomy WHERE user_id = $1", [userId]);
@@ -513,12 +570,13 @@ export async function saveAcceptedTaxonomy(
  * itself and had to hedge in the copy.
  */
 export async function readAiStatus(pool: Pool, userId: string, nowMs: number = Date.now()): Promise<AiStatusResponse> {
-  const [settings, pending, taxonomy, run, summarize] = await Promise.all([
+  const [settings, pending, taxonomy, run, summarize, reviewCount] = await Promise.all([
     getAiUserSettings(pool, userId),
     readPendingCount(pool, userId),
     readAcceptedTaxonomy(pool, userId),
     readRunState(pool, userId),
     readSummarizeStatus(pool, userId, nowMs),
+    readReviewCount(pool, userId),
   ]);
   return {
     available: aiAvailability().classify,
@@ -527,6 +585,7 @@ export async function readAiStatus(pool: Pool, userId: string, nowMs: number = D
     taxonomy,
     run: summarizeRunState(run, nowMs),
     summarize,
+    reviewCount,
   };
 }
 

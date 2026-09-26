@@ -76,6 +76,18 @@ export interface ClassifyResponse {
   /** already thresholded and capped */
   tags: Array<{ name: string; noul: number }>;
   skipped?: "none-fit" | "low-confidence";
+  /**
+   * The top collection Jev would have picked, kept even though the confidence
+   * fell short of `settings.collectionMinConfidence` — this is what backs the
+   * one-click review list (docs/ai.md, "Review list"). Present only alongside
+   * `skipped: "low-confidence"`, and only when the model actually named a real
+   * collection (never `__none__`, which is `skipped: "none-fit"` and never
+   * reaches this field) at or above `REVIEW_MIN_CONFIDENCE` — a floor well
+   * below the filing threshold, so a pure coin-flip is not offered as a guess
+   * either. Does not change what gets filed: `collection.assign` is still
+   * `false` and `collection.id` is still `null` on this response.
+   */
+  guess?: { id: string; name: string; confidence: number };
   usage?: { inputTokens: number; outputTokens: number };
 }
 
@@ -141,6 +153,25 @@ export const DEFAULT_COLLECTION_MIN_CONFIDENCE = 0.75;
  *  cap bound on none of the measured items, so it is not doing the work. */
 export const DEFAULT_TAG_MIN_NOUL = 0.8;
 export const DEFAULT_MAX_TAGS = 3;
+
+/**
+ * The floor below which a low-confidence guess is not worth keeping for the
+ * review list at all (docs/ai.md, "Review list").
+ *
+ * Production data motivating this: after accepting 8 collections, a real
+ * account's classification pass filed 17 of 75 bookmarks and left ~33 more with
+ * a plausible top collection under `DEFAULT_COLLECTION_MIN_CONFIDENCE` — a
+ * guess `decideClassification` already computes and previously threw away
+ * outright (`collection.id` is `null` on a `skipped: "low-confidence"`
+ * response). Those are worth a one-click "file it or not" prompt instead of
+ * silence. This is a second, much lower floor under that one: 0.35 is not a
+ * filing threshold and never files anything by itself, it only decides whether
+ * a guess is a plausible-but-cautious answer (worth showing) or noise a
+ * confidence this low would not help anyone decide between (not worth
+ * showing). Not measured the way the two filing thresholds are — see
+ * docs/ai-calibration.md before treating it as calibrated in the same sense.
+ */
+export const REVIEW_MIN_CONFIDENCE = 0.35;
 
 /** Below this many characters of state text there is nothing to classify.
  *
@@ -675,6 +706,12 @@ export function neutralClassification(): ClassifyResponse {
  * Nothing is ever chosen for the user below the threshold — doing nothing is the
  * safe failure. A skipped decision still reports its confidence and
  * probabilities so the client can log it and the histogram stays honest.
+ *
+ * The one thing a "low-confidence" skip does keep — rather than throw away —
+ * is the top choice itself, in `guess`, when it clears `REVIEW_MIN_CONFIDENCE`.
+ * That is not a second, quieter filing threshold: `collection.assign` stays
+ * `false` and nothing is written to the record from this function either way.
+ * It is the input to a review list a human clicks through, not a decision.
  */
 export function decideClassification(
   parsed: ParsedSystemOne,
@@ -708,11 +745,22 @@ export function decideClassification(
     };
   }
 
+  // The guess docs/ai.md's "Review list" keeps: the same `choice`/`name` that
+  // would have been assigned above had confidence cleared the real threshold,
+  // kept here rather than discarded because `collectionMinConfidence` is a
+  // filing bar and not a "worth telling the user about" bar. Gated on `name`
+  // (never on `choice` alone) for the same reason the assignment branch above
+  // is: an id the response named that we never offered is not a real guess,
+  // it is a response we cannot act on either way.
+  const guess =
+    choice && name && confidence >= REVIEW_MIN_CONFIDENCE ? { id: choice, name, confidence } : undefined;
+
   return {
     model: parsed.model,
     collection: { ...collection, assign: false, id: null, name: null },
     tags: decided,
     skipped: "low-confidence",
+    ...(guess ? { guess } : {}),
     ...usage,
   };
 }
@@ -956,14 +1004,18 @@ const OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 const GEMINI_MODEL = "gemini-2.5-flash";
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 
-type ProposerId = "openai" | "gemini";
+export type ProposerId = "openai" | "gemini";
 
-interface ResolvedProposer {
+/** Exported so ai-clusters.ts's per-cluster naming call can resolve the same
+ *  provider/model/key the taxonomy proposer uses, rather than re-deriving
+ *  `NOOK_AI_PROPOSER` and its key a second time. Additive only — no behaviour
+ *  here changed, just visibility. */
+export interface ResolvedProposer {
   provider: ProposerId;
   apiKey: string;
 }
 
-function resolveProposer(): ResolvedProposer | null {
+export function resolveProposer(): ResolvedProposer | null {
   const selected = (process.env.NOOK_AI_PROPOSER ?? "").trim().toLowerCase();
   const provider: ProposerId | null = selected === "openai" || selected === "gemini" ? selected : null;
   if (!provider) return null;
@@ -1042,7 +1094,11 @@ const TAXONOMY_LANGUAGE_NAMES: Record<Exclude<TaxonomyLanguage, "auto">, string>
   es: "Spanish",
 };
 
-function stripCodeFence(text: string): string {
+/** Exported for the same reason `generate` is: ai-clusters.ts's per-cluster
+ *  naming response is a different JSON shape than a taxonomy proposal, but it
+ *  needs the exact same hardening against a model that wraps its JSON in prose
+ *  or a code fence anyway. */
+export function stripCodeFence(text: string): string {
   const trimmed = text.trim();
   const fenced = /^```[a-zA-Z]*\s*([\s\S]*?)\s*```$/.exec(trimmed);
   return (fenced ? fenced[1] : trimmed).trim();
@@ -1117,7 +1173,15 @@ export function parseTaxonomyProposal(
   return { collections, tags };
 }
 
-async function generate(
+/**
+ * Exported so ai-clusters.ts's per-cluster naming call goes through the exact
+ * same request shape, model/reasoning-effort branching and retry policy as the
+ * taxonomy proposer, rather than a second copy of the OpenAI/Gemini dispatch.
+ * `messages` only needs `{ system, user }` — a per-cluster naming prompt builds
+ * its own and is not a taxonomy proposal, but the shape this function actually
+ * reads is the same either way.
+ */
+export async function generate(
   messages: ProposalMessages,
   proposer: ResolvedProposer,
   deps: AiDeps,

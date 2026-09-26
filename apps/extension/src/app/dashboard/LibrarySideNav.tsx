@@ -12,6 +12,9 @@ import type { BookmarkList } from "../../../lib/types";
 export interface LibrarySideNavProps {
   view: LibraryView;
   counts: { all: number; x: number; chrome: number; unorganized: number };
+  /** The Organize item's own badge — the review count when there's anything
+   *  waiting to review, the unfiled count otherwise (DashboardApp.tsx). */
+  organizeBadge: number;
   lists: BookmarkList[];
   listCounts: Map<string, number>;
   tags: [string, number][];
@@ -24,6 +27,7 @@ export interface LibrarySideNavProps {
 export function LibrarySideNav({
   view,
   counts,
+  organizeBadge,
   lists,
   listCounts,
   tags,
@@ -68,7 +72,7 @@ export function LibrarySideNav({
           label={t("dashboard.views.organize")}
           icon={<Icon icon={SparkGlyph} />}
           isSelected={view.kind === "organize"}
-          endContent={<Badge label={counts.unorganized} />}
+          endContent={<Badge label={organizeBadge} />}
           onClick={() => onSelectView({ kind: "organize" })}
         />
       </SideNavSection>

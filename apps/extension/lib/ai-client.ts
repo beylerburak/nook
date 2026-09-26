@@ -3,7 +3,7 @@
  *
  * A pass used to run in this browser: a service-worker alarm owned the queue,
  * the cooldowns and the batch loop. It runs on Nook's server now, and this
- * module is the entire seam — the four routes in docs/ai-cloud-contract.md, with
+ * module is the entire seam — the routes in docs/ai-cloud-contract.md, with
  * the summarisation half of two of them from docs/ai-summarize-contract.md
  * layered on top, and nothing else:
  *
@@ -11,6 +11,17 @@
  *   POST /api/ai/run               requestClassificationRun
  *   POST /api/ai/taxonomy/propose  requestTaxonomyProposals
  *   PUT  /api/ai/taxonomy          acceptTaxonomy
+ *   GET  /api/ai/review            loadReview
+ *   POST /api/ai/review/resolve    resolveReview
+ *   POST /api/ai/clusters/propose  requestClusterProposals
+ *   PUT  /api/ai/clusters/accept   acceptClusters
+ *
+ * The last four are the Organize page's own surface (docs/ai.md, "Settings
+ * surface, and the Organize page"): a review list of the guesses that came in
+ * below the confidence threshold, and the cluster-suggestion flow that
+ * replaced the old taxonomy-propose step as the page's primary action. The
+ * taxonomy propose/accept pair survives underneath as the "Suggest tags"
+ * fallback — same routes, same shapes, nothing about them changed here.
  *
  * The shape follows lib/ai-settings.ts deliberately, because this is its
  * sibling: a module-level `fetch` default, injectable `fetch`/`apiUrl`/
@@ -142,6 +153,11 @@ export interface AiStatus {
   pending: number;
   taxonomy: AcceptedTaxonomy;
   run: AiRunSummary;
+  /** Jev's guesses that came in below the confidence threshold and are
+   *  waiting in `GET /api/ai/review` — the Organize page's "Needs your
+   *  review" badge count. A build that predates the field is 0, which is
+   *  the right reading: no such review list existed yet. */
+  reviewCount: number;
   /**
    * Filled whether or not the server sent it (see `readSummarizeStatus`), so
    * this is not `summarize?: SummarizeStatus` on the type: a panel that had to
@@ -364,6 +380,7 @@ function readStatus(value: unknown): AiStatus {
     taxonomy: readAcceptedTaxonomy(body.taxonomy),
     run: readRunSummary(body.run),
     summarize: readSummarizeStatus(body.summarize),
+    reviewCount: countOr(body.reviewCount),
   };
 }
 
@@ -614,6 +631,254 @@ export async function acceptTaxonomy(
     addedTags: countOr(body.addedTags),
     dropped: countOr(body.dropped),
     taxonomy: readAcceptedTaxonomy(body.taxonomy),
+  };
+}
+
+// -- GET /api/ai/review, POST /api/ai/review/resolve ---------------------
+//
+// The review list: guesses Jev made with a confidence below the account's
+// `collectionMinConfidence`, so `POST /api/ai/run` left the bookmark alone
+// rather than filing it. Reviewing one is a person doing the last mile a
+// low-confidence guess couldn't — accept files it where Jev guessed (or
+// somewhere else, via `listId`), reject says "no, leave it unfiled".
+
+/** One guess waiting for a person to look at it. `confidence` is shown as
+ *  "Likely" (>= 0.6) or "Maybe" (below) — never the raw decimal, see
+ *  `organize-utils.ts`'s `reviewConfidenceLabel`. */
+export interface ReviewItem {
+  bookmarkId: string;
+  listId: string;
+  listName: string;
+  confidence: number;
+}
+
+/** What a resolve call actually did — the same three-way split the server's
+ *  own transaction reports, so a bulk "accept all likely" can say something
+ *  more honest than "done" when a few of the batch had already been resolved
+ *  elsewhere (another tab, another device) by the time this one landed. */
+export interface ReviewResolution {
+  filed: number;
+  rejected: number;
+  skipped: number;
+}
+
+export type ReviewOutcome =
+  | { kind: "items"; items: ReviewItem[]; total: number }
+  | { kind: "signed-out" }
+  | { kind: "unavailable" }
+  | { kind: "throttled" }
+  | { kind: "failed"; message: string };
+
+export type ResolveOutcome =
+  | ({ kind: "resolved" } & ReviewResolution)
+  | { kind: "signed-out" }
+  | { kind: "unavailable" }
+  | { kind: "throttled" }
+  | { kind: "failed"; message: string };
+
+function readReviewItems(value: unknown): ReviewItem[] {
+  const body = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const items: ReviewItem[] = [];
+  for (const entry of Array.isArray(body.items) ? body.items : []) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const bookmarkId = trimmed(record.bookmarkId);
+    const listId = trimmed(record.listId);
+    // A row naming neither a bookmark nor the collection it was guessed into
+    // is nothing a person could act on.
+    if (bookmarkId === "" || listId === "") continue;
+    items.push({
+      bookmarkId,
+      listId,
+      listName: cleanName(record.listName) || listId,
+      confidence: finiteOr(record.confidence, 0),
+    });
+  }
+  return items;
+}
+
+/**
+ * `GET /api/ai/review` — the current review list, highest confidence first
+ * per the contract. A discriminated outcome rather than a bare array-or-null:
+ * "Needs your review" has a different sentence for a stale session than for a
+ * throttled server, the same reasoning as `requestTaxonomyProposals`.
+ */
+export async function loadReview(deps: AiClientDeps = {}): Promise<ReviewOutcome> {
+  const result = await callRoute(
+    deps,
+    "/api/ai/review",
+    { method: "GET" },
+    {
+      unreachable: "Could not reach Nook's server to read what needs review.",
+      unexpected: (status) => `The review list request failed (${status}).`,
+    },
+  );
+  if (!result.ok) return result.failure;
+  const body = (result.body && typeof result.body === "object" ? result.body : {}) as Record<string, unknown>;
+  const items = readReviewItems(body);
+  return { kind: "items", items, total: countOr(body.total) };
+}
+
+export interface ResolveReviewItemInput {
+  bookmarkId: string;
+  action: "accept" | "reject";
+  /** Files into a different collection than the one Jev guessed. Omitted
+   *  means "the guessed one" — the server already knows which that was. */
+  listId?: string;
+}
+
+/**
+ * `POST /api/ai/review/resolve` — 1 to 200 decisions in one call, so a bulk
+ * "accept all likely" is one request rather than one per row. The caller
+ * (`useReviewList`) removes rows from its own state optimistically and rolls
+ * back only on a failure outcome, so this never needs to report *which* item
+ * in the batch a partial `skipped` count refers to.
+ */
+export async function resolveReview(input: { items: ResolveReviewItemInput[] }, deps: AiClientDeps = {}): Promise<ResolveOutcome> {
+  const result = await callRoute(
+    deps,
+    "/api/ai/review/resolve",
+    { method: "POST", body: JSON.stringify(input) },
+    {
+      unreachable: "Could not reach Nook's server to save that.",
+      unexpected: (status) => `That review action failed (${status}).`,
+    },
+  );
+  if (!result.ok) return result.failure;
+  const body = (result.body && typeof result.body === "object" ? result.body : {}) as Record<string, unknown>;
+  return { kind: "resolved", filed: countOr(body.filed), rejected: countOr(body.rejected), skipped: countOr(body.skipped) };
+}
+
+// -- POST /api/ai/clusters/propose, PUT /api/ai/clusters/accept ----------
+//
+// "Suggest collections" now: Jev groups the account's unfiled bookmarks into
+// named clusters instead of just naming themes, so a proposal already knows
+// which bookmarks it means (`memberIds`) rather than leaving the classifier
+// to later decide bookmark-by-bookmark whether a name it invented applies.
+// Replaces the old propose/accept pair `useSuggestCollections.ts` used to
+// call as the page's primary flow; `requestTaxonomyProposals`/`acceptTaxonomy`
+// above are unchanged and now back the secondary "Suggest tags" action only.
+
+/** One group Jev found among the account's unfiled bookmarks. */
+export interface ClusterProposal {
+  id: string;
+  name: string;
+  why: string;
+  size: number;
+  memberIds: string[];
+  /** A few titles from the group, for the collapsed preview — the full
+   *  member list is looked up locally by `memberIds` (see
+   *  `organize-utils.ts`'s `clusterMemberTitles`), since the client already
+   *  has every bookmark the server could have named here. */
+  sampleTitles: string[];
+  /** Set when this group matches a collection the account already has —
+   *  accepting it files into that collection rather than creating a new one. */
+  existingListId: string | null;
+}
+
+export type ProposeClustersOutcome =
+  | { kind: "proposals"; proposals: ClusterProposal[]; unclustered: number; considered: number }
+  | { kind: "signed-out" }
+  | { kind: "unavailable" }
+  | { kind: "throttled" }
+  | { kind: "failed"; message: string };
+
+export type AcceptClustersOutcome =
+  | { kind: "accepted"; createdCollections: number; filed: number; skipped: number }
+  | { kind: "signed-out" }
+  | { kind: "unavailable" }
+  | { kind: "throttled" }
+  | { kind: "failed"; message: string };
+
+function readClusterProposals(value: unknown): ClusterProposal[] {
+  const body = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const proposals: ClusterProposal[] = [];
+  const seenIds = new Set<string>();
+  for (const entry of Array.isArray(body.proposals) ? body.proposals : []) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const name = cleanName(record.name);
+    const memberIds = stringListOr(record.memberIds);
+    // A group with no name or no members is nothing a person could review or
+    // accept — there's neither a label to show nor anything to file.
+    if (name === "" || memberIds.length === 0) continue;
+    const id = trimmed(record.id) || name;
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+    const existingListId = trimmed(record.existingListId);
+    proposals.push({
+      id,
+      name,
+      why: cleanName(record.why),
+      size: countOr(record.size) || memberIds.length,
+      memberIds,
+      sampleTitles: stringListOr(record.sampleTitles),
+      existingListId: existingListId || null,
+    });
+  }
+  return proposals;
+}
+
+/**
+ * `POST /api/ai/clusters/propose` — the Organize page's primary "Suggest
+ * collections" action now. Same failure mapping as `requestTaxonomyProposals`
+ * (503 is the same "no proposer configured" case, not a separate outage), and
+ * the same reasoning for a discriminated outcome over a bare array: the page
+ * has a different sentence for "sign in again" than for "try again in a
+ * minute".
+ */
+export async function requestClusterProposals(deps: ProposeDeps = {}): Promise<ProposeClustersOutcome> {
+  const result = await callRoute(
+    deps,
+    "/api/ai/clusters/propose",
+    { method: "POST", body: JSON.stringify(deps.language && deps.language !== "auto" ? { language: deps.language } : {}) },
+    {
+      unreachable: "Could not reach Nook's server to look for groups.",
+      unexpected: (status) => `The grouping request failed (${status}).`,
+    },
+  );
+  if (!result.ok) return result.failure;
+  const body = (result.body && typeof result.body === "object" ? result.body : {}) as Record<string, unknown>;
+  return {
+    kind: "proposals",
+    proposals: readClusterProposals(body),
+    unclustered: countOr(body.unclustered),
+    considered: countOr(body.considered),
+  };
+}
+
+export interface AcceptClusterInput {
+  name: string;
+  memberIds: string[];
+  /** Files into this collection instead of creating one named `name`. */
+  existingListId?: string | null;
+}
+
+/**
+ * `PUT /api/ai/clusters/accept` — turns the groups the user kept into real
+ * collections and files every member into one, in one transaction on the
+ * server. Unlike the classification queue, this is not "queued for later": the
+ * contract promises the filing happens before this call returns, which is why
+ * the Organize page follows a success here with `host.sync.requestSync()`
+ * rather than polling `pending` — there is no queue depth to watch drain.
+ */
+export async function acceptClusters(input: { collections: AcceptClusterInput[] }, deps: AiClientDeps = {}): Promise<AcceptClustersOutcome> {
+  const result = await callRoute(
+    deps,
+    "/api/ai/clusters/accept",
+    { method: "PUT", body: JSON.stringify(input) },
+    {
+      unreachable: "Could not reach Nook's server to create those collections.",
+      unexpected: (status) => `Creating those collections failed (${status}).`,
+    },
+  );
+  if (!result.ok) return result.failure;
+  const body = (result.body && typeof result.body === "object" ? result.body : {}) as Record<string, unknown>;
+  return {
+    kind: "accepted",
+    createdCollections: countOr(body.createdCollections),
+    filed: countOr(body.filed),
+    skipped: countOr(body.skipped),
   };
 }
 

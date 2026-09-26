@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Card, HStack, VStack } from "@astryxdesign/core/Layout";
@@ -12,10 +12,14 @@ import type { AiSettings } from "../../../../lib/ai-settings";
 import { useNookHost, type NookHost } from "../../host/NookHost";
 import { AiUnavailableBanner } from "../../settings-dialog/ai/AiOutageBanner";
 import { outageKind, useAiSettings, useAiStatus } from "../../settings-dialog/ai/shared";
+import { ClusterProposals } from "./ClusterProposals";
 import { RecentlyFiled } from "./RecentlyFiled";
-import { SuggestionReview } from "./SuggestionReview";
-import { describeProgress, describeSuggestPrompt, describeWorking, libraryProgress } from "./organize-utils";
-import { noteLabel, useSuggestCollections } from "./useSuggestCollections";
+import { ReviewList } from "./ReviewList";
+import { SuggestTags } from "./SuggestTags";
+import { describeProgress, describeWorking, libraryProgress } from "./organize-utils";
+import { noteLabel } from "./useSuggestCollections";
+import { useSuggestClusters } from "./useSuggestClusters";
+import { useReviewList } from "./useReviewList";
 
 export interface OrganizePageProps {
   items: Bookmark[];
@@ -26,22 +30,26 @@ export interface OrganizePageProps {
 }
 
 /**
- * The Organize page: suggest collections, watch Nook file into them, see what
- * got filed. This used to be a Stepper wedged into Settings → AI's 880px
- * dialog — a primary workflow squeezed into a settings surface, with the
- * accept button clipped off the edge and a stray Stepper rail down the left.
- * It is a full page now, reached from the side nav ("Organize", badge = the
- * unfiled count) or the "Open Organize" button in Settings → AI.
+ * The Organize page: suggest collections, review what Jev wasn't sure
+ * about, watch progress. Reached from the side nav ("Organize", badged with
+ * `reviewCount` when there's something waiting, else the unfiled count) or
+ * the "Open Organize" button in Settings → AI.
  *
- * State, top to bottom:
- *   1. signed out / AI not set up on this server -> a banner, nothing else
- *   2. a review in progress (`useSuggestCollections`) -> the full-width step
- *   3. a filing pass draining (`status.pending > 0`) -> live progress
- *   4. otherwise -> the next thing to do: suggest collections for what's
- *      still unfiled, or "everything is filed" once there's nothing left
- * "Recently filed" and the plain-language remainder line are always shown
- * beneath whichever of those is active, because they're historical — they
- * don't depend on what's happening right now.
+ * Three blocks, in this order of prominence:
+ *   1. **Suggest collections** (`ClusterProposals.tsx`/`useSuggestClusters.ts`)
+ *      — the primary action: groups of unfiled bookmarks Jev found, each
+ *      with an editable name, ready to become real collections.
+ *   2. **Needs your review** (`ReviewList.tsx`/`useReviewList.tsx`) — guesses
+ *      that came in below the confidence threshold, shown only while there
+ *      are any. Focus moves here right after a successful cluster accept —
+ *      the two flows feed each other: accepting groups is often exactly what
+ *      turns up new low-confidence guesses to look at.
+ *   3. **Progress / recently filed** (`RecentlyFiled.tsx`) — always shown,
+ *      compact.
+ * A signed-out session or a server with neither AI deployment configured
+ * collapses this to a single banner; otherwise, once there is truly nothing
+ * to do (nothing unfiled, nothing to review), the page says so plainly
+ * instead of showing three empty blocks.
  */
 export function OrganizePage({ items, lists, onOpenAiSettings }: OrganizePageProps) {
   const { t } = useI18n();
@@ -73,10 +81,10 @@ export function OrganizePage({ items, lists, onOpenAiSettings }: OrganizePagePro
 }
 
 /**
- * Split from `OrganizePage` so `useSuggestCollections` (and every hook this
- * body calls) only ever mounts once `settings` is confirmed non-null — the
- * parent's early returns above happen before this component exists at all,
- * rather than after a conditional hook call, which the rules of hooks forbid.
+ * Split from `OrganizePage` so every hook this body calls only ever mounts
+ * once `settings` is confirmed non-null — the parent's early returns above
+ * happen before this component exists at all, rather than after a
+ * conditional hook call, which the rules of hooks forbid.
  */
 function OrganizePageReady({
   items,
@@ -93,13 +101,42 @@ function OrganizePageReady({
   refresh(): void;
 }) {
   const { t } = useI18n();
-  const onAccepted = useCallback(() => refresh(), [refresh]);
-  const suggest = useSuggestCollections({ status, settings, commit, onAccepted });
+  const reviewList = useReviewList();
+  const reviewBlockRef = useRef<HTMLElement>(null);
+  const [focusReviewPending, setFocusReviewPending] = useState(false);
+  const previousClusterPhase = useRef<string>("idle");
+
+  const onClustersAccepted = useCallback(() => {
+    refresh();
+    reviewList.refresh();
+  }, [refresh, reviewList]);
+
+  const clusters = useSuggestClusters({ settings, status, onAccepted: onClustersAccepted });
+
+  // Move focus to "Needs your review" right after a successful cluster
+  // accept — see this file's header comment. Watches the phase transition
+  // rather than firing straight out of `onAccepted` because the review list
+  // itself hasn't necessarily finished refreshing by then; the second effect
+  // below re-checks every time `reviewList.items` changes and focuses the
+  // moment there is something there to land on.
+  useEffect(() => {
+    const wasDone = previousClusterPhase.current === "done";
+    if (clusters.state.phase === "done" && !wasDone) setFocusReviewPending(true);
+    else if (clusters.state.phase !== "done") setFocusReviewPending(false);
+    previousClusterPhase.current = clusters.state.phase;
+  }, [clusters.state.phase]);
+
+  useEffect(() => {
+    if (!focusReviewPending || reviewList.items.length === 0) return;
+    reviewBlockRef.current?.focus();
+    setFocusReviewPending(false);
+  }, [focusReviewPending, reviewList.items.length]);
 
   const progress = libraryProgress(items);
   const pending = status?.pending ?? 0;
   const outage = outageKind(status);
-  const hasAcceptedBefore = Boolean(status?.taxonomy.acceptedAt);
+  const hasReviewItems = reviewList.items.length > 0;
+  const nothingToDo = !clusters.isReviewing && !clusters.isReading && progress.unfiled === 0 && !hasReviewItems;
 
   return (
     <VStack gap={5} width="100%">
@@ -122,23 +159,63 @@ function OrganizePageReady({
 
       {outage === "all" ? <AiUnavailableBanner /> : null}
 
-      {suggest.state.note ? (
-        <HStack gap={2} align="start">
-          <StatusDot variant={suggest.state.note.variant} label={noteLabel(t, suggest.state.note.variant)} />
-          <Text type="supporting" color="secondary">
-            {suggest.state.note.text}
-          </Text>
-        </HStack>
-      ) : null}
-      {suggest.state.autoFileJustEnabled ? (
-        <Text type="supporting" color="secondary">
-          {t("dashboard.organize.autoFileEnabledNote")}
-        </Text>
+      {outage !== "all" && nothingToDo ? (
+        <Banner
+          status="success"
+          title={t("dashboard.organize.empty.title")}
+          endContent={<Button label={t("dashboard.organize.empty.suggestAgain")} variant="ghost" size="sm" onClick={clusters.ask} />}
+        />
       ) : null}
 
-      {suggest.isReviewing ? (
-        <SuggestionReview suggest={suggest} />
-      ) : pending > 0 ? (
+      {outage !== "all" && !nothingToDo ? (
+        <VStack gap={3} width="100%">
+          {clusters.isReviewing ? (
+            <ClusterProposals suggest={clusters} items={items} lists={lists} />
+          ) : (
+            <Card padding={4} width="100%" variant="muted">
+              <VStack gap={2}>
+                {clusters.state.note ? (
+                  <HStack gap={2} align="start">
+                    <StatusDot variant={clusters.state.note.variant} label={noteLabel(t, clusters.state.note.variant)} />
+                    <Text type="supporting" color="secondary">
+                      {clusters.state.note.text}
+                    </Text>
+                  </HStack>
+                ) : null}
+                <HStack justify="between" align="center" wrap="wrap" gap={2}>
+                  <Text>{t("dashboard.organize.clusters.cta", { count: progress.unfiled })}</Text>
+                  <Button
+                    label={t("dashboard.organize.clusters.button")}
+                    variant="primary"
+                    isLoading={clusters.isReading}
+                    isDisabled={Boolean(clusters.disabledReason) || clusters.isBusy}
+                    tooltip={clusters.disabledReason ?? t("dashboard.organize.clusters.buttonTooltip")}
+                    onClick={clusters.ask}
+                  />
+                </HStack>
+                {clusters.isReading ? (
+                  <HStack gap={2} align="center">
+                    <StatusDot variant="accent" label={t("dashboard.organize.clusters.reading")} isPulsing />
+                    <Text type="supporting" color="secondary">
+                      {t("dashboard.organize.clusters.readingBody")}
+                    </Text>
+                  </HStack>
+                ) : null}
+              </VStack>
+            </Card>
+          )}
+
+          <SuggestTags settings={settings} status={status} commit={commit} />
+        </VStack>
+      ) : null}
+
+      {hasReviewItems ? (
+        <VStack ref={reviewBlockRef} tabIndex={-1} gap={3} width="100%" style={{ outline: "none" }}>
+          <ReviewList items={items} lists={lists} />
+        </VStack>
+      ) : null}
+
+      {pending > 0 ? (
         <Card padding={4} width="100%" variant="muted">
           <HStack gap={2} align="center">
             <StatusDot variant="accent" label={t("ai.status.working")} isPulsing />
@@ -149,36 +226,6 @@ function OrganizePageReady({
               </Text>
             </VStack>
           </HStack>
-        </Card>
-      ) : outage !== "all" ? (
-        <Card padding={4} width="100%" variant="muted">
-          <VStack gap={2}>
-            {progress.unfiled > 0 ? (
-              <>
-                <Text>{describeSuggestPrompt(t, progress.unfiled)}</Text>
-                <HStack justify="end">
-                  <Button
-                    label={hasAcceptedBefore ? t("dashboard.organize.suggestMoreButton") : t("ai.suggest.button")}
-                    variant="primary"
-                    isLoading={suggest.isReading}
-                    isDisabled={Boolean(suggest.disabledReason) || suggest.isBusy}
-                    tooltip={suggest.disabledReason ?? t("ai.suggest.buttonTooltip")}
-                    onClick={suggest.ask}
-                  />
-                </HStack>
-              </>
-            ) : (
-              <Banner status="success" title={t("dashboard.organize.allCaughtUp")} />
-            )}
-            {suggest.isReading ? (
-              <HStack gap={2} align="center">
-                <StatusDot variant="accent" label={t("ai.suggest.reading")} isPulsing />
-                <Text type="supporting" color="secondary">
-                  {t("ai.suggest.readingBody")}
-                </Text>
-              </HStack>
-            ) : null}
-          </VStack>
         </Card>
       ) : null}
 

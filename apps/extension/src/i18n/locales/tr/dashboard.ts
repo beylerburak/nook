@@ -152,6 +152,10 @@ export const dashboard = {
     openSource: "Kaynağı aç",
     details: "Detaylar",
     copy: "Kopyala",
+
+    suggestedCollection: "Öneri: {name}",
+    acceptSuggestion: "Öneriyi kabul et",
+    dismissSuggestion: "Öneriyi reddet",
   },
 
   detail: {
@@ -282,7 +286,7 @@ export const dashboard = {
 
   organize: {
     title: "Kütüphaneni düzenle",
-    description: "Nook, yer imlerini kendi başına koleksiyonlara ayırabilir. Öneri iste, beğendiklerini tut, dosyalamayı Nook yapsın.",
+    description: "Nook, dosyalanmamış yer imlerini kendi başına gruplara ayırır. Bulduklarını gözden geçir, işine yarayanları tut, gerisini Nook dosyalasın.",
 
     filedCount: { one: "{count} yer imi dosyalandı", other: "{count} yer imi dosyalandı" },
     unfiledCount: { one: "{count} tanesi düzenlenmeyi bekliyor", other: "{count} tanesi düzenlenmeyi bekliyor" },
@@ -292,13 +296,6 @@ export const dashboard = {
       one: "Yaklaşık {count} yer imi kaldı — yaklaşık {minutes} dk.",
       other: "Yaklaşık {count} yer imi kaldı — yaklaşık {minutes} dk.",
     },
-
-    suggestPrompt: {
-      one: "Hâlâ dosyalanmamış {count} yer imi için koleksiyon öner.",
-      other: "Hâlâ dosyalanmamış {count} yer imi için koleksiyonlar öner.",
-    },
-    suggestMoreButton: "Daha fazla koleksiyon öner",
-    allCaughtUp: "Her şey dosyalandı. Aferin.",
     autoFileEnabledNote: "Dosyalama da açıldı, yeni yer imleri de düzenlenmeye devam edecek.",
 
     recentlyFiledTitle: "Son dosyalananlar",
@@ -313,5 +310,68 @@ export const dashboard = {
     },
 
     openAiSettings: "Yapay zekâ ayarları",
+    suggestTagsTrigger: "Etiket öner",
+
+    empty: {
+      title: "Her şey düzenlendi",
+      suggestAgain: "Yeniden öner",
+    },
+
+    clusters: {
+      cta: { one: "Dosyalanmamış {count} yer imin için grup bul.", other: "Dosyalanmamış {count} yer imin için grup bul." },
+      button: "Koleksiyon öner",
+      buttonTooltip: "Nook, dosyalanmamış yer imlerine bakıp onları gruplar.",
+      signedOutTooltip: "Grup önerisi almak için giriş yap.",
+      reading: "Gruplar aranıyor",
+      readingBody: "Dosyalanmamış yer imlerine bakılıyor…",
+      nothingNew: "Şu an önerilecek yeni bir şey yok.",
+      nothingToRead: "Bakılacak dosyalanmamış yer imi yok. Birkaç yer imi kaydedip tekrar dene.",
+
+      nameLabel: "Koleksiyon adı",
+      renameAction: "Yeniden adlandır",
+      showAll: "Tümünü göster ({count})",
+      showLess: "Daha az göster",
+      selectAll: "Tümünü seç",
+      selectNone: "Hiçbirini seçme",
+      existingBadge: "{name} koleksiyonuna eklenir",
+
+      collectionsCount: { one: "{count} koleksiyon", other: "{count} koleksiyon" },
+      bookmarksCount: { one: "{count} yer imi", other: "{count} yer imi" },
+      createLabel: "{collections} oluştur ve {bookmarks} dosyala",
+      fileOnlyLabel: "{bookmarks} dosyala",
+      consideredNote: { one: "Nook dosyalanmamış {count} yer imine baktı.", other: "Nook dosyalanmamış {count} yer imine baktı." },
+      nothingSelected: "Oluşturmak için en az bir grup seç.",
+
+      unclusteredNote: {
+        one: "{count} yer imi belirgin bir grup oluşturmadı — aşağıdan elle dosyalayabilir ya da sonra tekrar önerebilirsin.",
+        other: "{count} yer imi belirgin bir grup oluşturmadı — aşağıdan elle dosyalayabilir ya da sonra tekrar önerebilirsin.",
+      },
+
+      acceptedToast: {
+        one: "{collections} oluşturuldu ve {count} yer imi dosyalandı.",
+        other: "{collections} oluşturuldu ve {count} yer imi dosyalandı.",
+      },
+    },
+
+    review: {
+      heading: "Gözden geçirmen gerekenler",
+      description: "Nook bunlardan tam emin olamadı — bir göz at.",
+      likely: "Muhtemel",
+      maybe: "Belki",
+      accept: "Kabul et",
+      reject: "Reddet",
+      moveTo: "Şuraya taşı…",
+      acceptAllLikely: "Muhtemel olanları kabul et",
+      resolvedToast: {
+        one: "{count} yer imi dosyalandı.",
+        other: "{count} yer imi dosyalandı.",
+      },
+      dismissedToast: {
+        one: "{count} tanesi reddedildi.",
+        other: "{count} tanesi reddedildi.",
+      },
+      loadFailed: "Gözden geçirme listesi yüklenemedi.",
+      actionFailed: "Bu kaydedilemedi — tekrar dene.",
+    },
   },
 } satisfies Messages["dashboard"];

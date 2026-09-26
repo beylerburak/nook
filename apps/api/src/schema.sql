@@ -193,6 +193,46 @@ CREATE INDEX IF NOT EXISTS nook_records_ai_candidates_idx
   ON nook_records (user_id, kind, (COALESCE(data->>'savedAt', data->>'createdAt', data->>'updatedAt')) DESC NULLS LAST)
   WHERE deleted_at IS NULL;
 
+-- The review list (docs/ai.md, "Review list"): one row per bookmark whose
+-- classification landed "low-confidence" but still had a known top choice.
+-- `decideClassification` (apps/api/src/ai.ts) used to compute that choice and
+-- throw it away outright - the bookmark stayed unfiled and the guess went
+-- nowhere, even though production data showed roughly as many bookmarks fall
+-- just short of the filing threshold as clear it. This table is where the
+-- guess is kept instead, and GET /api/ai/review / POST /api/ai/review/resolve
+-- (apps/api/src/ai-jobs.ts) are the only things that read or write it.
+--
+-- One row per bookmark: a bookmark is only ever offered its single most
+-- recent guess, which is why this is a PRIMARY KEY rather than a log, and why
+-- `upsertReviewGuesses` in ai-jobs.ts is an upsert rather than an insert. It is
+-- deliberately NOT a field on nook_records, for the exact reason
+-- nook_ai_decided is not one: writing there would stamp updatedAt and bump the
+-- sync version for a guess the model is not confident in and a human has not
+-- acted on yet, resurfacing the bookmark on every device as freshly edited.
+--
+-- Unlike nook_ai_decided, this table is not permanent bookkeeping the account
+-- keeps forever - it is live working state that is only ever pruned lazily, by
+-- the read that is about to show it to a human (readReviewList), rather than
+-- on the reconciler's schedule: a stale row here costs nothing sitting
+-- unread, and the moment someone opens the review list is the cheapest
+-- possible moment to notice one has gone stale (bookmark filed some other
+-- way, bookmark deleted, or its guessed collection itself deleted).
+CREATE TABLE IF NOT EXISTS nook_ai_review (
+  user_id text NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  bookmark_id text NOT NULL,
+  list_id text NOT NULL,
+  confidence real NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, bookmark_id)
+);
+
+-- Serves both reads in ai-jobs.ts / ai-store.ts: one account's rows, ordered
+-- (or filtered) by confidence. There is no separate index for the lazy-prune
+-- DELETE in readReviewList - it deletes by (user_id, bookmark_id), which the
+-- primary key already serves.
+CREATE INDEX IF NOT EXISTS nook_ai_review_user_confidence_idx
+  ON nook_ai_review (user_id, confidence DESC);
+
 -- Every bookmark summarisation has been *attempted* on and did not produce a
 -- summary: the model declined, or the call could not be made. One row per
 -- bookmark, and a written summary DELETEs its row.

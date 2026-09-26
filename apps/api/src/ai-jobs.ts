@@ -91,6 +91,7 @@ import {
   AI_BACKOFF_BASE_MS,
   AI_BACKOFF_CAP_MS,
   AI_UNAVAILABLE_COOLDOWN_MS,
+  REVIEW_ROW_LIVE,
   acquireRunLease,
   activeCooldown,
   pushLogEntry,
@@ -134,19 +135,35 @@ export const CLASSIFY_CONCURRENCY = 4;
 /**
  * How often the worker looks for work, and the rate that implies.
  *
- * Once a minute is 12x the extension's 5-minute alarm, and the *total* cost is
- * unchanged: a classification is billed per bookmark, not per tick, so a
- * 1,000-bookmark library costs the same $0.06 whether it clears in 40 minutes or
- * in 3.5 hours. It just feels like a feature instead of a background chore.
+ * Once every 10 seconds is 30x the extension's 5-minute alarm, and the *total*
+ * cost is unchanged: a classification is billed per bookmark, not per tick, so
+ * cost was never the reason the old runner (or this pass's earlier 60-second
+ * default) polled slowly. A tick with a full 25-bookmark batch claimed is
+ * `CLASSIFY_BATCH_SIZE / (AI_TICK_INTERVAL_MS / 60_000)` bookmarks a minute —
+ * 25 at the old 60-second default, ≈150 at this one — so a 1,000-bookmark
+ * backlog clears in roughly 7 minutes instead of roughly 40. The per-bookmark
+ * price does not change: 5,000 bookmarks is still $0.31, once, whether it
+ * clears in 40 minutes or in 7 (docs/ai.md, "The rate").
  *
- * The reason the faster tick is safe rather than reckless is `nook_ai_decided`.
- * With the old capped cursor, 12 passes an hour would have multiplied a permanent
- * re-billing leak by 12.
+ * A once-a-minute tick was never a cost guard, only an unexamined holdover from
+ * the extension's polling cadence — the actual ceiling docs/ai.md calls out is
+ * `CLASSIFY_CONCURRENCY` against the upstream's 1,200 requests/minute limit,
+ * and four requests in flight at a time is nowhere near that regardless of how
+ * often a tick fires.
+ *
+ * The reason a faster tick is safe rather than reckless is still
+ * `nook_ai_decided`: with the old capped cursor, a faster tick would have
+ * multiplied a permanent re-billing leak; with the unbounded table, a bookmark
+ * is bought exactly once no matter how many ticks pass while it sits queued.
+ * The lease is the other half of that safety, and it is unaffected by how often
+ * a tick fires — see `acquireRunLease` and the re-entrancy guard on
+ * `tickAiWorker` below, which is what keeps a tick that runs long from
+ * overlapping the next one's work rather than merely its own clock.
  *
  * Overridable for tests and for a deployment that wants a slower meter; floored at
  * a second so a typo cannot turn the worker into a spin loop.
  */
-export const AI_TICK_INTERVAL_MS = 60_000;
+export const AI_TICK_INTERVAL_MS = 10_000;
 
 /** How often the same tick also reconciles. The reconciler is the backstop for
  *  everything the queue missed, so its cadence is a "how long can the index be
@@ -557,8 +574,11 @@ export async function topUpClassificationQueue(
        WHERE r.user_id = $1
          AND r.kind = 'bookmark'
          AND r.deleted_at IS NULL
-         AND r.data->'ai' IS NULL
-         AND r.data->'listId' IS NULL
+         -- JSON null counts as absent: a client that writes "listId": null
+         -- (or "ai": null) means "unfiled", and -> would read that as a
+         -- non-NULL jsonb value and silently never enroll the bookmark.
+         AND COALESCE(r.data->'ai', 'null'::jsonb) = 'null'::jsonb
+         AND r.data->>'listId' IS NULL
          AND NOT EXISTS (SELECT 1 FROM nook_ai_jobs j WHERE j.user_id = r.user_id AND j.bookmark_id = r.id)
          AND NOT EXISTS (SELECT 1 FROM nook_ai_decided d WHERE d.user_id = r.user_id AND d.bookmark_id = r.id)
          AND EXISTS (
@@ -1245,6 +1265,13 @@ export async function runClassificationPass(
     const at = new Date(nowMs).toISOString();
     const log = [...state.log];
     const decided = [...underFloor];
+    // Kept guesses for the review list (docs/ai.md, "Review list"): every
+    // low-confidence decision that named a real collection above
+    // REVIEW_MIN_CONFIDENCE, collected here and upserted in one statement
+    // alongside `rememberDecided` below — not written per-bookmark inside the
+    // loop, for the same batching reason `decided` itself is collected first
+    // and inserted once.
+    const reviewGuesses: ReviewGuess[] = [];
 
     for (let position = 0; position < jobs.length; position++) {
       const job = jobs[position];
@@ -1282,6 +1309,16 @@ export async function runClassificationPass(
         assigned: written.assigned,
         at,
       });
+      // The guess, independent of what `written` did: a response can carry both
+      // a kept collection guess and a filed tag (the collection Choice and the
+      // tag Nouls are separate questions), and the review list is about the
+      // collection alone. Collected whether or not the write landed — even a
+      // "gone" or "no-change" write still means the bookmark is genuinely
+      // unfiled and the guess is genuinely worth offering.
+      const guess = outcome.response.guess;
+      if (outcome.response.skipped === "low-confidence" && guess) {
+        reviewGuesses.push({ bookmarkId: job.id, listId: guess.id, confidence: guess.confidence });
+      }
     }
 
     // Why the pass stopped, if it did. The pool stops on the first terminal status,
@@ -1298,6 +1335,7 @@ export async function runClassificationPass(
 
     result.ran = true;
     await rememberDecided(pool, userId, decided);
+    await upsertReviewGuesses(pool, userId, reviewGuesses);
 
     // The recorded state decides the sentence, because only it knows whether this
     // server has a key at all; the returned result then carries the same one rather
@@ -1344,6 +1382,42 @@ async function rememberDecided(pool: Pool, userId: string, ids: readonly string[
      SELECT $1, x.id FROM unnest($2::text[]) AS x(id)
      ON CONFLICT DO NOTHING`,
     [userId, [...ids]],
+  );
+}
+
+/** One kept guess: a low-confidence decision's top choice, worth offering in
+ *  the review list. See `ReviewGuess` at the call site in `runClassificationPass`. */
+interface ReviewGuess {
+  bookmarkId: string;
+  listId: string;
+  confidence: number;
+}
+
+/**
+ * Keeps this pass's low-confidence guesses in `nook_ai_review`, one statement
+ * for the whole batch — the same batching `rememberDecided` uses, for the same
+ * reason: a pass claims up to 25 bookmarks, so 25 individual upserts would be
+ * 25 round trips for something one statement already does.
+ *
+ * `ON CONFLICT ... DO UPDATE` rather than `DO NOTHING`: unlike `nook_ai_decided`,
+ * this table is not a permanent "we already paid for this" marker, it is the
+ * current best guess, and a bookmark can only reach this function once anyway
+ * (a decided bookmark is never reconsidered — until a taxonomy acceptance wipes
+ * `nook_ai_decided` and makes it eligible again, at which point a fresh guess
+ * against the new option set is exactly what should replace the stale one, not
+ * be silently dropped in favour of it).
+ */
+async function upsertReviewGuesses(pool: Pool, userId: string, guesses: readonly ReviewGuess[]): Promise<void> {
+  if (guesses.length === 0) return;
+  await pool.query(
+    `INSERT INTO nook_ai_review (user_id, bookmark_id, list_id, confidence, created_at)
+     SELECT $1, x.bookmark_id, x.list_id, x.confidence, now()
+     FROM unnest($2::text[], $3::text[], $4::real[]) AS x(bookmark_id, list_id, confidence)
+     ON CONFLICT (user_id, bookmark_id) DO UPDATE SET
+       list_id = EXCLUDED.list_id,
+       confidence = EXCLUDED.confidence,
+       created_at = EXCLUDED.created_at`,
+    [userId, guesses.map((g) => g.bookmarkId), guesses.map((g) => g.listId), guesses.map((g) => g.confidence)],
   );
 }
 
@@ -1691,6 +1765,280 @@ async function readLibraryOn(db: PoolClient, userId: string): Promise<Classifiab
   return result.rows.map(toRowBookmark);
 }
 
+// -- the review list (docs/ai.md, "Review list") ---------------------------
+//
+// A classification pass files what it is confident about and, since the
+// change documented there, KEEPS its top guess for everything it wasn't —
+// see `guess` on `ClassifyResponse` (ai.ts), `REVIEW_MIN_CONFIDENCE`, and the
+// upsert in `runClassificationPass` above. This block is the other end of
+// that: reading the kept guesses back (`readReviewList`, behind
+// `GET /api/ai/review`) and letting a human accept or reject them
+// (`resolveReviewItems`, behind `POST /api/ai/review/resolve`). Both routes
+// live in server.ts, session-guarded the same way every other AI route is.
+
+/** `GET /api/ai/review`'s one item. */
+export interface AiReviewItem {
+  bookmarkId: string;
+  listId: string;
+  listName: string;
+  confidence: number;
+}
+
+/** `GET /api/ai/review`. `total` is the count before `limit` truncates it, so
+ *  the client can show "200 of 340" instead of silently hiding the rest. */
+export interface AiReviewList {
+  items: AiReviewItem[];
+  total: number;
+}
+
+/** Highest confidence first, capped here — the review list is a "look through
+ *  these" queue for a human, not a paginated table, and 200 is generous next to
+ *  the 25 a single classification pass ever claims at once. */
+const REVIEW_LIST_LIMIT = 200;
+
+function boundedConfidence(value: unknown): number {
+  const num = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return num < 0 ? 0 : num > 1 ? 1 : num;
+}
+
+/**
+ * `GET /api/ai/review`: the account's kept guesses, filtered to the ones still
+ * worth acting on, highest confidence first.
+ *
+ * The DELETE is the "lazily pruned" half of docs/ai.md's Review list section —
+ * nothing sweeps this table on a schedule the way `pruneDecided` sweeps
+ * `nook_ai_decided`, because a stale row costs nothing sitting there and the
+ * moment a human is about to look at the list is the cheapest possible moment
+ * to notice one has gone stale. `REVIEW_ROW_LIVE` (ai-store.ts) is the exact
+ * predicate `readReviewCount` uses for the status route's `reviewCount`, so the
+ * two numbers can never quietly disagree about what "still pending" means —
+ * see the comment on `AiStatusResponse.reviewCount` for why *that* read does
+ * not also prune.
+ *
+ * The count and the page are two statements rather than one `count(*) over ()`
+ * window: this route runs on demand, not on a tick, and a large library's list
+ * is still two index-backed reads either way.
+ */
+export async function readReviewList(pool: Pool, userId: string): Promise<AiReviewList> {
+  await pool.query(`DELETE FROM nook_ai_review r WHERE r.user_id = $1 AND NOT (${REVIEW_ROW_LIVE})`, [userId]);
+
+  const [{ rows: countRows }, { rows: itemRows }] = await Promise.all([
+    pool.query<{ count: number }>("SELECT count(*)::int AS count FROM nook_ai_review WHERE user_id = $1", [userId]),
+    pool.query<{ bookmark_id: string; list_id: string; list_name: string | null; confidence: number }>(
+      `SELECT r.bookmark_id, r.list_id, l.data->>'name' AS list_name, r.confidence
+       FROM nook_ai_review r
+       JOIN nook_records l ON l.user_id = r.user_id AND l.kind = 'list' AND l.id = r.list_id AND l.deleted_at IS NULL
+       WHERE r.user_id = $1
+       ORDER BY r.confidence DESC
+       LIMIT $2`,
+      [userId, REVIEW_LIST_LIMIT],
+    ),
+  ]);
+
+  return {
+    total: countOr(countRows[0]?.count),
+    items: itemRows.map((row) => ({
+      bookmarkId: row.bookmark_id,
+      listId: row.list_id,
+      // The JOIN above guarantees a live list, which `buildCollectionOptions`
+      // never offers without a name — so an empty name here would mean this
+      // join found a collection the classifier itself would have skipped.
+      // Falling back to the id rather than an empty string is defensive, not
+      // expected to ever be exercised.
+      listName: trimmed(row.list_name) || row.list_id,
+      confidence: boundedConfidence(row.confidence),
+    })),
+  };
+}
+
+/** One instruction in `POST /api/ai/review/resolve`'s body. */
+export interface ReviewResolveItem {
+  bookmarkId: string;
+  action: "accept" | "reject";
+  /** Overrides the stored guess's collection. Optional: the common case is
+   *  accepting the guess Nook already made. */
+  listId?: string;
+}
+
+/** `POST /api/ai/review/resolve`'s response. */
+export interface ReviewResolveResult {
+  filed: number;
+  rejected: number;
+  skipped: number;
+}
+
+/** A generous bound on one request, not a feature limit: the review list itself
+ *  is capped at `REVIEW_LIST_LIMIT` (200), so a well-behaved client resolving
+ *  "everything on screen" in one call never gets close to this. */
+const MAX_REVIEW_RESOLVE_ITEMS = 200;
+
+/**
+ * `POST /api/ai/review/resolve`'s body: 1 to 200 instructions, each a bookmark
+ * id, an action, and — for an `accept` that overrides the stored guess — a
+ * collection id. Strict in the style of `parseTaxonomyAcceptance`: a malformed
+ * entry is a 400 for the whole request rather than a silently dropped one,
+ * because the caller is about to tell the user "N filed, M rejected" and a
+ * quietly ignored item would make that count a lie.
+ */
+export function parseReviewResolveRequest(value: unknown): ReviewResolveItem[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid request");
+  const body = value as Record<string, unknown>;
+  if (!Array.isArray(body.items)) throw new Error("Invalid items array");
+  if (body.items.length < 1 || body.items.length > MAX_REVIEW_RESOLVE_ITEMS) {
+    throw new Error("Invalid items array");
+  }
+  const items: ReviewResolveItem[] = [];
+  for (const entry of body.items) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("Invalid item");
+    const record = entry as Record<string, unknown>;
+    const bookmarkId = trimmed(record.bookmarkId);
+    if (bookmarkId === "") throw new Error("Invalid bookmarkId");
+    if (record.action !== "accept" && record.action !== "reject") throw new Error("Invalid action");
+    let listId: string | undefined;
+    if (record.listId !== undefined) {
+      listId = trimmed(record.listId);
+      if (listId === "") throw new Error("Invalid listId");
+    }
+    items.push({ bookmarkId, action: record.action, ...(listId ? { listId } : {}) });
+  }
+  return items;
+}
+
+/**
+ * The receipt written when a reviewed guess is accepted — the same shape a
+ * classification decision writes onto `ai` (`attribution()` in
+ * ai-classify.ts: `model`, `at`, `collectionConfidence`), plus `source:
+ * "review"` so this can be told apart from a decision the pass itself filed.
+ * `model` is deliberately the generic "jev" rather than a specific version
+ * string: `nook_ai_review` never stored which exact model version answered,
+ * only the confidence, so restating a version here would be a guess dressed
+ * as a fact — precisely what this codebase's own comments elsewhere warn
+ * against doing with a stored number.
+ */
+function reviewAttribution(confidence: number, at: string): Record<string, unknown> {
+  return { model: "jev", at, collectionConfidence: confidence, source: "review" };
+}
+
+async function readReviewRow(
+  pool: Pool,
+  userId: string,
+  bookmarkId: string,
+): Promise<{ listId: string; confidence: number } | null> {
+  const result = await pool.query<{ list_id: string; confidence: number }>(
+    "SELECT list_id, confidence FROM nook_ai_review WHERE user_id = $1 AND bookmark_id = $2",
+    [userId, bookmarkId],
+  );
+  const row = result.rows[0];
+  return row ? { listId: row.list_id, confidence: row.confidence } : null;
+}
+
+async function deleteReviewRow(pool: Pool, userId: string, bookmarkId: string): Promise<void> {
+  await pool.query("DELETE FROM nook_ai_review WHERE user_id = $1 AND bookmark_id = $2", [userId, bookmarkId]);
+}
+
+/** The target collection's live name, or null when it is gone — the same
+ *  "offering a dead collection is worse than skipping it" reasoning
+ *  `buildCollectionOptions` applies to the classifier's own options. */
+async function readLiveListName(pool: Pool, userId: string, listId: string): Promise<string | null> {
+  const result = await pool.query<{ name: string | null }>(
+    "SELECT data->>'name' AS name FROM nook_records WHERE user_id = $1 AND kind = 'list' AND id = $2 AND deleted_at IS NULL",
+    [userId, listId],
+  );
+  const name = trimmed(result.rows[0]?.name);
+  return name === "" ? null : name;
+}
+
+/**
+ * `POST /api/ai/review/resolve`: accept or reject each instruction, one at a
+ * time. Sequential, not pooled: the caller is a human clicking a button, not a
+ * background pass, and up to 200 individual writes is not a rate that needs
+ * the classification pool's concurrency bound.
+ *
+ * **accept** files the bookmark through the *exact same write path* a
+ * classification decision uses, `applyServerWrite`, with the same
+ * guard-then-build shape:
+ *
+ * - The guard re-checks the row `applyServerWrite` re-reads inside its lock,
+ *   and it is deliberately `listId == null` rather than
+ *   `bookmarkNeedsClassification` (which also demands `ai == null`) — a
+ *   bookmark whose *tags* were already filed by this same low-confidence
+ *   decision carries a non-null `ai` already, and it must still be acceptable
+ *   here. Only the collection assignment is what "still unfiled" means for
+ *   this route.
+ * - The patch is built from that same fresh row, so a filing that lands here
+ *   can never be computed against data a concurrent sync has since replaced.
+ * - A bookmark some other write already filed between the guess being kept and
+ *   this call landing reports `skipped`, not `filed` — the same "a human wins"
+ *   rule the classification pass itself follows against its own re-check.
+ *
+ * **reject** only deletes the review row. `nook_ai_decided` — written when the
+ * pass first decided on this bookmark — is left alone on purpose: rejecting a
+ * suggestion must not make the bookmark billable again, which is the entire
+ * reason this route never touches that table.
+ *
+ * The review row is deleted in **both** outcomes of an accept — whether or not
+ * the file actually lands — and on every reject, so a resolved item never
+ * reappears on the next `GET /api/ai/review`.
+ */
+export async function resolveReviewItems(
+  pool: Pool,
+  userId: string,
+  items: readonly ReviewResolveItem[],
+  deps: AiJobDeps = {},
+): Promise<ReviewResolveResult> {
+  const at = new Date((deps.now ?? Date.now)()).toISOString();
+  let filed = 0;
+  let rejected = 0;
+  let skipped = 0;
+
+  for (const item of items) {
+    const stored = await readReviewRow(pool, userId, item.bookmarkId);
+    if (!stored) {
+      // Nothing to resolve: already resolved by an earlier call, already
+      // pruned as stale, or a bookmarkId the client made up. Either way there
+      // is no guess left to act on.
+      skipped++;
+      continue;
+    }
+
+    if (item.action === "reject") {
+      await deleteReviewRow(pool, userId, item.bookmarkId);
+      rejected++;
+      continue;
+    }
+
+    const listId = item.listId ?? stored.listId;
+    const listName = await readLiveListName(pool, userId, listId);
+    // Deleted here, before the write attempt and regardless of its outcome —
+    // see the doc comment above for why an accept always clears the row.
+    await deleteReviewRow(pool, userId, item.bookmarkId);
+    if (!listName) {
+      skipped++;
+      continue;
+    }
+
+    const result = await applyServerWrite(pool, userId, "bookmark", item.bookmarkId, at, {
+      guard: (record) => toClassifiable({ ...record.data, id: record.id }).listId == null,
+      build: (record) => {
+        const fresh = toClassifiable({ ...record.data, id: record.id });
+        // Merged, not replaced: the same low-confidence decision may have
+        // filed tags, and its receipt for those must survive the accept.
+        const previous = fresh.ai && typeof fresh.ai === "object" ? (fresh.ai as Record<string, unknown>) : {};
+        const patch: Partial<ClassifiableBookmark> = {
+          listId,
+          listName,
+          ai: { ...previous, ...reviewAttribution(stored.confidence, at) },
+        };
+        return patchChangesSomething(fresh, patch) ? patch : null;
+      },
+    });
+    if (result.wrote) filed++;
+    else skipped++;
+  }
+
+  return { filed, rejected, skipped };
+}
+
 // -- request validation ---------------------------------------------------
 
 /**
@@ -1827,6 +2175,25 @@ const TICK_ACCOUNTS_SQL = `SELECT user_id AS id
 let lastReconcileAt = 0;
 
 /**
+ * Whether a tick is already in flight. `startAiWorker`'s `setInterval` fires on
+ * a fixed clock regardless of whether the previous tick's promise has settled,
+ * and at the 10-second default a tick over a handful of accounts — each up to
+ * 25 classify calls at concurrency 4, plus the summarisation half — can easily
+ * still be running when the next one is due. This is the guard that keeps a
+ * slow tick from piling up concurrent `tickAiWorker` runs rather than simply
+ * running back-to-back.
+ *
+ * It is a throughput and load guard, not a correctness one — see the note on
+ * `tickAiWorker` below for why an overlap could never double-bill even without
+ * it. It is worth having anyway: an unguarded pile-up would run the accounts
+ * query and, for every account already mid-pass, an `acquireRunLease` call
+ * that is certain to fail, over and over, for as long as the slow tick keeps
+ * running — work that buys nothing and only grows the number of ticks stacked
+ * up behind it.
+ */
+let tickInFlight = false;
+
+/**
  * One tick: consider the accounts, and for each one refill, run, and — every
  * fifteen minutes — reconcile.
  *
@@ -1845,12 +2212,29 @@ let lastReconcileAt = 0;
  * unbounded by design and both are only dead weight once the bookmark behind them
  * is gone.
  *
+ * **A tick that outlives its own interval cannot double-process, with or
+ * without `tickInFlight` above.** The claim in `nook_ai_jobs` is one atomic
+ * `DELETE ... RETURNING`, so two ticks can never claim the same row; and
+ * `runClassificationPass`'s first gate is `acquireRunLease`, so a second tick
+ * that reaches an account already mid-pass fails the lease and returns
+ * immediately rather than reading the library or claiming anything a second
+ * time (see `acquireRunLease` in ai-store.ts and the lease note on
+ * `AI_TICK_INTERVAL_MS` above). `tickInFlight` exists on top of that guarantee
+ * for a narrower reason: without it, an overlap would still be *safe*, but it
+ * would also re-run `TICK_ACCOUNTS_SQL` and a doomed `acquireRunLease` call per
+ * account for as long as the slow tick kept running, which is waste rather
+ * than risk. It also keeps `lastReconcileAt` honest — updated by at most one
+ * tick at a time — so two overlapping ticks cannot both decide they are the
+ * reconcile tick and run the larger top-up and prune twice.
+ *
  * Never throws. This runs from a bare `setInterval`, where a rejection is an
  * unhandled rejection and an unhandled rejection is a dead process. Each account is
  * guarded separately too: one account's broken row must not cost the other
  * forty-nine their pass.
  */
 export async function tickAiWorker(pool: Pool): Promise<void> {
+  if (tickInFlight) return;
+  tickInFlight = true;
   try {
     const accounts = await pool.query<{ id: string }>(TICK_ACCOUNTS_SQL, [TICK_ACCOUNT_LIMIT]);
     const nowMs = Date.now();
@@ -1877,6 +2261,8 @@ export async function tickAiWorker(pool: Pool): Promise<void> {
     if (reconciling) lastReconcileAt = nowMs;
   } catch (error) {
     console.error("[ai-jobs] AI worker tick failed:", error);
+  } finally {
+    tickInFlight = false;
   }
 }
 

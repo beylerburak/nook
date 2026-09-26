@@ -193,13 +193,14 @@ describe("pushLogEntry", () => {
 });
 
 describe("readAiStatus", () => {
-  /** One `query`, dispatched on the statement — enough for four independent reads
-   *  and nothing more, which is all `readAiStatus` promises. */
+  /** One `query`, dispatched on the statement — enough for the independent reads
+   *  `readAiStatus` composes, and nothing more. */
   function stubPool(options: {
     settings?: Record<string, unknown>;
     pending?: number;
     state?: Record<string, unknown>;
     taxonomy?: Record<string, unknown>;
+    reviewCount?: number;
   } = {}) {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("nook_ai_settings")) return { rows: [{ data: options.settings ?? { autoClassify: true } }] };
@@ -207,23 +208,36 @@ describe("readAiStatus", () => {
         return { rows: [{ count: options.pending ?? 7 }] };
       }
       if (sql.includes("FROM nook_ai_taxonomy")) return { rows: [{ data: options.taxonomy ?? {} }] };
+      // The review count's own statement selects from `nook_ai_review` (matched
+      // first, more specifically) rather than `nook_ai_state`, so it must be
+      // checked before the broader `nook_ai_state` branch below.
+      if (sql.includes("FROM nook_ai_review")) return { rows: [{ count: options.reviewCount ?? 5 }] };
       if (sql.includes("FROM nook_ai_state")) return { rows: [{ data: options.state ?? {} }] };
       throw new Error(`unexpected statement: ${sql}`);
     });
     return { query };
   }
 
-  it("composes the whole surface from four reads, and takes `available` from the key", async () => {
-    const status = await readAiStatus(stubPool({ pending: 3 }) as never, "u1", NOW);
+  it("composes the whole surface from independent reads, and takes `available` from the key", async () => {
+    const status = await readAiStatus(stubPool({ pending: 3, reviewCount: 12 }) as never, "u1", NOW);
     expect(status.available).toBe(false);
     expect(status.pending).toBe(3);
     expect(status.settings.autoClassify).toBe(true);
     expect(status.taxonomy).toEqual({ acceptedAt: null, collections: [], tags: [] });
+    // Additive, like `summarize`: the same count GET /api/ai/review's `total`
+    // reports, read here as a plain count with no pruning side effect (see the
+    // comment on `AiStatusResponse.reviewCount`).
+    expect(status.reviewCount).toBe(12);
 
     // The same value the classify route's 503 is built from, so the panel's dot and
     // the route cannot disagree about whether this server can classify at all.
     process.env.TYPESAFE_API_KEY = "test-key";
     expect((await readAiStatus(stubPool() as never, "u1", NOW)).available).toBe(true);
+  });
+
+  it("defaults reviewCount to zero for an account with no kept guesses", async () => {
+    const status = await readAiStatus(stubPool({ reviewCount: 0 }) as never, "u1", NOW);
+    expect(status.reviewCount).toBe(0);
   });
 
   it("reports a cooldown in effect as a boolean, and one in the past as not in effect", async () => {
