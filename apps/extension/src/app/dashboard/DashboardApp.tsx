@@ -10,6 +10,7 @@ import { Pagination } from "@astryxdesign/core/Pagination";
 import { Section } from "@astryxdesign/core/Section";
 import { Selector } from "@astryxdesign/core/Selector";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
+import { StatusDot } from "@astryxdesign/core/StatusDot";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
@@ -28,6 +29,7 @@ import { BookmarkTable, BOOKMARK_TABLE_VIEW_CONFIG } from "../data-table/Bookmar
 import { DataTableViewOptions } from "../data-table/view-options";
 import { DataTableViewProvider } from "../data-table/view-state";
 import { SettingsDialog, type SettingsSection } from "../settings-dialog/SettingsDialog";
+import { useCloudStatus } from "../host/useCloudStatus";
 import { BookmarkDetailPanel } from "./BookmarkDetailPanel";
 import { CreateListDialog, DeleteListDialog } from "./dialogs";
 import { BookmarkGlyph } from "./glyphs";
@@ -39,16 +41,21 @@ import {
   DEFAULT_VIEW,
   LIST_EMOJIS,
   allItemMedia,
+  describeEmptySearch,
+  describeSearchCount,
+  describeSearchSignal,
   getTags,
-  hasNote,
   hasMedia,
   itemTitle,
-  matchesSearch,
+  matchesLibraryView,
+  searchFiltersForView,
+  useLibrarySearch,
   visibleText,
   type BookmarkViewMode,
   type LibraryView,
   type LightboxState,
   type MediaFilter,
+  type SearchFallback,
 } from "./bookmark-utils";
 import * as NookShared from "../../../lib/shared";
 import type { Bookmark, BookmarkList, Media } from "../../../lib/types";
@@ -167,23 +174,46 @@ function DashboardScreen({
   }, [items]);
   const tags = useMemo(() => getTags(items), [items]);
 
+  // The view pipeline and the search are separate on purpose. Everything the
+  // sidebar, the media tabs and the notes toggle decide is applied first and
+  // unconditionally, and the search then decides which of *these* bookmarks to
+  // show — so a server answer can rank inside the current view but can never
+  // widen it, and the sidebar stays authoritative over an index that knows
+  // nothing about "with media".
+  const viewItems = useMemo(
+    () => items.filter((item) => matchesLibraryView(item, view, mediaFilter, notesOnly)),
+    [items, view, mediaFilter, notesOnly],
+  );
+  const serverFilters = useMemo(() => searchFiltersForView(view), [view]);
+
+  // One subscription, reused for whether a search may be made at all. The same
+  // status already drives the sync indicator in the top nav, so this adds no new
+  // source of truth about the session — only a second reader of it.
+  const cloudStatus = useCloudStatus();
+  const canSearch = cloudStatus !== null && cloudStatus.signedIn && !cloudStatus.offline;
+  const searchBlocked: SearchFallback | null = cloudStatus === null
+    ? null
+    : !cloudStatus.signedIn
+      ? "signed-out"
+      : cloudStatus.offline
+        ? "offline"
+        : null;
+
+  const librarySearch = useLibrarySearch({
+    items: viewItems,
+    query: search,
+    canSearch,
+    blockedReason: searchBlocked,
+    filters: serverFilters,
+  });
+
+  // Sort stays the user's choice: relevance ordering would silently reorder the
+  // list under a selector that says "Newest first".
   const filteredItems = useMemo(() => {
-    const filtered = items.filter((item) => {
-      if (view.kind === "x" && item.source !== "x") return false;
-      if (view.kind === "chrome" && item.source !== "chrome") return false;
-      if (view.kind === "unorganized" && item.listId) return false;
-      if (view.kind === "list" && item.listId !== view.id) return false;
-      if (
-        view.kind === "tag" &&
-        !(item.tags || []).some((tag) => tag.toLowerCase().replace(/^#/, "") === view.id)
-      ) return false;
-      if (mediaFilter === "media" && !hasMedia(item)) return false;
-      if (mediaFilter === "text" && hasMedia(item)) return false;
-      if (notesOnly && !hasNote(item)) return false;
-      return matchesSearch(item, search.trim());
-    });
-    return NookShared.sortBookmarksByDate(filtered, sort);
-  }, [items, view, mediaFilter, notesOnly, search, sort]);
+    return NookShared.sortBookmarksByDate(librarySearch.items, sort);
+  }, [librarySearch.items, sort]);
+  const searchSignal = describeSearchSignal(librarySearch);
+  const emptySearchCopy = describeEmptySearch(librarySearch, search.trim(), items.length);
 
   const listsById = useMemo(
     () => new Map(lists.map((list) => [list.id, list])),
@@ -433,9 +463,14 @@ function DashboardScreen({
             <VStack gap={1}>
               <Heading level={1}>{viewTitle}</Heading>
               <Text type="supporting" color="secondary">
-                {filteredItems.length} saved {filteredItems.length === 1 ? "item" : "items"}
-                {search.trim() ? " matching “" + search.trim() + "”" : ""}
+                {describeSearchCount(librarySearch, filteredItems.length, search.trim())}
               </Text>
+              {searchSignal ? (
+                <HStack align="center" gap={2} wrap="wrap">
+                  <StatusDot variant={searchSignal.variant} label={searchSignal.label} />
+                  <Text type="supporting" color="secondary">{searchSignal.detail}</Text>
+                </HStack>
+              ) : null}
             </VStack>
             <Badge label={items.length + " saved"} />
           </HStack>
@@ -571,12 +606,8 @@ function DashboardScreen({
               </Section>
             ) : filteredItems.length === 0 ? (
               <EmptyState
-                title={items.length ? "No matching bookmarks" : "Your library is ready"}
-                description={
-                  items.length
-                    ? "Try another search or clear the current filter."
-                    : "Save a post on X or a web page. Nook keeps it here for later."
-                }
+                title={emptySearchCopy.title}
+                description={emptySearchCopy.description}
                 actions={
                   items.length ? (
                     <Button

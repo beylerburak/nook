@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { enqueueIndexing } from "./embeddings.js";
 
 export type RecordKind = "bookmark" | "list";
 
@@ -250,6 +251,16 @@ export async function syncRecords(
       [userId, request.cursor],
     );
     await client.query("COMMIT");
+    // Fire-and-forget indexing, here for three reasons. After the COMMIT, because
+    // a vector is derived data and a change that is not yet indexed is still a
+    // saved change - the reverse order would mean holding a transaction open
+    // across a network call to OpenAI. Outside the advisory lock, which
+    // `pg_advisory_xact_lock` has already released with the COMMIT. And wrapped,
+    // because a throw from here would fall into the catch below, whose ROLLBACK
+    // would mask a change that is already committed: the client would see a
+    // failure, retry, and be told it conflicted with its own previous attempt,
+    // forever (docs/retrieval.md, "How the index gets built").
+    enqueueIndexing(pool, userId, applied.filter((record) => record.kind === "bookmark"));
     const hasMore = result.rows.length > 500;
     const changes = result.rows.slice(0, 500);
     return {
