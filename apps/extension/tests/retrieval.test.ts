@@ -64,6 +64,8 @@ class MockSearchServer {
   requests: SearchRequestBody[] = [];
   urls: string[] = [];
   authorizations: Array<string | null> = [];
+  /** `init.credentials` as sent, so a cookie-mode request can be told apart from a bearer one. */
+  credentials: Array<RequestCredentials | undefined> = [];
   /** Answers handed out in request order. `null` means "hold this one open". */
   answers: Answer[] = [];
   /** Used once `answers` runs dry. */
@@ -82,6 +84,7 @@ class MockSearchServer {
   fetch = async (input: string, init: RequestInit): Promise<Response> => {
     this.urls.push(input);
     this.authorizations.push((init.headers as Record<string, string>).Authorization ?? null);
+    this.credentials.push(init.credentials);
     this.requests.push(JSON.parse(String(init.body)) as SearchRequestBody);
     const answer = this.answers.length > 0 ? this.answers.shift()! : this.defaultAnswer;
     if (answer === null) return new Promise<Response>((resolve) => this.held.push(resolve));
@@ -305,12 +308,37 @@ describe("searchLibrary", () => {
 
     expect(server.urls).toEqual([`${DEFAULT_CLOUD_API_URL}/api/search`]);
     expect(server.authorizations).toEqual(["Bearer test-token"]);
+    // Bearer mode never sets `credentials` — only cookie mode needs it.
+    expect(server.credentials).toEqual([undefined]);
     expect(server.requests[0]).toEqual({ q: "veritabanı", limit: SEARCH_RESULT_LIMIT });
     expect(outcome.ids).toEqual(["b2", "b1"]);
     // `total` is the count before the limit slice, which is what lets the UI say
     // "2 of 137" instead of implying the library holds two.
     expect(outcome.total).toBe(137);
     expect(outcome.fallback).toBeNull();
+  });
+
+  test("cookie auth (the web host) sends credentials and no bearer header", async () => {
+    // The web app authenticates with `configureCloud({ auth: "cookie" })`, so
+    // `cloudRequestAuth()` there resolves to `{ mode: "cookie" }` rather than a
+    // token — this is the shape that used to make the web host's searches
+    // silently answer "signed-out" (root cause of the web semantic-search bug).
+    server.answers = [{ status: 200, body: results(["b1"]) }];
+
+    const outcome = await searchLibrary("veritabanı", deps({ session: async () => ({ mode: "cookie" }) }));
+
+    expect(server.requests).toHaveLength(1);
+    expect(server.authorizations).toEqual([null]);
+    expect(server.credentials).toEqual(["include"]);
+    expect(outcome.ids).toEqual(["b1"]);
+    expect(outcome.fallback).toBeNull();
+  });
+
+  test("a null auth (either host, signed out) sends no request at all", async () => {
+    const outcome = await searchLibrary("veritabanı", deps({ session: async () => null }));
+
+    expect(server.requests).toHaveLength(0);
+    expect(outcome).toEqual({ ids: [], total: 0, fallback: "signed-out" });
   });
 
   test("sends the facets mirroring the current view, and omits the rest", async () => {
@@ -696,7 +724,7 @@ describe("useLibrarySearch", () => {
     // session gate is covered above against the real cloudSession(), and
     // fake-indexeddb schedules on the setImmediate that useFakeTimers also fakes,
     // so a real read here would simply never resolve.
-    searchDeps = deps({ session: async () => ({ token: "test-token", ownerId: "user-1" }) });
+    searchDeps = deps({ session: async () => ({ mode: "bearer", token: "test-token" }) });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);

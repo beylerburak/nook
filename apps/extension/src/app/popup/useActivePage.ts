@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { translate, useI18n, type Locale } from "../../i18n";
 import type {
   ActivePageState,
   ActivePageStateResponse,
@@ -16,17 +17,17 @@ export type ActivePagePhase = "loading" | "ready" | "error";
  * as ordinary rejections, so callers get one error-handling path instead of
  * having to check chrome.runtime.lastError by hand after every call.
  */
-function sendToBackground<TResponse>(message: PopupToBackgroundMessage): Promise<TResponse> {
+function sendToBackground<TResponse>(message: PopupToBackgroundMessage, locale: Locale): Promise<TResponse> {
   return new Promise((resolve, reject) => {
     try {
       chrome.runtime.sendMessage(message, (response: TResponse) => {
         const lastError = chrome.runtime.lastError;
         if (lastError) {
-          reject(new Error(lastError.message || "Nook's background service did not respond."));
+          reject(new Error(lastError.message || translate(locale, "extension.errors.backgroundNotResponding")));
           return;
         }
         if (response === undefined) {
-          reject(new Error("Nook's background service did not respond."));
+          reject(new Error(translate(locale, "extension.errors.backgroundNotResponding")));
           return;
         }
         resolve(response);
@@ -64,6 +65,7 @@ export interface UseActivePageResult {
  * hang) when the handler isn't there yet.
  */
 export function useActivePage(): UseActivePageResult {
+  const { t, locale } = useI18n();
   const [state, setState] = useState<ActivePageState | null>(null);
   const [phase, setPhase] = useState<ActivePagePhase>("loading");
   const [error, setError] = useState<string | null>(null);
@@ -79,9 +81,9 @@ export function useActivePage(): UseActivePageResult {
     setPhase((current) => (current === "ready" ? current : "loading"));
     setError(null);
     try {
-      const response = await sendToBackground<ActivePageStateResponse>({ type: "GET_ACTIVE_PAGE_STATE" });
+      const response = await sendToBackground<ActivePageStateResponse>({ type: "GET_ACTIVE_PAGE_STATE" }, locale);
       if (!response.success || !response.state) {
-        throw new Error(response.error || "Could not read this page.");
+        throw new Error(response.error || t("popup.errors.readError"));
       }
       if (!isMountedRef.current) return;
       setState(response.state);
@@ -91,7 +93,7 @@ export function useActivePage(): UseActivePageResult {
       setError(err instanceof Error ? err.message : String(err));
       setPhase("error");
     }
-  }, []);
+  }, [locale, t]);
 
   useEffect(() => {
     void refresh();
@@ -101,9 +103,9 @@ export function useActivePage(): UseActivePageResult {
     setIsSaving(true);
     setError(null);
     try {
-      const response = await sendToBackground<ActivePageStateResponse>({ type: "SAVE_ACTIVE_PAGE" });
+      const response = await sendToBackground<ActivePageStateResponse>({ type: "SAVE_ACTIVE_PAGE" }, locale);
       if (!response.success || !response.state) {
-        throw new Error(response.error || "Could not save this page.");
+        throw new Error(response.error || t("popup.errors.saveFailed"));
       }
       if (isMountedRef.current) setState(response.state);
     } catch (err) {
@@ -113,7 +115,7 @@ export function useActivePage(): UseActivePageResult {
     } finally {
       if (isMountedRef.current) setIsSaving(false);
     }
-  }, []);
+  }, [locale, t]);
 
   const remove = useCallback(async () => {
     if (!state || state.kind !== "page" || !state.bookmark) return;
@@ -121,9 +123,9 @@ export function useActivePage(): UseActivePageResult {
     setIsRemoving(true);
     setError(null);
     try {
-      const response = await sendToBackground<MessageResponse>({ type: "REMOVE_BOOKMARK", id });
+      const response = await sendToBackground<MessageResponse>({ type: "REMOVE_BOOKMARK", id }, locale);
       if (!response.success) {
-        throw new Error(response.error || "Could not remove this bookmark.");
+        throw new Error(response.error || t("popup.errors.removeFailed"));
       }
       if (isMountedRef.current) {
         setState((current) => (current && current.kind === "page" ? { ...current, bookmark: null } : current));
@@ -135,7 +137,7 @@ export function useActivePage(): UseActivePageResult {
     } finally {
       if (isMountedRef.current) setIsRemoving(false);
     }
-  }, [state]);
+  }, [state, locale, t]);
 
   const patchBookmark = useCallback(async (patch: BookmarkPatch): Promise<boolean> => {
     if (!state || state.kind !== "page" || !state.bookmark) return false;
@@ -150,8 +152,8 @@ export function useActivePage(): UseActivePageResult {
         : current,
     );
     try {
-      const response = await sendToBackground<MessageResponse>({ type: "UPDATE_BOOKMARK", id, patch });
-      if (!response.success) throw new Error(response.error || "Could not save changes.");
+      const response = await sendToBackground<MessageResponse>({ type: "UPDATE_BOOKMARK", id, patch }, locale);
+      if (!response.success) throw new Error(response.error || t("popup.errors.saveChangesFailed"));
       return true;
     } catch (err) {
       if (isMountedRef.current) {
@@ -162,7 +164,7 @@ export function useActivePage(): UseActivePageResult {
       }
       return false;
     }
-  }, [state]);
+  }, [state, locale, t]);
 
   return { state, phase, error, isSaving, isRemoving, refresh, save, remove, patchBookmark };
 }

@@ -22,10 +22,11 @@ import { Theme, type ThemeMode } from "@astryxdesign/core/theme";
 import { nookTheme } from "../theme/nook.js";
 import { CanvasEditorShell } from "../canvas-editor/page";
 import { useAppearance } from "../components/useAppearance";
+import { I18nProvider, useI18n } from "../../i18n";
 import { BookmarkCard } from "../components/BookmarkCard";
 import { SyncStatusIndicator } from "../components/SyncStatusIndicator";
 import { UserMenu } from "../components/UserMenu";
-import { BookmarkTable, BOOKMARK_TABLE_VIEW_CONFIG } from "../data-table/BookmarkTable";
+import { BookmarkTable, getBookmarkTableViewConfig } from "../data-table/BookmarkTable";
 import { DataTableViewOptions } from "../data-table/view-options";
 import { DataTableViewProvider } from "../data-table/view-state";
 import { SettingsDialog, type SettingsSection } from "../settings-dialog/SettingsDialog";
@@ -68,6 +69,7 @@ function DashboardScreen({
   onAppearanceChange: (mode: ThemeMode) => void;
 }) {
   const toast = useToast();
+  const { t } = useI18n();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const {
     items,
@@ -212,8 +214,8 @@ function DashboardScreen({
   const filteredItems = useMemo(() => {
     return NookShared.sortBookmarksByDate(librarySearch.items, sort);
   }, [librarySearch.items, sort]);
-  const searchSignal = describeSearchSignal(librarySearch);
-  const emptySearchCopy = describeEmptySearch(librarySearch, search.trim(), items.length);
+  const searchSignal = describeSearchSignal(librarySearch, t);
+  const emptySearchCopy = describeEmptySearch(librarySearch, search.trim(), items.length, t);
 
   const listsById = useMemo(
     () => new Map(lists.map((list) => [list.id, list])),
@@ -227,6 +229,8 @@ function DashboardScreen({
     return counts;
   }, [items]);
 
+  const bookmarkTableViewConfig = useMemo(() => getBookmarkTableViewConfig(t), [t]);
+
   const pageSize = viewMode === "cards" ? cardPageSize : tablePageSize;
   const requestedPage = viewMode === "cards" ? cardPage : tablePage;
   const totalPages = Math.max(1, Math.ceil(filteredItems.length / pageSize));
@@ -237,16 +241,16 @@ function DashboardScreen({
   );
 
   const viewTitle = useMemo(() => {
-    if (view.kind === "x") return "X bookmarks";
-    if (view.kind === "chrome") return "Web pages";
-    if (view.kind === "unorganized") return "Unorganized";
+    if (view.kind === "x") return t("dashboard.views.x");
+    if (view.kind === "chrome") return t("dashboard.views.web");
+    if (view.kind === "unorganized") return t("dashboard.views.unorganized");
     if (view.kind === "list") {
       const list = lists.find((candidate) => candidate.id === view.id);
-      return list ? (list.icon || list.emoji || "📁") + " " + list.name : "Collection";
+      return list ? (list.icon || list.emoji || "📁") + " " + list.name : t("dashboard.views.collectionFallback");
     }
     if (view.kind === "tag") return "#" + view.id;
-    return "All bookmarks";
-  }, [view, lists]);
+    return t("dashboard.views.all");
+  }, [view, lists, t]);
 
   const openDetails = useCallback((item: Bookmark) => {
     setActiveItem(item);
@@ -289,7 +293,7 @@ function DashboardScreen({
 
   const saveNote = () => {
     void savePatch({ note: noteDraft }).then((success) => {
-      if (success) toast({ body: "Note saved." });
+      if (success) toast({ body: t("dashboard.toast.noteSaved") });
     });
   };
 
@@ -302,33 +306,33 @@ function DashboardScreen({
     if (typeof chrome !== "undefined" && chrome.tabs?.create) {
       chrome.tabs.create({ url }).catch((error) => {
         console.error("[Nook] Failed to open URL:", error);
-        toast({ body: "Could not open this link.", type: "error" });
+        toast({ body: t("dashboard.toast.couldNotOpenLink"), type: "error" });
       });
     } else {
       window.open(url, "_blank", "noopener,noreferrer");
     }
-  }, [toast]);
+  }, [toast, t]);
 
   const copyText = useCallback(async (item: Bookmark) => {
     const text = [visibleText(item), item.note, item.url].filter(Boolean).join("\n\n");
     try {
       await navigator.clipboard.writeText(text);
-      toast({ body: "Copied to clipboard." });
+      toast({ body: t("dashboard.toast.copiedToClipboard") });
     } catch (error) {
       console.error("[Nook] Failed to copy to clipboard:", error);
-      toast({ body: "Could not copy to clipboard.", type: "error" });
+      toast({ body: t("dashboard.toast.couldNotCopyToClipboard"), type: "error" });
     }
-  }, [toast]);
+  }, [toast, t]);
 
   const copyUrl = useCallback(async (url: string) => {
     try {
       await navigator.clipboard.writeText(url);
-      toast({ body: "URL copied." });
+      toast({ body: t("dashboard.toast.urlCopied") });
     } catch (error) {
       console.error("[Nook] Failed to copy URL:", error);
-      toast({ body: "Could not copy the URL.", type: "error" });
+      toast({ body: t("dashboard.toast.couldNotCopyUrl"), type: "error" });
     }
-  }, [toast]);
+  }, [toast, t]);
 
   const openBookmarkUrl = useCallback((url: string, _item: Bookmark) => {
     openUrl(url);
@@ -391,7 +395,7 @@ function DashboardScreen({
     link.download = "nook-bookmarks.json";
     link.click();
     URL.revokeObjectURL(url);
-    toast({ body: "Bookmarks exported." });
+    toast({ body: t("dashboard.toast.bookmarksExported") });
   };
 
   const nav = (
@@ -410,11 +414,11 @@ function DashboardScreen({
   const topNav = (
     <TopNav
       className="nook-glass-topnav"
-      label="Nook primary navigation"
+      label={t("dashboard.topNav.ariaLabel")}
       heading={
         <TopNavHeading
           heading="Nook"
-          subheading="Your visual library"
+          subheading={t("dashboard.topNav.subheading")}
           logo={<Icon icon={BookmarkGlyph} color="accent" />}
         />
       }
@@ -456,14 +460,14 @@ function DashboardScreen({
         topNav={topNav}
         sideNav={nav}
         inspector={inspector}
-        inspectorLabel={activeItem ? itemTitle(activeItem) + " details" : undefined}
+        inspectorLabel={activeItem ? t("dashboard.detail.panelLabel", { title: itemTitle(activeItem, t) }) : undefined}
       >
         <VStack className="nook-main-content" gap={5} padding={6}>
           <HStack justify="between" align="center" wrap="wrap" gap={3}>
             <VStack gap={1}>
               <Heading level={1}>{viewTitle}</Heading>
               <Text type="supporting" color="secondary">
-                {describeSearchCount(librarySearch, filteredItems.length, search.trim())}
+                {describeSearchCount(librarySearch, filteredItems.length, search.trim(), t)}
               </Text>
               {searchSignal ? (
                 <HStack align="center" gap={2} wrap="wrap">
@@ -472,21 +476,21 @@ function DashboardScreen({
                 </HStack>
               ) : null}
             </VStack>
-            <Badge label={items.length + " saved"} />
+            <Badge label={t("dashboard.badge.saved", { count: items.length })} />
           </HStack>
 
-          <DataTableViewProvider config={BOOKMARK_TABLE_VIEW_CONFIG}>
+          <DataTableViewProvider config={bookmarkTableViewConfig}>
             <Toolbar
               className="nook-bookmark-toolbar"
-              label="Bookmark search and view"
+              label={t("dashboard.toolbar.ariaLabel")}
               size="sm"
               startContent={
                 <TextInput
                   ref={searchInputRef}
-                  label="Search bookmarks"
+                  label={t("dashboard.search.label")}
                   isLabelHidden
                   startIcon={<Icon icon="search" size="sm" />}
-                  placeholder="Search bookmarks, @authors, #tags…"
+                  placeholder={t("dashboard.search.placeholder")}
                   value={search}
                   hasClear
                   width="15rem"
@@ -500,39 +504,39 @@ function DashboardScreen({
                 <HStack gap={2} vAlign="center" wrap="wrap">
                   {viewMode === "table" ? (
                     <DataTableViewOptions
-                      label="View options"
+                      label={t("dashboard.viewOptions.label")}
                       columnsLabel={{
-                        title: "Columns",
-                        displayed: "Displayed columns",
-                        available: "Available columns",
-                        restore: "Restore",
-                        selectAll: "Select all",
-                        emptyDisplayed: "No columns are displayed.",
-                        emptyAvailable: "All columns are displayed.",
-                        required: "This column is required",
-                        reorder: "Reorder {column}",
-                        reorderHint: "Use the up and down arrow keys or drag to reorder.",
-                        remove: "Remove {column}",
-                        add: "Add {column}",
+                        title: t("dashboard.viewOptions.columns.title"),
+                        displayed: t("dashboard.viewOptions.columns.displayed"),
+                        available: t("dashboard.viewOptions.columns.available"),
+                        restore: t("dashboard.viewOptions.columns.restore"),
+                        selectAll: t("dashboard.viewOptions.columns.selectAll"),
+                        emptyDisplayed: t("dashboard.viewOptions.columns.emptyDisplayed"),
+                        emptyAvailable: t("dashboard.viewOptions.columns.emptyAvailable"),
+                        required: t("dashboard.viewOptions.columns.required"),
+                        reorder: t("dashboard.viewOptions.columns.reorder"),
+                        reorderHint: t("dashboard.viewOptions.columns.reorderHint"),
+                        remove: t("dashboard.viewOptions.columns.remove"),
+                        add: t("dashboard.viewOptions.columns.add"),
                       }}
-                      densityLabel="Density"
-                      stickyLabel="Sticky columns"
-                      stickyStartLabel="Pin from start"
-                      stickyEndLabel="Pin from end"
-                      stickyNoneLabel="None"
-                      stickyOneLabel="One column"
-                      stickyTwoLabel="Two columns"
-                      groupingLabel="Group by"
-                      groupingNoneLabel="No grouping"
+                      densityLabel={t("dashboard.viewOptions.density")}
+                      stickyLabel={t("dashboard.viewOptions.sticky")}
+                      stickyStartLabel={t("dashboard.viewOptions.stickyStart")}
+                      stickyEndLabel={t("dashboard.viewOptions.stickyEnd")}
+                      stickyNoneLabel={t("dashboard.viewOptions.stickyNone")}
+                      stickyOneLabel={t("dashboard.viewOptions.stickyOne")}
+                      stickyTwoLabel={t("dashboard.viewOptions.stickyTwo")}
+                      groupingLabel={t("dashboard.viewOptions.grouping")}
+                      groupingNoneLabel={t("dashboard.viewOptions.groupingNone")}
                       densityLabels={{
-                        compact: "Compact",
-                        balanced: "Comfortable",
-                        spacious: "Spacious",
+                        compact: t("dashboard.viewOptions.densityOptions.compact"),
+                        balanced: t("dashboard.viewOptions.densityOptions.balanced"),
+                        spacious: t("dashboard.viewOptions.densityOptions.spacious"),
                       }}
                     />
                   ) : null}
                   <SegmentedControl
-                    label="Bookmark view"
+                    label={t("dashboard.toolbar.bookmarkViewLabel")}
                     value={viewMode}
                     onChange={(value) => {
                       const nextMode = value as BookmarkViewMode;
@@ -544,12 +548,12 @@ function DashboardScreen({
                   >
                     <SegmentedControlItem
                       value="cards"
-                      label="Cards"
+                      label={t("dashboard.viewMode.cards")}
                       icon={<Icon icon="viewColumns" size="sm" />}
                     />
                     <SegmentedControlItem
                       value="table"
-                      label="Table"
+                      label={t("dashboard.viewMode.table")}
                       icon={<Icon icon="menu" size="sm" />}
                     />
                   </SegmentedControl>
@@ -566,13 +570,13 @@ function DashboardScreen({
                 }}
                 size="sm"
               >
-                <Tab value="all" label="All" endContent={<Badge label={counts.all} />} />
-                <Tab value="media" label="With media" endContent={<Badge label={counts.media} />} />
-                <Tab value="text" label="Text only" endContent={<Badge label={counts.text} />} />
+                <Tab value="all" label={t("dashboard.mediaFilter.all")} endContent={<Badge label={counts.all} />} />
+                <Tab value="media" label={t("dashboard.mediaFilter.media")} endContent={<Badge label={counts.media} />} />
+                <Tab value="text" label={t("dashboard.mediaFilter.text")} endContent={<Badge label={counts.text} />} />
               </TabList>
               <HStack align="center" gap={2} wrap="wrap">
                 <ToggleButton
-                  label="With notes"
+                  label={t("dashboard.mediaFilter.notesOnly")}
                   isPressed={notesOnly}
                   onPressedChange={(pressed) => {
                     setNotesOnly(pressed);
@@ -580,16 +584,16 @@ function DashboardScreen({
                   }}
                   size="sm"
                 >
-                  With notes
+                  {t("dashboard.mediaFilter.notesOnly")}
                 </ToggleButton>
                 <Selector
-                  label="Sort bookmarks"
+                  label={t("dashboard.sort.ariaLabel")}
                   isLabelHidden
                   size="sm"
                   variant="ghost"
                   options={[
-                    { value: "newest", label: "Newest first" },
-                    { value: "oldest", label: "Oldest first" },
+                    { value: "newest", label: t("dashboard.sort.newest") },
+                    { value: "oldest", label: t("dashboard.sort.oldest") },
                   ]}
                   value={sort}
                   onChange={(value) => {
@@ -602,7 +606,7 @@ function DashboardScreen({
 
             {isLoading ? (
               <Section variant="muted" padding={6}>
-                <Text color="secondary">Loading your library…</Text>
+                <Text color="secondary">{t("dashboard.states.loading")}</Text>
               </Section>
             ) : filteredItems.length === 0 ? (
               <EmptyState
@@ -611,7 +615,7 @@ function DashboardScreen({
                 actions={
                   items.length ? (
                     <Button
-                      label="Show all bookmarks"
+                      label={t("dashboard.emptyState.showAllBookmarks")}
                       variant="secondary"
                       onClick={() => {
                         selectLibraryView(DEFAULT_VIEW);
@@ -672,7 +676,7 @@ function DashboardScreen({
                   }}
                   variant="count"
                   size="sm"
-                  label={viewMode === "cards" ? "Bookmark card pages" : "Bookmark table pages"}
+                  label={viewMode === "cards" ? t("dashboard.pagination.cardPages") : t("dashboard.pagination.tablePages")}
                 />
               </HStack>
             ) : null}
@@ -724,7 +728,7 @@ function DashboardScreen({
           media={lightbox.media.map((media) => ({
             // Without a playable file (DOM-captured videos) show the poster image.
             src: media.type === "video" && media.videoUrl ? media.videoUrl : media.url,
-            alt: media.alt || "Saved media",
+            alt: media.alt || t("dashboard.lightbox.savedMediaAlt"),
             type: media.type === "video" && media.videoUrl ? "video" : "image",
           }))}
           index={lightbox.index}
@@ -740,14 +744,16 @@ export function DashboardApp() {
   const appearance = useAppearance();
 
   return (
-    <Theme theme={nookTheme} mode={appearance.mode}>
-      <ToastViewport position="bottomEnd">
-        <DashboardScreen
-          appearance={appearance.mode}
-          onAppearanceChange={appearance.setMode}
-        />
-      </ToastViewport>
-    </Theme>
+    <I18nProvider>
+      <Theme theme={nookTheme} mode={appearance.mode}>
+        <ToastViewport position="bottomEnd">
+          <DashboardScreen
+            appearance={appearance.mode}
+            onAppearanceChange={appearance.setMode}
+          />
+        </ToastViewport>
+      </Theme>
+    </I18nProvider>
   );
 }
 

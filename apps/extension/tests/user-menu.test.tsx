@@ -26,6 +26,20 @@ vi.mock("../src/app/host/useCloudStatus", () => ({
 
 // Imported after the mocks so the component picks up the mocked hooks.
 import { UserMenu } from "../src/app/components/UserMenu";
+import { LOCALE_STORAGE_KEY } from "../lib/locale";
+
+// Node ships its own global localStorage that shadows happy-dom's (see
+// tests/settings-dialog.test.tsx) — stub a plain in-memory one so the
+// Turkish-locale test below can actually read/write it.
+function stubLocalStorage() {
+  const store = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => void store.set(key, String(value)),
+    removeItem: (key: string) => void store.delete(key),
+    clear: () => store.clear(),
+  });
+}
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -33,6 +47,7 @@ let container: HTMLElement;
 let root: Root;
 
 beforeEach(() => {
+  stubLocalStorage();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -42,6 +57,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  vi.unstubAllGlobals();
 });
 
 function renderMenu(host: FakeNookHost, onOpenProfile = vi.fn(), onOpenSettings = vi.fn()) {
@@ -179,5 +195,16 @@ describe("UserMenu — extension, signed in", () => {
     openMenu();
     act(() => menuItem("Open web app").click());
     expect(host.openWebApp).toHaveBeenCalledWith("/");
+  });
+});
+
+describe("UserMenu — Turkish locale", () => {
+  it("renders menu item labels in Turkish when the locale setting is 'tr'", () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "tr");
+    renderMenu(webHost());
+    openMenu();
+    expect(hasMenuItem("Profil")).toBe(true);
+    expect(hasMenuItem("Ayarlar")).toBe(true);
+    expect(hasMenuItem("Çıkış yap")).toBe(true);
   });
 });

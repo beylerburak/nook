@@ -12,6 +12,7 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { useToast } from "@astryxdesign/core/Toast";
 import { Token } from "@astryxdesign/core/Token";
+import { useI18n } from "../../i18n";
 import {
   describeSession,
   isPublicIpAddress,
@@ -49,6 +50,7 @@ export function AccountPanel() {
   const host = useNookHost();
   const toast = useToast();
   const cloudStatus = useCloudStatus();
+  const { t, locale } = useI18n();
   const account = host.account;
 
   const [currentPassword, setCurrentPassword] = useState("");
@@ -85,8 +87,8 @@ export function AccountPanel() {
       .catch((error) => {
         console.error("[Nook] Failed to load sessions:", error);
         if (isActive) {
-          setSessionsError("Could not load active sessions.");
-          toast({ body: "Could not load active sessions.", type: "error" });
+          setSessionsError(t("settings.account.loadSessionsError"));
+          toast({ body: t("settings.account.loadSessionsError"), type: "error" });
         }
       })
       .finally(() => {
@@ -111,14 +113,14 @@ export function AccountPanel() {
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
-      toast({ body: "Password updated." });
+      toast({ body: t("settings.account.passwordUpdatedToast") });
       if (revokeOtherSessions) {
         setRevokeOtherSessions(false);
         setSessions(await account.listSessions());
       }
     } catch (error) {
       console.error("[Nook] Failed to change password:", error);
-      toast({ body: "Could not update your password. Check your current password.", type: "error" });
+      toast({ body: t("settings.account.passwordUpdateError"), type: "error" });
     } finally {
       setIsChangingPassword(false);
     }
@@ -129,10 +131,10 @@ export function AccountPanel() {
     try {
       await account.revokeSession(token);
       setSessions((current) => current?.filter((session) => session.token !== token) ?? current);
-      toast({ body: "Session signed out." });
+      toast({ body: t("settings.account.sessionSignedOutToast") });
     } catch (error) {
       console.error("[Nook] Failed to revoke session:", error);
-      toast({ body: "Could not sign out that session.", type: "error" });
+      toast({ body: t("settings.account.sessionSignOutError"), type: "error" });
     } finally {
       setRevokingToken(null);
     }
@@ -140,9 +142,9 @@ export function AccountPanel() {
 
   const confirmRevokeSession = (session: NookSessionInfo, title: string) => {
     revokeSessionAlert.show({
-      title: "Sign out this session?",
-      description: `This will sign "${title}" out of your account.`,
-      actionLabel: "Sign out",
+      title: t("settings.account.signOutSessionConfirmTitle"),
+      description: t("settings.account.signOutSessionConfirmDescription", { title }),
+      actionLabel: t("settings.account.signOut"),
       onAction: () => void revokeSession(session.token),
     });
   };
@@ -152,10 +154,10 @@ export function AccountPanel() {
     try {
       await account.revokeOtherSessions();
       setSessions(await account.listSessions());
-      toast({ body: "Other sessions signed out." });
+      toast({ body: t("settings.account.otherSessionsSignedOutToast") });
     } catch (error) {
       console.error("[Nook] Failed to sign out other sessions:", error);
-      toast({ body: "Could not sign out other sessions.", type: "error" });
+      toast({ body: t("settings.account.otherSessionsSignOutError"), type: "error" });
     } finally {
       setIsRevokingOthers(false);
     }
@@ -167,7 +169,7 @@ export function AccountPanel() {
       await account.signOut();
     } catch (error) {
       console.error("[Nook] Failed to sign out:", error);
-      toast({ body: "Could not sign out.", type: "error" });
+      toast({ body: t("settings.account.signOutError"), type: "error" });
       setIsSigningOut(false);
     }
   };
@@ -176,12 +178,9 @@ export function AccountPanel() {
     const pending = cloudStatus?.pendingCount ?? 0;
     if (pending > 0) {
       signOutAlert.show({
-        title: "Sign out?",
-        description:
-          pending === 1
-            ? "You have 1 change that hasn't synced yet. Signing out now may lose it on this device."
-            : `You have ${pending} changes that haven't synced yet. Signing out now may lose them on this device.`,
-        actionLabel: "Sign out anyway",
+        title: t("settings.account.signOutConfirmTitle"),
+        description: t("settings.account.unsyncedChangesWarning", { count: pending }),
+        actionLabel: t("settings.account.signOutAnyway"),
         onAction: () => void signOutNow(),
       });
       return;
@@ -196,7 +195,7 @@ export function AccountPanel() {
       await account.deleteAccount({ password: deletePassword });
     } catch (error) {
       console.error("[Nook] Failed to delete account:", error);
-      toast({ body: "Could not delete your account. Check your password.", type: "error" });
+      toast({ body: t("settings.account.deleteAccountError"), type: "error" });
       setIsDeleting(false);
     }
   };
@@ -205,36 +204,41 @@ export function AccountPanel() {
 
   return (
     <VStack gap={4}>
-      <SettingsCard title="Password">
+      <SettingsCard title={t("settings.account.passwordSectionTitle")}>
         <VStack padding={4} gap={3}>
-          <TextInput label="Current password" type="password" value={currentPassword} onChange={setCurrentPassword} />
           <TextInput
-            label="New password"
+            label={t("settings.account.currentPasswordLabel")}
+            type="password"
+            value={currentPassword}
+            onChange={setCurrentPassword}
+          />
+          <TextInput
+            label={t("settings.account.newPasswordLabel")}
             type="password"
             value={newPassword}
             onChange={setNewPassword}
-            description="At least 8 characters."
+            description={t("settings.account.newPasswordHint")}
           />
           <TextInput
-            label="Confirm new password"
+            label={t("settings.account.confirmPasswordLabel")}
             type="password"
             value={confirmPassword}
             onChange={setConfirmPassword}
             status={
               confirmPassword.length > 0 && confirmPassword !== newPassword
-                ? { type: "error", message: "Passwords don't match." }
+                ? { type: "error", message: t("settings.account.passwordMismatch") }
                 : undefined
             }
           />
           <Switch
-            label="Sign out other sessions"
-            description="Everywhere else you're signed in."
+            label={t("settings.account.signOutOtherSessions")}
+            description={t("settings.account.signOutOtherSessionsHint")}
             value={revokeOtherSessions}
             onChange={setRevokeOtherSessions}
           />
           <HStack justify="end">
             <Button
-              label="Update password"
+              label={t("settings.account.updatePasswordButton")}
               variant="primary"
               isLoading={isChangingPassword}
               isDisabled={!canChangePassword}
@@ -247,19 +251,19 @@ export function AccountPanel() {
       <VStack gap={1.5}>
         <HStack justify="between" align="center">
           <Text type="supporting" weight="semibold" color="secondary">
-            Active sessions
+            {t("settings.account.activeSessionsTitle")}
           </Text>
           {otherSessionCount > 0 ? (
             <Button
-              label="Sign out other sessions"
+              label={t("settings.account.signOutOtherSessions")}
               variant="ghost"
               size="sm"
               isLoading={isRevokingOthers}
               onClick={() =>
                 revokeOthersAlert.show({
-                  title: "Sign out other sessions?",
-                  description: "Every other device signed in to your account will be signed out.",
-                  actionLabel: "Sign out other sessions",
+                  title: t("settings.account.signOutOtherSessionsConfirmTitle"),
+                  description: t("settings.account.signOutOtherSessionsConfirmDescription"),
+                  actionLabel: t("settings.account.signOutOtherSessions"),
                   onAction: () => void revokeOtherSessionsNow(),
                 })
               }
@@ -269,7 +273,7 @@ export function AccountPanel() {
         <SettingsCard>
           {isLoadingSessions && !sessions ? (
             <VStack padding={4}>
-              <Text color="secondary">Loading sessions…</Text>
+              <Text color="secondary">{t("settings.account.loadingSessions")}</Text>
             </VStack>
           ) : sessionsError ? (
             <VStack padding={4}>
@@ -277,13 +281,13 @@ export function AccountPanel() {
             </VStack>
           ) : (sessions ?? []).length === 0 ? (
             <VStack padding={4}>
-              <Text color="secondary">No sessions found.</Text>
+              <Text color="secondary">{t("settings.account.noSessionsFound")}</Text>
             </VStack>
           ) : (
             <List hasDividers density="compact">
               {sortSessions(sessions ?? []).map((session) => {
                 const info = describeSession(session.userAgent);
-                const title = sessionTitle(info);
+                const title = sessionTitle(info, locale);
                 const publicIp = isPublicIpAddress(session.ipAddress) ? session.ipAddress : null;
                 const lastActive = session.updatedAt ?? session.createdAt;
                 return (
@@ -294,24 +298,26 @@ export function AccountPanel() {
                     description={
                       <VStack gap={0.5}>
                         <Text type="supporting" color="secondary">
-                          Active <Timestamp value={lastActive} format="relative" type="inherit" color="inherit" />
+                          {t("settings.account.activeLabel")}{" "}
+                          <Timestamp value={lastActive} format="relative" type="inherit" color="inherit" />
                           {publicIp ? ` · ${publicIp}` : ""}
                         </Text>
                         <Text type="supporting" color="disabled">
-                          Signed in <Timestamp value={session.createdAt} format="date" type="inherit" color="inherit" />
+                          {t("settings.account.signedInLabel")}{" "}
+                          <Timestamp value={session.createdAt} format="date" type="inherit" color="inherit" />
                         </Text>
                       </VStack>
                     }
                     endContent={
                       session.current ? (
-                        <Token label="This device" size="sm" />
+                        <Token label={t("settings.account.thisDeviceLabel")} size="sm" />
                       ) : (
                         <IconButton
-                          label={`Sign out "${title}"`}
+                          label={t("settings.account.signOutSessionAria", { title })}
                           icon={<Icon icon="close" size="sm" />}
                           variant="ghost"
                           size="sm"
-                          tooltip="Sign out"
+                          tooltip={t("settings.account.signOut")}
                           isLoading={revokingToken === session.token}
                           onClick={() => confirmRevokeSession(session, title)}
                         />
@@ -328,45 +334,45 @@ export function AccountPanel() {
       <SettingsCard>
         <HStack padding={4} justify="between" align="center">
           <VStack gap={0.5}>
-            <Text type="label">Sign out</Text>
+            <Text type="label">{t("settings.account.signOut")}</Text>
             <Text type="supporting" color="secondary">
-              Sign out of Nook on this device.
+              {t("settings.account.signOutOfNookDescription")}
             </Text>
           </VStack>
-          <Button label="Sign out" variant="secondary" isLoading={isSigningOut} onClick={handleSignOut} />
+          <Button label={t("settings.account.signOut")} variant="secondary" isLoading={isSigningOut} onClick={handleSignOut} />
         </HStack>
       </SettingsCard>
 
-      <SettingsCard title="Danger zone">
+      <SettingsCard title={t("settings.account.dangerZoneTitle")}>
         <HStack padding={4} justify="between" align="center">
           <VStack gap={0.5}>
-            <Text type="label">Delete account</Text>
+            <Text type="label">{t("settings.account.deleteAccount")}</Text>
             <Text type="supporting" color="secondary">
-              Permanently deletes your account and everything synced to it.
+              {t("settings.account.deleteAccountDescription")}
             </Text>
           </VStack>
-          <Button label="Delete account" variant="destructive" onClick={() => setIsDeleteOpen(true)} />
+          <Button label={t("settings.account.deleteAccount")} variant="destructive" onClick={() => setIsDeleteOpen(true)} />
         </HStack>
       </SettingsCard>
 
       <Dialog isOpen={isDeleteOpen} onOpenChange={setIsDeleteOpen} purpose="form" width="min(28rem, 100vw)">
         <VStack gap={4} padding={5}>
           <DialogHeader
-            title="Delete your account?"
-            subtitle="This can't be undone. Enter your password to confirm."
+            title={t("settings.account.deleteAccountConfirmTitle")}
+            subtitle={t("settings.account.deleteAccountConfirmSubtitle")}
             onOpenChange={setIsDeleteOpen}
           />
           <TextInput
-            label="Password"
+            label={t("settings.account.passwordLabel")}
             type="password"
             value={deletePassword}
             onChange={setDeletePassword}
             onEnter={() => void deleteAccount()}
           />
           <HStack justify="end" gap={2}>
-            <Button label="Cancel" variant="ghost" onClick={() => setIsDeleteOpen(false)} />
+            <Button label={t("common.cancel")} variant="ghost" onClick={() => setIsDeleteOpen(false)} />
             <Button
-              label="Delete account"
+              label={t("settings.account.deleteAccount")}
               variant="destructive"
               isLoading={isDeleting}
               isDisabled={!deletePassword}

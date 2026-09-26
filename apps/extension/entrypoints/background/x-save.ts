@@ -6,8 +6,10 @@
  */
 
 import * as NookDB from "../../lib/db";
+import { loadLocaleSetting } from "../../lib/locale";
 import { sendBookmarkToast } from "../../lib/toast";
 import type { BackgroundToContentMessage, Bookmark, ParseFocalTweetResponse } from "../../lib/types";
+import { resolveLocale, translate } from "../../src/i18n/core";
 import { refreshBadgeForTab } from "./badge";
 
 const FOCAL_TWEET_TIMEOUT_MS = 2000;
@@ -39,9 +41,10 @@ export async function saveXPostFromTab(tabId: number): Promise<Bookmark | null> 
 
   const bookmark = await NookDB.saveOrRestoreBookmark(parsed.item);
 
+  const locale = resolveLocale(await loadLocaleSetting());
   sendBookmarkToast(tabId, {
     type: "SHOW_BOOKMARK_TOAST",
-    message: "Saved to Nook ✓",
+    message: translate(locale, "extension.toast.tweetSaved"),
     bookmarkId: bookmark.id,
   }).catch(() => {});
   refreshBadgeForTab(tabId, bookmark.url ?? undefined).catch(() => {});

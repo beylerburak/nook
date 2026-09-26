@@ -6,6 +6,7 @@ import { Theme, type ThemeMode } from "@astryxdesign/core/theme";
 import { ToastViewport, useToast } from "@astryxdesign/core/Toast";
 import { nookTheme } from "../theme/nook.js";
 import { useAppearance } from "../components/useAppearance";
+import { I18nProvider, useI18n } from "../../i18n";
 import { useCloudStatus } from "../host/useCloudStatus";
 import * as NookDB from "../../../lib/db";
 import { cloudApiUrl } from "../../../lib/cloud-sync";
@@ -33,6 +34,7 @@ function PopupScreen({
   appearanceMode: ThemeMode;
   onAppearanceChange: (mode: ThemeMode) => void;
 }) {
+  const { t } = useI18n();
   const toast = useToast();
   const activePage = useActivePage();
   const saveShortcut = useSaveShortcut();
@@ -75,7 +77,7 @@ function PopupScreen({
   const openUrl = (url: string) => {
     chrome.tabs.create({ url }).catch((error) => {
       console.error("[Nook] Failed to open URL:", error);
-      toast({ body: "Could not open this link.", type: "error" });
+      toast({ body: t("popup.errors.openLinkFailed"), type: "error" });
     });
   };
 
@@ -105,10 +107,10 @@ function PopupScreen({
     try {
       await activePage.save();
       setJustSaved(true);
-      toast({ body: "Saved to Nook" });
+      toast({ body: t("popup.page.savedToNook") });
     } catch (error) {
       console.error("[Nook] Failed to save the page:", error);
-      toast({ body: "Could not save this page.", type: "error" });
+      toast({ body: t("popup.errors.saveFailed"), type: "error" });
     }
   };
 
@@ -121,12 +123,12 @@ function PopupScreen({
       // toasts. Undo re-saves the same page, which the background's
       // SAVE_ITEM handler already treats as un-deleting an existing row.
       toast({
-        body: "Removed from Nook.",
-        endContent: <Button label="Undo" size="sm" variant="ghost" onClick={() => void handleSave()} />,
+        body: t("popup.toast.removed"),
+        endContent: <Button label={t("popup.toast.undo")} size="sm" variant="ghost" onClick={() => void handleSave()} />,
       });
     } catch (error) {
       console.error("[Nook] Failed to remove the bookmark:", error);
-      toast({ body: "Could not remove this bookmark.", type: "error" });
+      toast({ body: t("popup.errors.removeFailed"), type: "error" });
     }
   };
 
@@ -139,7 +141,7 @@ function PopupScreen({
     } catch (error) {
       console.error("[Nook] Failed to start sync:", error);
       setIsSyncing(false);
-      toast({ body: "Could not start syncing.", type: "error" });
+      toast({ body: t("popup.errors.syncStartFailed"), type: "error" });
     }
   };
 
@@ -196,11 +198,13 @@ export function PopupApp() {
   const appearance = useAppearance();
 
   return (
-    <Theme theme={nookTheme} mode={appearance.mode}>
-      <ToastViewport position="bottomEnd">
-        <PopupScreen appearanceMode={appearance.mode} onAppearanceChange={appearance.setMode} />
-      </ToastViewport>
-    </Theme>
+    <I18nProvider>
+      <Theme theme={nookTheme} mode={appearance.mode}>
+        <ToastViewport position="bottomEnd">
+          <PopupScreen appearanceMode={appearance.mode} onAppearanceChange={appearance.setMode} />
+        </ToastViewport>
+      </Theme>
+    </I18nProvider>
   );
 }
 

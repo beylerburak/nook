@@ -5,7 +5,18 @@ import { createExtensionHost } from "../../src/app/popup/extension-host";
 import { buildWebDashboardRedirectUrl } from "../../src/app/popup/dashboardLinks";
 import { DashboardApp } from "../../src/app/dashboard/DashboardApp";
 import { cloudApiUrl, cloudSession, subscribeCloudStatus, type CloudUserProfile } from "../../lib/cloud-sync";
+import { loadLocaleSetting, resolveLocale, subscribeToLocaleSetting, translate } from "../../src/i18n";
 import "../../src/app/styles.css";
+
+/**
+ * The extension page's <title> is plain static HTML (entrypoints/dashboard/index.html),
+ * so it doesn't follow <I18nProvider> the way in-tree UI does — set it here once the
+ * locale setting is known, and keep it live across a language change the same way
+ * every other surface does (see docs/i18n.md).
+ */
+function applyDashboardTitle(localeSetting: Parameters<typeof resolveLocale>[0]): void {
+  document.title = translate(resolveLocale(localeSetting), "extension.meta.dashboardTitle");
+}
 
 /**
  * The web app is the product once signed in (product contract §2): when
@@ -48,6 +59,9 @@ async function boot() {
     location.replace(buildWebDashboardRedirectUrl(cloudApiUrl(), location.search));
     return;
   }
+
+  applyDashboardTitle(await loadLocaleSetting());
+  subscribeToLocaleSetting(applyDashboardTitle);
 
   const root = document.getElementById("app-root");
   if (!root) throw new Error("Nook dashboard root is missing");

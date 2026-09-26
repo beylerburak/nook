@@ -121,21 +121,30 @@ describe("describeSession", () => {
 
 describe("sessionTitle", () => {
   it("combines browser and OS", () => {
-    expect(sessionTitle({ browser: "Chrome", os: "macOS", device: "desktop" })).toBe("Chrome on macOS");
+    expect(sessionTitle({ browser: "Chrome", os: "macOS", device: "desktop" }, "en")).toBe("Chrome on macOS");
   });
 
   it("drops the OS when it's unknown", () => {
-    expect(sessionTitle({ browser: "Nook", os: "Unknown OS", device: "desktop" })).toBe("Nook");
+    expect(sessionTitle({ browser: "Nook", os: "Unknown OS", device: "desktop" }, "en")).toBe("Nook");
   });
 
   it("says 'Unknown browser on <os>' when only the OS is known", () => {
-    expect(sessionTitle({ browser: "Unknown browser", os: "Windows", device: "desktop" })).toBe(
+    expect(sessionTitle({ browser: "Unknown browser", os: "Windows", device: "desktop" }, "en")).toBe(
       "Unknown browser on Windows",
     );
   });
 
   it("says 'Unknown device' when nothing is known", () => {
-    expect(sessionTitle({ browser: "Unknown browser", os: "Unknown OS", device: "desktop" })).toBe("Unknown device");
+    expect(sessionTitle({ browser: "Unknown browser", os: "Unknown OS", device: "desktop" }, "en")).toBe(
+      "Unknown device",
+    );
+  });
+
+  it("translates to Turkish when given the tr locale", () => {
+    expect(sessionTitle({ browser: "Chrome", os: "macOS", device: "desktop" }, "tr")).toBe("Chrome · macOS");
+    expect(sessionTitle({ browser: "Unknown browser", os: "Unknown OS", device: "desktop" }, "tr")).toBe(
+      "Bilinmeyen cihaz",
+    );
   });
 });
 

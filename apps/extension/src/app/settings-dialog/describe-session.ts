@@ -3,7 +3,19 @@
  * security) from the raw fields Better Auth hands back: a `User-Agent`
  * string and an IP address. No DOM, no host access — safe to unit test in
  * isolation and safe to call from a render function.
+ *
+ * `sessionTitle` is the one function here that produces user-facing text, so
+ * it takes a `locale` and calls `translate()` directly rather than `t()` —
+ * this file has no React, so it can't call `useI18n()` itself (see
+ * docs/i18n.md, "Non-React usage"). Callers under `<I18nProvider>` (e.g.
+ * `AccountPanel.tsx`) pass `useI18n().locale`.
  */
+// Imports directly from `./core`, not the `../../i18n` barrel: the barrel
+// re-exports `react.tsx`, whose module-level init reads the cached locale
+// setting via `location.protocol` (see `lib/locale.ts`) — fine in a browser
+// or a DOM test environment, but this file is a plain, DOM-free utility
+// (see the file doc comment above) and its own unit tests run without one.
+import { translate, type Locale } from "../../i18n/core";
 
 export type SessionBrowser =
   | "Chrome"
@@ -75,13 +87,13 @@ function detectDevice(ua: string): SessionDeviceType {
 }
 
 /** "Chrome on macOS" for a fully-recognized session, with graceful degradation when a part is unknown. */
-export function sessionTitle(info: SessionDescription): string {
+export function sessionTitle(info: SessionDescription, locale: Locale): string {
   const unknownBrowser = info.browser === "Unknown browser";
   const unknownOS = info.os === "Unknown OS";
-  if (unknownBrowser && unknownOS) return "Unknown device";
+  if (unknownBrowser && unknownOS) return translate(locale, "settings.sessions.unknownDevice");
   if (unknownOS) return info.browser;
-  if (unknownBrowser) return `Unknown browser on ${info.os}`;
-  return `${info.browser} on ${info.os}`;
+  if (unknownBrowser) return translate(locale, "settings.sessions.unknownBrowserOn", { os: info.os });
+  return translate(locale, "settings.sessions.deviceOn", { browser: info.browser, os: info.os });
 }
 
 /**

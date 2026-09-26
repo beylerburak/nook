@@ -8,6 +8,7 @@
  */
 import { NOOK_EXTENSION_ID, type BridgeRequest, type BridgeResponse } from "../../../extension/lib/bridge-protocol";
 import type { ExtensionLinkStatus } from "../../../extension/src/app/host/NookHost";
+import { getActiveLocale, translate } from "../../../extension/src/i18n";
 import type { NookAuthClient } from "../auth/authClient";
 
 // Overridable per build so a dev build can point at an unpacked/dev extension
@@ -23,7 +24,7 @@ function sendToExtension(request: BridgeRequest): Promise<BridgeResponse> {
   return new Promise((resolve, reject) => {
     const rt = runtime();
     if (!rt?.sendMessage) {
-      reject(new Error("Nook extension not installed"));
+      reject(new Error(translate(getActiveLocale(), "web.extension.notInstalled")));
       return;
     }
     try {
@@ -32,7 +33,7 @@ function sendToExtension(request: BridgeRequest): Promise<BridgeResponse> {
         // surfaces as chrome.runtime.lastError ("Could not establish
         // connection...") rather than a thrown exception.
         if (rt.lastError || !response) {
-          reject(new Error(rt.lastError?.message || "Nook extension not reachable"));
+          reject(new Error(rt.lastError?.message || translate(getActiveLocale(), "web.extension.notReachable")));
           return;
         }
         resolve(response);
@@ -60,7 +61,7 @@ export async function connectExtension(authClient: NookAuthClient, options?: { r
   const { data } = await authClient.getSession();
   const token = data?.session?.token;
   const ownerId = data?.user?.id;
-  if (!token || !ownerId) throw new Error("Sign in before connecting the extension.");
+  if (!token || !ownerId) throw new Error(translate(getActiveLocale(), "web.extension.signInFirst"));
   const response = await sendToExtension({
     type: "NOOK_BRIDGE_CONNECT",
     token,
@@ -70,8 +71,8 @@ export async function connectExtension(authClient: NookAuthClient, options?: { r
   if (!response.ok) {
     throw new Error(
       response.code === "OWNER_MISMATCH"
-        ? "The extension is signed in to a different Nook account."
-        : response.error || "Could not connect the extension.",
+        ? translate(getActiveLocale(), "web.extension.differentAccount")
+        : response.error || translate(getActiveLocale(), "web.extension.connectFailed"),
     );
   }
 }

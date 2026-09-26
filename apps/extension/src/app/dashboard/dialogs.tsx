@@ -3,6 +3,7 @@ import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { HStack, VStack } from "@astryxdesign/core/Layout";
 import { Selector } from "@astryxdesign/core/Selector";
 import { TextInput } from "@astryxdesign/core/TextInput";
+import { useI18n } from "../../i18n";
 import type { BookmarkList } from "../../../lib/types";
 
 export interface CreateListDialogProps {
@@ -26,26 +27,31 @@ export function CreateListDialog({
   emojiOptions,
   onCreate,
 }: CreateListDialogProps) {
+  const { t } = useI18n();
   return (
     <Dialog isOpen={isOpen} onOpenChange={onOpenChange} purpose="form" width="min(30rem, 100vw)">
       <VStack gap={4} padding={5}>
-        <DialogHeader title="Create a collection" subtitle="Keep related bookmarks together." onOpenChange={onOpenChange} />
+        <DialogHeader
+          title={t("dashboard.dialogs.createCollectionTitle")}
+          subtitle={t("dashboard.dialogs.createCollectionSubtitle")}
+          onOpenChange={onOpenChange}
+        />
         <TextInput
-          label="Collection name"
+          label={t("dashboard.dialogs.collectionNameLabel")}
           value={nameDraft}
           onChange={onNameDraftChange}
-          placeholder="e.g. Design references"
+          placeholder={t("dashboard.dialogs.collectionNamePlaceholder")}
           onEnter={onCreate}
         />
         <Selector
-          label="Collection icon"
+          label={t("dashboard.dialogs.collectionIconLabel")}
           options={emojiOptions.map((option) => ({ value: option, label: option }))}
           value={emoji}
           onChange={onEmojiChange}
         />
         <HStack justify="end" gap={2}>
-          <Button label="Cancel" variant="ghost" onClick={() => onOpenChange(false)} />
-          <Button label="Create collection" variant="primary" onClick={onCreate} />
+          <Button label={t("common.cancel")} variant="ghost" onClick={() => onOpenChange(false)} />
+          <Button label={t("dashboard.dialogs.createCollection")} variant="primary" onClick={onCreate} />
         </HStack>
       </VStack>
     </Dialog>
@@ -59,17 +65,20 @@ export interface DeleteListDialogProps {
 }
 
 export function DeleteListDialog({ list, onOpenChange, onConfirm }: DeleteListDialogProps) {
+  const { t } = useI18n();
   return (
     <Dialog isOpen={Boolean(list)} onOpenChange={onOpenChange} purpose="form" width="min(30rem, 100vw)">
       <VStack gap={4} padding={5}>
         <DialogHeader
-          title={"Delete " + (list?.name || "collection") + "?"}
-          subtitle="Bookmarks in this collection will become unorganized."
+          title={t("dashboard.dialogs.deleteCollectionTitle", {
+            name: list?.name || t("dashboard.dialogs.deleteCollectionFallbackName"),
+          })}
+          subtitle={t("dashboard.dialogs.deleteCollectionSubtitle")}
           onOpenChange={onOpenChange}
         />
         <HStack justify="end" gap={2}>
-          <Button label="Cancel" variant="ghost" onClick={() => onOpenChange(false)} />
-          <Button label="Delete collection" variant="primary" onClick={onConfirm} />
+          <Button label={t("common.cancel")} variant="ghost" onClick={() => onOpenChange(false)} />
+          <Button label={t("dashboard.dialogs.deleteCollection")} variant="primary" onClick={onConfirm} />
         </HStack>
       </VStack>
     </Dialog>

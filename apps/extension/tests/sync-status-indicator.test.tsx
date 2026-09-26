@@ -11,6 +11,8 @@ vi.mock("../src/app/host/useCloudStatus", () => ({
 
 // Imported after the mock so the component picks up the mocked hook.
 import { SyncStatusIndicator, describeSyncStatus } from "../src/app/components/SyncStatusIndicator";
+import { translate } from "../src/i18n/core";
+import type { MessageKey, ParamsFor } from "../src/i18n/types";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -77,6 +79,12 @@ describe("describeSyncStatus", () => {
     expect(describeSyncStatus({ ...SYNCED, offline: true, syncing: true, pendingCount: 1 }).label).toBe(
       "Offline (1 waiting)",
     );
+  });
+
+  it("translates the label into Turkish when given a Turkish t()", () => {
+    const trT = <K extends MessageKey>(key: K, params?: ParamsFor<K>) => translate("tr", key, params);
+    expect(describeSyncStatus(null, trT).label).toBe("Yalnızca yerel");
+    expect(describeSyncStatus({ ...SYNCED, syncing: true }, trT).label).toBe("Senkronize ediliyor…");
   });
 });
 

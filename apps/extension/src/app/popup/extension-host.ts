@@ -6,6 +6,7 @@
  * into another surface's entrypoint folder.
  */
 import type { NookHost } from "../host/NookHost";
+import { getActiveLocale, translate } from "../../i18n";
 import { cloudApiUrl, type CloudUserProfile } from "../../../lib/cloud-sync";
 import type { MessageResponse, PopupToBackgroundMessage } from "../../../lib/types";
 
@@ -19,12 +20,13 @@ function sendToBackground(message: PopupToBackgroundMessage): Promise<MessageRes
     try {
       chrome.runtime.sendMessage(message, (response: MessageResponse) => {
         const lastError = chrome.runtime.lastError;
+        const notRespondingMessage = translate(getActiveLocale(), "extension.errors.backgroundNotResponding");
         if (lastError) {
-          reject(new Error(lastError.message || "Nook's background service did not respond."));
+          reject(new Error(lastError.message || notRespondingMessage));
           return;
         }
         if (response === undefined) {
-          reject(new Error("Nook's background service did not respond."));
+          reject(new Error(notRespondingMessage));
           return;
         }
         resolve(response);
@@ -37,13 +39,32 @@ function sendToBackground(message: PopupToBackgroundMessage): Promise<MessageRes
 
 async function requestSync(): Promise<void> {
   const response = await sendToBackground({ type: "SYNC_CLOUD_NOW" });
-  if (!response.success) throw new Error(response.error || "Sync failed");
+  if (!response.success) throw new Error(response.error || translate(getActiveLocale(), "extension.errors.syncFailed"));
+}
+
+/**
+ * Maps a caller-supplied, web-app-root-relative path (e.g. "/" or
+ * "/?connect=extension" — see UserMenu.tsx/ProfilePanel.tsx/AiPanel.tsx/
+ * SyncPanel.tsx) onto the app's /app subtree (docs/cloud.md's URL layout:
+ * the product lives at /app/*, "/" is a static landing page that can't
+ * handle any of this). "/app" itself redirects client-side to /app/login or
+ * /app/dashboard as appropriate, so every caller here can keep asking for
+ * the bare root — this just relocates that root under /app while preserving
+ * whatever query string it carried (e.g. "/?connect=extension" ->
+ * "/app?connect=extension", never "/app/?connect=extension").
+ */
+function resolveAppPath(path: string): string {
+  if (path.startsWith("http") || path.startsWith("/app")) return path;
+  if (path.startsWith("/?")) return `/app${path.slice(1)}`;
+  if (path.startsWith("/")) return `/app${path}`;
+  return `/app/${path}`;
 }
 
 /** Opens `path` (default the web app root) in a new tab against the configured cloud API origin. */
 export function openWebApp(path = "/"): void {
   const base = cloudApiUrl().replace(/\/$/, "");
-  const url = path.startsWith("http") ? path : `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+  const appPath = resolveAppPath(path);
+  const url = appPath.startsWith("http") ? appPath : `${base}${appPath}`;
   chrome.tabs.create({ url }).catch((error) => {
     console.error("[Nook] Failed to open the web app:", error);
   });

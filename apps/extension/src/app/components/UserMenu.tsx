@@ -4,6 +4,7 @@ import { Avatar } from "@astryxdesign/core/Avatar";
 import { DropdownMenu, DropdownMenuDivider, DropdownMenuItem } from "@astryxdesign/core/DropdownMenu";
 import { HStack, VStack } from "@astryxdesign/core/Layout";
 import { Text } from "@astryxdesign/core/Text";
+import { useI18n } from "../../i18n";
 import { useNookHost } from "../host/NookHost";
 import { useCloudStatus } from "../host/useCloudStatus";
 
@@ -43,6 +44,7 @@ export interface UserMenuProps {
 export function UserMenu({ onOpenProfile, onOpenSettings }: UserMenuProps) {
   const host = useNookHost();
   const status = useCloudStatus();
+  const { t } = useI18n();
   const [isSignOutConfirmOpen, setIsSignOutConfirmOpen] = useState(false);
 
   const name = host.user?.name;
@@ -63,7 +65,7 @@ export function UserMenu({ onOpenProfile, onOpenSettings }: UserMenuProps) {
     <>
       <DropdownMenu
         button={{
-          label: name || email || "Account",
+          label: name || email || t("dashboard.userMenu.accountFallback"),
           variant: "ghost",
           size: "sm",
           isIconOnly: true,
@@ -84,26 +86,26 @@ export function UserMenu({ onOpenProfile, onOpenSettings }: UserMenuProps) {
             <DropdownMenuDivider />
           </>
         ) : null}
-        <DropdownMenuItem icon={ProfileGlyph} label="Profile" onClick={onOpenProfile} />
-        <DropdownMenuItem icon="wrench" label="Settings" onClick={onOpenSettings} />
+        <DropdownMenuItem icon={ProfileGlyph} label={t("dashboard.userMenu.profile")} onClick={onOpenProfile} />
+        <DropdownMenuItem icon="wrench" label={t("dashboard.userMenu.settings")} onClick={onOpenSettings} />
         <DropdownMenuDivider />
         {host.kind === "web" ? (
           <DropdownMenuItem
             icon={SignOutGlyph}
-            label="Sign out"
+            label={t("dashboard.userMenu.signOut")}
             variant="destructive"
             onClick={requestSignOut}
           />
         ) : host.user ? (
           <DropdownMenuItem
             icon="externalLink"
-            label="Open web app"
+            label={t("dashboard.userMenu.openWebApp")}
             onClick={() => host.openWebApp?.("/")}
           />
         ) : (
           <DropdownMenuItem
             icon="externalLink"
-            label="Sign in to sync"
+            label={t("dashboard.userMenu.signInToSync")}
             onClick={() => host.openWebApp?.("/?connect=extension")}
           />
         )}
@@ -113,13 +115,9 @@ export function UserMenu({ onOpenProfile, onOpenSettings }: UserMenuProps) {
         <AlertDialog
           isOpen={isSignOutConfirmOpen}
           onOpenChange={setIsSignOutConfirmOpen}
-          title="Sign out with unsynced changes?"
-          description={
-            pendingCount === 1
-              ? "1 change hasn't finished syncing yet. Signing out now may leave it unsynced."
-              : `${pendingCount} changes haven't finished syncing yet. Signing out now may leave them unsynced.`
-          }
-          actionLabel="Sign out"
+          title={t("dashboard.userMenu.signOutConfirmTitle")}
+          description={t("dashboard.userMenu.signOutConfirmDescription", { count: pendingCount })}
+          actionLabel={t("dashboard.userMenu.signOut")}
           onAction={() => {
             setIsSignOutConfirmOpen(false);
             signOut();

@@ -9,6 +9,7 @@ import {Link} from '@astryxdesign/core/Link';
 import {Section} from '@astryxdesign/core/Section';
 import {Text} from '@astryxdesign/core/Text';
 import {Timestamp} from '@astryxdesign/core/Timestamp';
+import {useI18n} from '../../i18n';
 import {MediaThumbnail} from './MediaThumbnail';
 import type {Bookmark, Media} from '../../../lib/types';
 
@@ -51,7 +52,8 @@ export const BookmarkCard = memo(function BookmarkCard({
   onList,
   onMedia,
 }: BookmarkCardProps) {
-  const creatorName = item.creator?.name || item.creator?.handle || 'Unknown author';
+  const {t} = useI18n();
+  const creatorName = item.creator?.name || item.creator?.handle || t('dashboard.card.unknownAuthor');
   const postText = getBookmarkText(item);
   const date = getDate(item);
   const mediaItems = getMedia(item);
@@ -83,7 +85,7 @@ export const BookmarkCard = memo(function BookmarkCard({
         {item.note ? (
           <Section className="nook-bookmark-card-section" variant="muted" padding={3}>
             <VStack gap={1}>
-              <Text type="supporting" weight="semibold">Your note</Text>
+              <Text type="supporting" weight="semibold">{t('dashboard.card.yourNote')}</Text>
               <Text type="body">{item.note}</Text>
             </VStack>
           </Section>
@@ -93,7 +95,7 @@ export const BookmarkCard = memo(function BookmarkCard({
           <Section className="nook-bookmark-card-section" variant="muted" padding={3}>
             <VStack gap={2}>
               <Text type="supporting" weight="semibold">
-                {item.quote.creator?.name || item.quote.creator?.handle || 'Quoted post'}
+                {item.quote.creator?.name || item.quote.creator?.handle || t('dashboard.shared.quotedPost')}
               </Text>
               {item.quote.text ? <Text type="body">{item.quote.text}</Text> : null}
               {item.quote.url ? (
@@ -106,7 +108,7 @@ export const BookmarkCard = memo(function BookmarkCard({
                     onOpenUrl(item.quote!.url!, item);
                   } : undefined}
                 >
-                  Open quoted post
+                  {t('dashboard.card.openQuotedPost')}
                 </Link>
               ) : null}
               {item.quote.media?.length ? (
@@ -117,8 +119,8 @@ export const BookmarkCard = memo(function BookmarkCard({
                       mediaType={media.type}
                       isLazy
                       src={media.url}
-                      alt={media.alt || 'Quoted post media ' + (index + 1)}
-                      label={media.alt || 'Quoted post media ' + (index + 1)}
+                      alt={media.alt || t('dashboard.card.quotedPostMedia', {index: index + 1})}
+                      label={media.alt || t('dashboard.card.quotedPostMedia', {index: index + 1})}
                       onClick={onMedia ? () => onMedia(media, item) : undefined}
                     />
                   ))}
@@ -134,7 +136,7 @@ export const BookmarkCard = memo(function BookmarkCard({
               const preview = media as PreviewMedia;
               // Every media type stores a displayable image in `url` (videos: the poster).
               const previewUrl = preview.thumbnailUrl || preview.previewUrl || media.url;
-              const label = media.alt || `${media.type} preview ${index + 1}`;
+              const label = media.alt || t('dashboard.card.mediaPreview', {type: media.type, index: index + 1});
               return (
                 <MediaThumbnail
                   key={`${media.url}-${index}`}
@@ -180,12 +182,12 @@ export const BookmarkCard = memo(function BookmarkCard({
               onOpenUrl(url, item);
             } : undefined}
           >
-            Open source
+            {t('dashboard.card.openSource')}
           </Link>
         ) : null}
-        {onOpenDetails ? <Button label="Details" size="sm" onClick={() => onOpenDetails(item)} /> : null}
-        {onCopy ? <Button label="Copy" variant="ghost" size="sm" icon={<Icon icon="copy" />} onClick={() => onCopy(item)} /> : null}
-        {onDelete ? <Button label="Delete" variant="ghost" size="sm" onClick={() => onDelete(item)} /> : null}
+        {onOpenDetails ? <Button label={t('dashboard.card.details')} size="sm" onClick={() => onOpenDetails(item)} /> : null}
+        {onCopy ? <Button label={t('dashboard.card.copy')} variant="ghost" size="sm" icon={<Icon icon="copy" />} onClick={() => onCopy(item)} /> : null}
+        {onDelete ? <Button label={t('dashboard.shared.delete')} variant="ghost" size="sm" onClick={() => onDelete(item)} /> : null}
       </HStack>
     </Card>
   );

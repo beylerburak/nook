@@ -7,6 +7,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { useToast } from "@astryxdesign/core/Toast";
+import { useI18n } from "../../i18n";
 import { useNookHost } from "../host/NookHost";
 import { SettingsCard, SettingsRow } from "./settings-shared";
 
@@ -19,6 +20,7 @@ import { SettingsCard, SettingsRow } from "./settings-shared";
 export function ProfilePanel() {
   const host = useNookHost();
   const toast = useToast();
+  const { t } = useI18n();
   const user = host.user;
   const [name, setName] = useState(user?.name ?? "");
   const [isSaving, setIsSaving] = useState(false);
@@ -34,10 +36,10 @@ export function ProfilePanel() {
     setIsSaving(true);
     try {
       await host.account.updateProfile({ name: trimmedName });
-      toast({ body: "Profile updated." });
+      toast({ body: t("settings.profile.updatedToast") });
     } catch (error) {
       console.error("[Nook] Failed to update profile:", error);
-      toast({ body: "Could not update your profile.", type: "error" });
+      toast({ body: t("settings.profile.updateError"), type: "error" });
     } finally {
       setIsSaving(false);
     }
@@ -57,16 +59,23 @@ export function ProfilePanel() {
         </HStack>
       </SettingsCard>
 
-      <SettingsCard title="Basics">
+      <SettingsCard title={t("settings.profile.basicsTitle")}>
         <SettingsRow
-          title="Name"
-          description={isEditable ? "Shown across Nook." : undefined}
+          title={t("settings.profile.nameLabel")}
+          description={isEditable ? t("settings.profile.nameShownDescription") : undefined}
           control={
             isEditable ? (
               <HStack gap={2}>
-                <TextInput label="Name" isLabelHidden value={name} onChange={setName} onEnter={() => void saveName()} width={200} />
+                <TextInput
+                  label={t("settings.profile.nameLabel")}
+                  isLabelHidden
+                  value={name}
+                  onChange={setName}
+                  onEnter={() => void saveName()}
+                  width={200}
+                />
                 <Button
-                  label="Save"
+                  label={t("common.save")}
                   variant="secondary"
                   size="sm"
                   isLoading={isSaving}
@@ -79,12 +88,16 @@ export function ProfilePanel() {
             )
           }
         />
-        <SettingsRow title="Email" description="Read-only." control={<Text color="secondary">{user.email}</Text>} />
+        <SettingsRow
+          title={t("settings.profile.emailLabel")}
+          description={t("settings.profile.emailReadOnlyDescription")}
+          control={<Text color="secondary">{user.email}</Text>}
+        />
       </SettingsCard>
 
       {user.createdAt ? (
-        <MetadataList title="Details">
-          <MetadataListItem label="Member since">
+        <MetadataList title={t("settings.profile.detailsTitle")}>
+          <MetadataListItem label={t("settings.profile.memberSinceLabel")}>
             <Timestamp value={user.createdAt} format="date" />
           </MetadataListItem>
         </MetadataList>
@@ -92,7 +105,7 @@ export function ProfilePanel() {
 
       {!isEditable && host.openWebApp ? (
         <HStack justify="end">
-          <Button label="Manage account on the web" variant="secondary" onClick={() => host.openWebApp?.("/")} />
+          <Button label={t("settings.profile.manageOnWeb")} variant="secondary" onClick={() => host.openWebApp?.("/")} />
         </HStack>
       ) : null}
     </VStack>

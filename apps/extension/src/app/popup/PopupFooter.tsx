@@ -3,6 +3,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { HStack, VStack } from "@astryxdesign/core/Layout";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
+import { useI18n } from "../../i18n";
 
 export interface PopupFooterProps {
   onSearch: (query: string) => void;
@@ -15,6 +16,7 @@ export interface PopupFooterProps {
 
 /** Search-your-Nook box plus the secondary actions (sync, open dashboard). */
 export function PopupFooter({ onSearch, onSync, isSyncing, onOpenDashboard, saveShortcut }: PopupFooterProps) {
+  const { t } = useI18n();
   const [query, setQuery] = useState("");
 
   const submitSearch = () => {
@@ -25,11 +27,11 @@ export function PopupFooter({ onSearch, onSync, isSyncing, onOpenDashboard, save
   return (
     <VStack gap={2}>
       <TextInput
-        label="Search your Nook"
+        label={t("popup.footer.searchLabel")}
         isLabelHidden
         size="sm"
         startIcon="search"
-        placeholder="Search your Nook…"
+        placeholder={t("popup.footer.searchPlaceholder")}
         value={query}
         onChange={setQuery}
         onEnter={submitSearch}
@@ -37,11 +39,11 @@ export function PopupFooter({ onSearch, onSync, isSyncing, onOpenDashboard, save
       />
       <HStack justify="between" align="center" gap={2} wrap="wrap">
         <HStack gap={2}>
-          <Button label="Sync X bookmarks" size="sm" variant="secondary" isLoading={isSyncing} onClick={onSync} />
-          <Button label="Open dashboard" size="sm" variant="ghost" onClick={onOpenDashboard} />
+          <Button label={t("popup.footer.syncButton")} size="sm" variant="secondary" isLoading={isSyncing} onClick={onSync} />
+          <Button label={t("popup.footer.openDashboard")} size="sm" variant="ghost" onClick={onOpenDashboard} />
         </HStack>
         {saveShortcut ? (
-          <Text type="supporting" color="secondary">Save: {saveShortcut}</Text>
+          <Text type="supporting" color="secondary">{t("popup.footer.saveShortcutHint", { shortcut: saveShortcut })}</Text>
         ) : null}
       </HStack>
     </VStack>

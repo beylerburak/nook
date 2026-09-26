@@ -7,9 +7,11 @@
  */
 
 import * as NookDB from "../../lib/db";
+import { loadLocaleSetting } from "../../lib/locale";
 import { buildPageBookmarkItem, extractPageMetadataInTab, fetchPageMetadata, mergeCapturedContent, type PageMetadata } from "../../lib/page-capture";
 import { sendBookmarkToast } from "../../lib/toast";
 import type { Bookmark, Media } from "../../lib/types";
+import { resolveLocale, translate } from "../../src/i18n/core";
 import { classifyUnsavableUrl } from "./page-access";
 import { refreshBadgeForTab } from "./badge";
 
@@ -75,10 +77,11 @@ export async function savePage(options: SavePageOptions): Promise<SavePageResult
 
   if (options.toastTabId !== undefined) {
     const siteName = bookmark.creator?.name || bookmark.title;
+    const locale = resolveLocale(await loadLocaleSetting());
     const toastMessage =
       bookmark.media && bookmark.media.length > 0
-        ? `Nook: Saved "${siteName}" with image ✓`
-        : `Nook: Saved "${siteName}" to bookmarks ✓`;
+        ? translate(locale, "extension.toast.pageSavedWithImage", { site: siteName })
+        : translate(locale, "extension.toast.pageSavedToBookmarks", { site: siteName });
     sendBookmarkToast(options.toastTabId, {
       type: "SHOW_BOOKMARK_TOAST",
       message: toastMessage,

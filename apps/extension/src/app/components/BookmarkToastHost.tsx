@@ -5,8 +5,22 @@ import { nookTheme } from "../theme/nook.js";
 import type { MessageResponse, ShowBookmarkToastMessage } from "../../../lib/types";
 import { notifyBookmarkToastReady, type BookmarkToastAck } from "../../../lib/toast";
 import { detectSiteColorScheme, watchSiteColorScheme, type SiteColorScheme } from "../../../lib/site-color-scheme";
+import { readCachedLocaleSetting } from "../../../lib/locale";
+import { resolveLocale, translate } from "../../i18n/core";
 import { BookmarkSavedToast } from "./BookmarkSavedToast";
 import { useAppearance } from "./useAppearance";
+
+/**
+ * This component tree is mounted by a content script (see
+ * entrypoints/bookmark-toast.content.tsx), a different bundle/context from
+ * the extension pages — no `<I18nProvider>` runs here, and `saveBookmarkNote`
+ * below isn't a component at all, so it can't call `useI18n()`. Per
+ * docs/i18n.md's "Non-React usage" section, read the cached locale setting
+ * and translate directly instead.
+ */
+function currentLocale() {
+  return resolveLocale(readCachedLocaleSetting());
+}
 
 function isBookmarkToastMessage(message: unknown): message is ShowBookmarkToastMessage {
   return Boolean(
@@ -27,7 +41,7 @@ async function saveBookmarkNote(id: string, note: string) {
   })) as MessageResponse | undefined;
 
   if (!response?.success) {
-    throw new Error(response?.error || "Could not save this note.");
+    throw new Error(response?.error || translate(currentLocale(), "dashboard.savedToast.couldNotSaveNote"));
   }
 }
 

@@ -7,6 +7,7 @@ import { HStack, VStack } from "@astryxdesign/core/Layout";
 import { Skeleton } from "@astryxdesign/core/Skeleton";
 import { StatusDot } from "@astryxdesign/core/StatusDot";
 import { Text } from "@astryxdesign/core/Text";
+import { useI18n } from "../../i18n";
 import type { ActivePageState, PageUnsavableReason } from "../../../lib/types";
 import type { ActivePagePhase } from "./useActivePage";
 
@@ -24,9 +25,9 @@ export interface PageCardProps {
   onOpenInDashboard: (bookmarkId: string) => void;
 }
 
-function unsavableMessage(reason: PageUnsavableReason): string {
-  if (reason === "restricted") return "Nook can't save browser-internal pages.";
-  return "No page is open in this tab.";
+function unsavableMessage(t: ReturnType<typeof useI18n>["t"], reason: PageUnsavableReason): string {
+  if (reason === "restricted") return t("popup.page.restrictedMessage");
+  return t("popup.page.noPageMessage");
 }
 
 /** The compact loading placeholder, matching the shape of the loaded card. */
@@ -63,6 +64,8 @@ export function PageCard({
   onRetry,
   onOpenInDashboard,
 }: PageCardProps) {
+  const { t } = useI18n();
+
   if (phase === "loading" || !state) {
     return <PageCardSkeleton />;
   }
@@ -71,26 +74,26 @@ export function PageCard({
     return (
       <Card padding={3} variant="muted">
         <VStack gap={3}>
-          <Text color="secondary">{errorMessage || "Could not load this page."}</Text>
-          <Button label="Retry" size="sm" variant="secondary" onClick={onRetry} />
+          <Text color="secondary">{errorMessage || t("popup.page.loadError")}</Text>
+          <Button label={t("popup.page.retry")} size="sm" variant="secondary" onClick={onRetry} />
         </VStack>
       </Card>
     );
   }
 
   if (state.kind === "unsavable") {
-    const message = unsavableMessage(state.reason);
+    const message = unsavableMessage(t, state.reason);
     return (
       <Card padding={3}>
         <VStack gap={3}>
           <HStack gap={3} align="center">
             <Avatar name="Nook" size="sm" shape="rounded" tooltip={false} />
             <VStack gap={0}>
-              <Text weight="semibold">Can't save this page</Text>
+              <Text weight="semibold">{t("popup.page.unsavableTitle")}</Text>
               <Text type="supporting" color="secondary">{message}</Text>
             </VStack>
           </HStack>
-          <Button label="Save to Nook" variant="primary" width="100%" isDisabled tooltip={message} />
+          <Button label={t("popup.page.saveButton")} variant="primary" width="100%" isDisabled tooltip={message} />
         </VStack>
       </Card>
     );
@@ -98,7 +101,7 @@ export function PageCard({
 
   const { title, hostname, favIconUrl, isXPost, bookmark } = state;
   const isSaved = Boolean(bookmark);
-  const saveTooltip = saveShortcut ? `Save to Nook (${saveShortcut})` : undefined;
+  const saveTooltip = saveShortcut ? t("popup.page.saveWithShortcut", { shortcut: saveShortcut }) : undefined;
 
   return (
     <Card padding={3}>
@@ -114,25 +117,25 @@ export function PageCard({
         {isSaved ? (
           <HStack justify="between" align="center" gap={2}>
             <HStack gap={2} align="center">
-              <StatusDot variant="success" label="Saved" />
-              <Text type="supporting" weight="semibold">Saved to Nook</Text>
+              <StatusDot variant="success" label={t("popup.page.savedBadge")} />
+              <Text type="supporting" weight="semibold">{t("popup.page.savedToNook")}</Text>
             </HStack>
             <HStack gap={1} align="center">
               <IconButton
-                label="Open in Nook"
+                label={t("popup.page.openInNook")}
                 variant="ghost"
                 size="sm"
                 icon={<Icon icon="externalLink" size="sm" />}
-                tooltip="Open in Nook"
+                tooltip={t("popup.page.openInNook")}
                 onClick={() => onOpenInDashboard(bookmark!.id)}
               />
-              <Button label="Remove" size="sm" variant="ghost" isLoading={isRemoving} onClick={onRemove} />
+              <Button label={t("popup.page.remove")} size="sm" variant="ghost" isLoading={isRemoving} onClick={onRemove} />
             </HStack>
           </HStack>
         ) : (
           <VStack gap={1}>
             <Button
-              label="Save to Nook"
+              label={t("popup.page.saveButton")}
               variant="primary"
               width="100%"
               isLoading={isSaving}
@@ -140,7 +143,7 @@ export function PageCard({
               tooltip={saveTooltip}
             />
             {isXPost ? (
-              <Text type="supporting" color="secondary">Saved as a post, like the Nook button on X.</Text>
+              <Text type="supporting" color="secondary">{t("popup.page.savedAsPostHint")}</Text>
             ) : null}
           </VStack>
         )}

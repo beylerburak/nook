@@ -6,6 +6,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { Theme } from "@astryxdesign/core/theme";
 import { DashboardApp } from "../../extension/src/app/dashboard/DashboardApp";
 import { NookHostProvider, type NookUser } from "../../extension/src/app/host/NookHost";
+import { useI18n } from "../../extension/src/i18n";
 import {
   bindCloudAccount,
   configureCloud,
@@ -21,6 +22,7 @@ import { AuthScreen } from "./auth/AuthScreen";
 import { authClient, type AuthUser } from "./auth/authClient";
 import { disconnectExtension } from "./host/extensionBridge";
 import { useWebHost } from "./host/useWebHost";
+import { navigate, useRoute } from "./router";
 
 // Must run before any other cloud/NookDB call anywhere in the app —
 // module-level, so it executes on import, ahead of React rendering.
@@ -85,7 +87,66 @@ type BootState =
   | { kind: "signed-out" }
   | { kind: "signed-in"; user: NookUser };
 
+type RouteResolution =
+  | { kind: "redirect"; to: string }
+  | { kind: "login" }
+  | { kind: "dashboard" };
+
+/**
+ * The whole /app/* route table (URL layout note in docs/cloud.md):
+ *   /app             -> /app/dashboard (signed in) or /app/login (signed out)
+ *   /app/login       -> AuthScreen; if already signed in, bounce onward (see below)
+ *   /app/dashboard   -> DashboardApp; if signed out, bounce to /app/login?next=...
+ *   anything else    -> /app/dashboard
+ *
+ * Pure and side-effect-free so both the render path (what to show *now*,
+ * before the effect below has a chance to run) and that effect (which
+ * performs the actual navigation) agree on the same decision. `pathname` is
+ * always under /app — see app/index.html + the dev/build routing that only
+ * ever loads this module there.
+ */
+function resolveAppRoute(pathname: string, search: string, signedIn: boolean): RouteResolution {
+  const isRoot = pathname === "/app" || pathname === "/app/";
+  const isLogin = pathname === "/app/login";
+  const isDashboard = pathname === "/app/dashboard" || pathname.startsWith("/app/dashboard/");
+
+  if (isRoot) {
+    return { kind: "redirect", to: (signedIn ? "/app/dashboard" : "/app/login") + search };
+  }
+
+  if (isLogin) {
+    if (!signedIn) return { kind: "login" };
+    // No explicit `next` (e.g. a direct /app/login?connect=extension visit,
+    // or one just signed in) -> /app/dashboard, carrying over any other
+    // query params (like ?connect=extension) unchanged.
+    // `next` is attacker-controllable (it's in a link), so only an in-app
+    // path is honoured — never "//host", a full URL, or the landing page.
+    const params = new URLSearchParams(search);
+    const next = params.get("next");
+    if (next !== null && next.startsWith("/app/")) return { kind: "redirect", to: next };
+    params.delete("next");
+    const rest = params.toString();
+    return { kind: "redirect", to: `/app/dashboard${rest ? `?${rest}` : ""}` };
+  }
+
+  if (isDashboard) {
+    if (!signedIn) {
+      return { kind: "redirect", to: `/app/login?next=${encodeURIComponent(pathname + search)}` };
+    }
+    // Only /app/dashboard itself is built today. A future nested route
+    // (e.g. /app/dashboard/collections/:id) still round-trips correctly
+    // through /app/login above once signed out — it just lands back here
+    // instead of on a page that doesn't exist yet.
+    if (pathname !== "/app/dashboard") return { kind: "redirect", to: "/app/dashboard" };
+    return { kind: "dashboard" };
+  }
+
+  // Unknown /app/* path.
+  return { kind: "redirect", to: `/app/dashboard${search}` };
+}
+
 export function App() {
+  const { t } = useI18n();
   const [state, setState] = useState<BootState>({ kind: "loading" });
   const runnerRef = useRef<AutoSyncHandle | null>(null);
   // Guards every transition that leaves the "signed-in" state (explicit
@@ -214,22 +275,64 @@ export function App() {
     });
   }, [state.kind, returnToSignInAfterExpiry]);
 
+  // Route dispatch (resolveAppRoute above): runs once the boot sequence
+  // knows whether we're signed in, and again on every navigation (back/
+  // forward, `navigate()` elsewhere, or a signed-in/signed-out transition
+  // above changing what the *same* URL should resolve to — e.g. landing on
+  // /app/dashboard just as a session expires). A "redirect" resolution is
+  // acted on here; the render below mirrors the same decision so nothing
+  // wrong flashes on screen while this effect is still pending.
+  const route = useRoute();
+  useEffect(() => {
+    if (state.kind === "loading") return;
+    const resolution = resolveAppRoute(route.pathname, route.search, state.kind === "signed-in");
+    if (resolution.kind === "redirect") navigate(resolution.to, { replace: true });
+  }, [state.kind, route.pathname, route.search]);
+
+  // Keeps the tab title in the user's chosen language (docs/i18n.md's
+  // `<I18nProvider>` already keeps `document.documentElement.lang` in sync;
+  // `document.title` isn't something React itself owns, so it needs its own
+  // effect here).
+  useEffect(() => {
+    document.title = t("web.meta.title");
+  }, [t]);
+
   if (state.kind === "loading") {
     return (
       <Theme theme={nookTheme} mode="system">
         <Center axis="both" minHeight="100vh">
-          <Text color="secondary">Loading Nook…</Text>
+          <Text color="secondary">{t("web.boot.loading")}</Text>
         </Center>
       </Theme>
     );
   }
 
-  if (state.kind === "signed-out") {
+  const resolution = resolveAppRoute(route.pathname, route.search, state.kind === "signed-in");
+
+  if (resolution.kind === "redirect") {
+    // The effect above performs the actual navigate(); this is just the
+    // brief in-between frame.
+    return (
+      <Theme theme={nookTheme} mode="system">
+        <Center axis="both" minHeight="100vh">
+          <Text color="secondary">{t("web.boot.loading")}</Text>
+        </Center>
+      </Theme>
+    );
+  }
+
+  if (resolution.kind === "login") {
     return (
       <Theme theme={nookTheme} mode="system">
         <AuthScreen onSignedIn={(user) => enterDashboard(toProfile(user), toNookUser(user))} />
       </Theme>
     );
+  }
+
+  if (state.kind !== "signed-in") {
+    // resolveAppRoute only ever returns "dashboard" when signedIn is true —
+    // unreachable in practice, this just keeps state.user's type honest.
+    return null;
   }
 
   return (
@@ -253,6 +356,7 @@ function SignedInApp({
   signOut: () => Promise<void>;
   cleanupAfterAccountDeleted: () => Promise<void>;
 }) {
+  const { t } = useI18n();
   const host = useWebHost({ user, requestSync, signOut, cleanupAfterAccountDeleted });
   const [confirmation, setConfirmation] = useState<{ status: "success" | "error"; message: string } | null>(null);
 
@@ -266,12 +370,12 @@ function SignedInApp({
     void (async () => {
       try {
         await host.extensionLink?.connect();
-        if (!cancelled) setConfirmation({ status: "success", message: "Nook extension connected to this account." });
+        if (!cancelled) setConfirmation({ status: "success", message: t("web.extension.connected") });
       } catch (error) {
         if (!cancelled) {
           setConfirmation({
             status: "error",
-            message: error instanceof Error ? error.message : "Could not connect the extension.",
+            message: error instanceof Error ? error.message : t("web.extension.connectFailed"),
           });
         }
       } finally {

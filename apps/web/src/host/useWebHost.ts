@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { NookHost, NookSessionInfo, NookUser } from "../../../extension/src/app/host/NookHost";
+import { getActiveLocale, translate } from "../../../extension/src/i18n";
 import packageJson from "../../package.json";
 import { authClient } from "../auth/authClient";
 import { useExtensionLink } from "./useExtensionLink";
@@ -11,7 +12,7 @@ interface BetterFetchResult<T> {
 
 async function unwrap<T>(call: Promise<BetterFetchResult<T>>): Promise<T> {
   const { data, error } = await call;
-  if (error) throw new Error(error.message || "The request failed.");
+  if (error) throw new Error(error.message || translate(getActiveLocale(), "web.auth.requestFailed"));
   return data as T;
 }
 

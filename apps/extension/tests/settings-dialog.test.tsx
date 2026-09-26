@@ -6,6 +6,7 @@ import { ToastViewport } from "@astryxdesign/core/Toast";
 import { NookHostProvider, useNookHost, type NookHost, type NookSessionInfo } from "../src/app/host/NookHost";
 import { SettingsDialog } from "../src/app/settings-dialog/SettingsDialog";
 import type { CloudStatus } from "../lib/cloud-sync";
+import { LOCALE_STORAGE_KEY } from "../lib/locale";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -75,11 +76,26 @@ function fakeLibrary(overrides: Partial<Parameters<typeof SettingsDialog>[0]["li
   };
 }
 
+// Node ships its own global localStorage that shadows happy-dom's (see
+// tests/appearance.test.ts, tests/i18n.test.ts) — stub a plain in-memory one
+// so the couple of tests below that switch the locale via LOCALE_STORAGE_KEY
+// can actually read/write it.
+function stubLocalStorage() {
+  const store = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => void store.set(key, String(value)),
+    removeItem: (key: string) => void store.delete(key),
+    clear: () => store.clear(),
+  });
+}
+
 let container: HTMLElement;
 let root: Root;
 
 beforeEach(() => {
   cloudStatus = fakeStatus();
+  stubLocalStorage();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -223,6 +239,21 @@ describe("SettingsDialog — About panel", () => {
   });
 });
 
+describe("SettingsDialog — side nav width", () => {
+  it("wraps the side nav in a non-shrinking StackItem, not a bare flex child", () => {
+    // happy-dom does no layout, so the truncation itself ("P..", "A..") can't
+    // be measured here — this is the structural guard: a bare `SideNav` is a
+    // plain flex child of the desktop branch's `HStack` and gets the
+    // browser's default flex-shrink, which is what let AiPanel's wide rows
+    // squeeze it down. `StackItem size="static"` sets flex-shrink: 0 (see
+    // SettingsDialog.tsx), and renders `data-size="static"` on the wrapper.
+    renderDialog(webHost());
+    const nav = container.querySelector('nav[aria-label="Settings sections"]');
+    expect(nav).not.toBeNull();
+    expect(nav!.parentElement?.getAttribute("data-size")).toBe("static");
+  });
+});
+
 describe("SettingsDialog — Active sessions", () => {
   function sessionsHost(sessions: NookSessionInfo[]) {
     const host = webHost();
@@ -265,5 +296,28 @@ describe("SettingsDialog — Active sessions", () => {
     expect(hasText("172.29.0.1")).toBe(false);
     expect(hasText("8.8.8.8")).toBe(true);
     expect(container.querySelector('[aria-label=\'Sign out "Safari on iOS"\']')).not.toBeNull();
+  });
+});
+
+describe("SettingsDialog — Turkish locale", () => {
+  it("renders section labels and panel copy in Turkish when the locale setting is 'tr'", () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "tr");
+    renderDialog(webHost());
+
+    for (const label of ["Profil", "Hesap ve güvenlik", "Görünüm", "Senkronizasyon", "Veri", "Hakkında"]) {
+      expect(hasText(label)).toBe(true);
+    }
+
+    clickText("Hakkında");
+    expect(hasText("Önemli olanı kaydet.")).toBe(true);
+  });
+
+  it("still defaults to English when navigator.language / the cached setting resolve to 'en'", () => {
+    // No LOCALE_STORAGE_KEY set — readCachedLocaleSetting() falls through to
+    // "system", and resolveLocale("system") falls through to
+    // navigator.language, which happy-dom reports as an English locale.
+    renderDialog(webHost());
+    expect(hasText("Settings")).toBe(true);
+    expect(hasText("Account & security")).toBe(true);
   });
 });

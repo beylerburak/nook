@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Layout, LayoutContent, LayoutPanel } from "@astryxdesign/core/Layout";
 import { ResizeHandle, useResizable } from "@astryxdesign/core/Resizable";
+import { useI18n } from "../../i18n";
 
 /**
  * Reusable Nook application frame. AppShell owns Nook navigation; the nested
@@ -21,8 +22,10 @@ export function CanvasEditorShell({
   sideNav,
   children,
   inspector,
-  inspectorLabel = "Bookmark details",
+  inspectorLabel,
 }: CanvasEditorShellProps) {
+  const { t } = useI18n();
+  const resolvedInspectorLabel = inspectorLabel ?? t("dashboard.canvasEditor.defaultInspectorLabel");
   const inspectorSize = useResizable({
     defaultSize: 288,
     minSize: 264,
@@ -51,7 +54,7 @@ export function CanvasEditorShell({
               isReversed
               isAlwaysVisible={false}
               pillPlacement="center"
-              label="Resize bookmark details panel"
+              label={t("dashboard.canvasEditor.resizeHandleLabel")}
             />
             <LayoutPanel
               className="nook-inspector-panel"
@@ -59,7 +62,7 @@ export function CanvasEditorShell({
               hasDivider
               padding={4}
               isScrollable
-              label={inspectorLabel}
+              label={resolvedInspectorLabel}
             >
               {inspector}
             </LayoutPanel>

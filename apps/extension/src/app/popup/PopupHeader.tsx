@@ -11,6 +11,7 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { HStack } from "@astryxdesign/core/Layout";
 import { Text } from "@astryxdesign/core/Text";
 import type { ThemeMode } from "@astryxdesign/core/theme";
+import { useI18n } from "../../i18n";
 
 export interface PopupHeaderProps {
   totalCount: number;
@@ -30,6 +31,8 @@ export interface PopupHeaderProps {
  * the radio-group markup, not the AppearanceMenu component instance.
  */
 export function PopupHeader({ totalCount, appearanceMode, onAppearanceChange, onOpenDashboard }: PopupHeaderProps) {
+  const { t } = useI18n();
+
   return (
     <HStack justify="between" align="center" gap={2}>
       <HStack align="center" gap={2}>
@@ -38,7 +41,7 @@ export function PopupHeader({ totalCount, appearanceMode, onAppearanceChange, on
       </HStack>
       <DropdownMenu
         button={{
-          label: "More options",
+          label: t("popup.header.moreOptions"),
           variant: "ghost",
           size: "sm",
           isIconOnly: true,
@@ -47,19 +50,19 @@ export function PopupHeader({ totalCount, appearanceMode, onAppearanceChange, on
         hasChevron={false}
         alignment="end"
       >
-        <DropdownMenuSubMenu label="Appearance">
+        <DropdownMenuSubMenu label={t("popup.header.appearance")}>
           <DropdownMenuRadioGroup
-            label="Appearance"
+            label={t("popup.header.appearance")}
             value={appearanceMode}
             onChange={(value) => onAppearanceChange(value as ThemeMode)}
           >
-            <DropdownMenuRadioItem value="system" label="System" />
-            <DropdownMenuRadioItem value="light" label="Light" />
-            <DropdownMenuRadioItem value="dark" label="Dark" />
+            <DropdownMenuRadioItem value="system" label={t("common.system")} />
+            <DropdownMenuRadioItem value="light" label={t("settings.appearance.modeLight")} />
+            <DropdownMenuRadioItem value="dark" label={t("settings.appearance.modeDark")} />
           </DropdownMenuRadioGroup>
         </DropdownMenuSubMenu>
         <DropdownMenuDivider />
-        <DropdownMenuItem label="Open dashboard" icon="externalLink" onClick={onOpenDashboard} />
+        <DropdownMenuItem label={t("popup.header.openDashboard")} icon="externalLink" onClick={onOpenDashboard} />
       </DropdownMenu>
     </HStack>
   );

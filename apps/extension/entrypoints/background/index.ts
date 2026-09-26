@@ -12,7 +12,9 @@ import {
   syncCloud,
 } from "../../lib/cloud-sync";
 import { fetchBridgeSessionProfile, handleBridgeMessage, type ExtensionBridgeDeps } from "../../lib/extension-bridge";
+import { loadLocaleSetting, subscribeToLocaleSetting } from "../../lib/locale";
 import { initBookmarkToastDelivery, sendBookmarkToast } from "../../lib/toast";
+import { resolveLocale, translate } from "../../src/i18n/core";
 import type {
   ActivePageStateResponse,
   BookmarkPatch,
@@ -193,6 +195,13 @@ chrome.runtime.onMessageExternal.addListener((message: unknown, sender, sendResp
 // leave a stale (or missing) badge after the service worker wakes up fresh.
 refreshBadgeForActiveTab().catch(() => {});
 
+// The context menu titles are created once in the locale active at that
+// time — re-create them whenever the user changes the language setting so
+// "Save page to Nook" etc. don't stay stuck in the old language.
+subscribeToLocaleSetting(() => {
+  void registerContextMenus();
+});
+
 // Cached X Bookmarks GraphQL queryId (captured from network by inject.js)
 let _cachedBookmarkQueryId: string | null = null;
 
@@ -339,7 +348,7 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, sender, sendRe
       try {
         const item = message.item;
         if (!item || !item.id) {
-          sendResponse({ success: false, error: "Invalid item" });
+          sendResponse({ success: false, error: translate(resolveLocale(await loadLocaleSetting()), "extension.errors.invalidItem") });
           return;
         }
 
@@ -375,7 +384,7 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage, sender, sendRe
       try {
         const item = message.item;
         if (!item?.id || !item.url) {
-          sendResponse({ success: false, error: "Invalid item" });
+          sendResponse({ success: false, error: translate(resolveLocale(await loadLocaleSetting()), "extension.errors.invalidItem") });
           return;
         }
         const existing = await NookDB.getBookmark(item.id);
@@ -573,7 +582,7 @@ chrome.runtime.onInstalled.addListener(() => {
     console.error("[Nook Background] NookDB.ready() failed:", err);
   });
 
-  registerContextMenus();
+  void registerContextMenus();
 
   chrome.tabs.query({ url: ["*://x.com/*", "*://twitter.com/*"] }, (tabs) => {
     for (const tab of tabs) {

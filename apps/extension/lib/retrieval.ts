@@ -6,7 +6,9 @@
  * one substring match per bookmark over text the client already holds; the server
  * pass is a lexical + cosine fusion over an index the client cannot see. The
  * local pass runs on every keystroke and is what the library renders; the server
- * pass is debounced, authorised with the same cloud session sync uses, and
+ * pass is debounced, authorised with `cloudRequestAuth()` — a bearer token in
+ * the extension, the browser's own cookie on the web, exactly like every other
+ * authenticated Nook route (lib/ai-client.ts, lib/ai-settings.ts) — and
  * *replaces* the visible set when — and only when — it comes back with ids.
  *
  * Nothing on the server path is allowed to empty the view. A signed-out browser,
@@ -20,7 +22,7 @@
  * test with no network.
  */
 
-import { cloudApiUrl, cloudSession } from "./cloud-sync";
+import { cloudApiUrl, cloudRequestAuth, type RequestAuth } from "./cloud-sync";
 import type { Bookmark } from "./types";
 
 // -- configuration ----------------------------------------------------------
@@ -128,8 +130,13 @@ export type SearchFetch = (input: string, init: RequestInit) => Promise<Response
 export interface SearchDeps {
   /** Defaults to the global fetch. */
   fetch?: SearchFetch;
-  /** Defaults to cloudSession() — the same token and owner syncCloud() gates on. */
-  session?: () => Promise<{ token: string; ownerId: string } | null>;
+  /**
+   * Defaults to cloudRequestAuth() — bearer in the extension, cookie on the
+   * web, `null` when signed out. Mirrors the seam lib/ai-client.ts and
+   * lib/ai-settings.ts use for every other authenticated Nook route, so this
+   * one works on both hosts the same way theirs do.
+   */
+  session?: () => Promise<RequestAuth | null>;
   /** Defaults to cloudApiUrl(). */
   apiUrl?: string;
   /** Defaults to the same navigator predicate cloud-sync builds `offline` on. */
@@ -446,12 +453,12 @@ function requestBody(query: string, limit: number, filters: SearchFilters | unde
  * A 401 is terminal for the session and a 400 is a client bug; both are logged
  * once and never retried, because retrying either would either hammer a server
  * that will keep refusing or paper over a bug that only a fix can close. Search
- * does not clear the stored token on a 401 the way `syncCloud` does — teardown of
- * a session belongs to the one subsystem that owns it, and search runs on every
- * pause in typing.
+ * does not clear the stored token/cookie-bound account on a 401 the way
+ * `syncCloud` does — teardown of a session belongs to the one subsystem that
+ * owns it, and search runs on every pause in typing.
  */
 export async function searchLibrary(query: string, deps: SearchDeps = {}): Promise<SearchOutcome> {
-  const readSession = deps.session ?? cloudSession;
+  const readSession = deps.session ?? cloudRequestAuth;
   const apiUrl = (deps.apiUrl ?? cloudApiUrl()).replace(/\/$/, "");
   const doFetch: SearchFetch = deps.fetch ?? ((input, init) => fetch(input, init));
   const isOffline = deps.isOffline ?? navigatorIsOffline;
@@ -461,19 +468,19 @@ export async function searchLibrary(query: string, deps: SearchDeps = {}): Promi
   const trimmed = query.trim();
   if (!shouldUseServerSearch(trimmed)) return localOutcome("local-query");
 
-  // No session means the route is unreachable, so no request is made at all —
+  // No auth means the route is unreachable, so no request is made at all —
   // not one that would come back 401 for a signed-out user typing in a search box.
-  // Reading the session can itself fail (IndexedDB), and a thrown promise from a
+  // Reading the auth can itself fail (IndexedDB), and a thrown promise from a
   // live-updating input is not a state any caller can render, so it degrades to
   // the same quiet "no server results" as every other failure here.
-  let session: { token: string; ownerId: string } | null = null;
+  let auth: RequestAuth | null = null;
   try {
-    session = await readSession();
+    auth = await readSession();
   } catch (error) {
     console.warn(`[Nook] Could not read the cloud session: ${errorMessage(error)}`);
     return localOutcome("failed");
   }
-  if (!session) return localOutcome("signed-out");
+  if (!auth) return localOutcome("signed-out");
 
   // Learned from a previous answer, not from a guess: a server with no index
   // would answer the same thing for every pause in typing for as long as it has
@@ -487,11 +494,14 @@ export async function searchLibrary(query: string, deps: SearchDeps = {}): Promi
 
   let response: Response;
   try {
-    response = await doFetch(`${apiUrl}/api/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.token}` },
-      body: requestBody(trimmed, limit, deps.filters),
-    });
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const init: RequestInit = { method: "POST", headers, body: requestBody(trimmed, limit, deps.filters) };
+    // Bearer in the extension, cookie on the web — the same branch
+    // lib/ai-client.ts's callRoute and lib/ai-settings.ts's buildRequestInit
+    // take for every other authenticated Nook route.
+    if (auth.mode === "bearer") headers.Authorization = `Bearer ${auth.token}`;
+    else init.credentials = "include";
+    response = await doFetch(`${apiUrl}/api/search`, init);
   } catch (error) {
     // What cloud-sync calls a network error: no HTTP reply at all. The local pass
     // is the answer, and connectivity is the sync indicator's story to tell.

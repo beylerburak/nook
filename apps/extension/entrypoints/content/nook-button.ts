@@ -1,4 +1,6 @@
+import { translate } from "../../src/i18n/core";
 import type { Bookmark } from "../../lib/types";
+import { getContentLocale } from "./locale-state";
 import type { SendNookMessage } from "./messaging";
 import type { Notify } from "./notify";
 
@@ -28,10 +30,11 @@ export function installNookHoverStyles(doc: Document = document): void {
   (doc.head || doc.documentElement).appendChild(style);
 }
 
-export function renderNookButton(button: HTMLElement, saved: boolean): void {
-  button.setAttribute("aria-label", saved ? "Saved to Nook" : "Save to Nook");
+export function renderNookButton(button: HTMLElement, saved: boolean, locale = getContentLocale()): void {
+  const label = translate(locale, saved ? "extension.xButton.saved" : "extension.xButton.save");
+  button.setAttribute("aria-label", label);
   button.setAttribute("aria-pressed", String(saved));
-  button.title = saved ? "Saved to Nook" : "Save to Nook";
+  button.title = label;
   const icon = button.querySelector("svg");
   if (icon) {
     icon.setAttribute("viewBox", "0 0 24 24");
@@ -221,7 +224,7 @@ export function createNookButtonController(deps: NookButtonControllerDeps): Nook
         event.preventDefault();
         event.stopImmediatePropagation();
         if (!deps.isExtensionValid()) {
-          deps.notify("Nook was updated. Please refresh the page (F5) 🔄");
+          deps.notify(translate(getContentLocale(), "extension.xButton.extensionUpdated"));
           return;
         }
         const cachedItem = nookButtonItems.get(button);
@@ -239,15 +242,19 @@ export function createNookButtonController(deps: NookButtonControllerDeps): Nook
         button.setAttribute("aria-busy", "true");
         (button as HTMLButtonElement).disabled = true;
         try {
+          const locale = getContentLocale();
           const response = await deps.sendMessage({ type: "TOGGLE_NOOK_BOOKMARK", item });
           if (!response?.success || response.saved === undefined) {
-            throw new Error(response?.error || "Could not update Nook bookmark");
+            throw new Error(response?.error || translate(locale, "extension.xButton.toggleFailed"));
           }
           updateNookButtonState(item.id, response.saved);
-          deps.notify(response.saved ? "Saved to Nook ✓" : "Removed from Nook", response.saved ? item.id : undefined);
+          deps.notify(
+            translate(locale, response.saved ? "extension.toast.tweetSaved" : "extension.xButton.removed"),
+            response.saved ? item.id : undefined,
+          );
         } catch (err) {
           console.warn("[Nook] Could not toggle bookmark:", err);
-          deps.notify("Could not update Nook bookmark", undefined, "error");
+          deps.notify(translate(getContentLocale(), "extension.xButton.toggleFailed"), undefined, "error");
         } finally {
           button.removeAttribute("aria-busy");
           (button as HTMLButtonElement).disabled = false;

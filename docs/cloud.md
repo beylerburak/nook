@@ -7,13 +7,37 @@ dashboard the Chrome extension shows offline. Sign-in and sign-up live only in
 the web app; the extension gets its session from it and otherwise stays
 usable offline with its existing IndexedDB library.
 
+## URL layout
+
+The web app (`apps/web`) is two separate Vite pages, not one SPA mounted at
+the root:
+
+- `/` — a static, JS-free landing placeholder (name, tagline, an "Open the
+  app" link). It never loads the app bundle, IndexedDB or auth — see
+  `apps/web/index.html`.
+- `/app/*` — the actual product, built from `apps/web/app/index.html` and
+  routed client-side by `apps/web/src/router.ts`/`src/App.tsx`: `/app`
+  redirects to `/app/dashboard` (signed in) or `/app/login` (signed out),
+  `/app/login` is the sign-in screen, and `/app/dashboard` is the dashboard.
+  Deep links elsewhere under `/app` fall back to `/app/dashboard`; the
+  server (`apps/web/nginx.conf` in production, a small Vite dev-server
+  middleware locally) rewrites any of them to `/app/index.html` so the
+  client router can take over.
+- `/api/*` and `/health` are unchanged — the Node API, not part of this split.
+
+The extension's "open web app" links (`apps/extension/src/app/popup/extension-host.ts`'s
+`openWebApp`) and the PWA manifest/service worker (scope `/app/`) all target
+this `/app` subtree; see the comments in those files for the specifics
+(query strings like `?connect=extension` survive every redirect above).
+
 ## Local development
 
 1. Copy `.env.example` to `.env`. Set a random `POSTGRES_PASSWORD` and a
    `BETTER_AUTH_SECRET` of at least 32 random characters. `.env` is ignored by Git.
 2. Run `docker compose up -d --build`.
-3. Open `http://localhost:18481` and sign in (or create the first account, see
-   `NOOK_ALLOW_SIGNUP` below). `/health` checks the API and database.
+3. Open `http://localhost:18481/app` and sign in (or create the first
+   account, see `NOOK_ALLOW_SIGNUP` below) — the bare root is just the
+   landing page. `/health` checks the API and database.
 4. Build the extension against the local API:
    `WXT_API_URL=http://localhost:18481 npm run build -w @nook/extension`.
    Load `apps/extension/.output/chrome-mv3` as an unpacked Chrome extension.
@@ -78,7 +102,8 @@ missing changes that no longer exist on the server.
 
 ## Signing in and the web app
 
-The web app at your Nook URL is the product: sign in (or create the first
+The web app at `<your Nook URL>/app` is the product (see "URL layout" above —
+the bare root is just a landing placeholder): sign in (or create the first
 account, while `NOOK_ALLOW_SIGNUP` is on) and it opens straight into the same
 dashboard the extension shows locally — search, tags, collections, the
 lightbox, all of it. It works offline: it's a local-first PWA backed by the
@@ -105,7 +130,7 @@ the web app hands it the current session over Chrome's
 the extension syncs on its own schedule, independent of whether the web app
 tab is open.
 
-Opening `<your Nook URL>/?connect=extension` (signed in or not) connects the
+Opening `<your Nook URL>/app?connect=extension` (signed in or not) connects the
 extension explicitly and confirms once it's done — useful right after
 installing the extension, or from Settings → Account, which links there. If
 the extension is already signed in to a different Nook account, connecting

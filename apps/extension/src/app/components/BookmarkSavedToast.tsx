@@ -5,6 +5,7 @@ import { IconButton } from "@astryxdesign/core/IconButton";
 import { HStack, StackItem, VStack } from "@astryxdesign/core/Layout";
 import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
+import { useI18n } from "../../i18n";
 import { useAutoDismiss } from "./useAutoDismiss";
 
 const AUTO_DISMISS_MS = 5000;
@@ -23,6 +24,7 @@ interface BookmarkSavedToastProps {
  * user is hovering, focused inside it, or writing a note.
  */
 export function BookmarkSavedToast({ message, onSaveNote, onDismiss }: BookmarkSavedToastProps) {
+  const { t } = useI18n();
   const [phase, setPhase] = useState<Phase>("idle");
   const [note, setNote] = useState("");
   const [isSaving, setIsSaving] = useState(false);
@@ -51,13 +53,13 @@ export function BookmarkSavedToast({ message, onSaveNote, onDismiss }: BookmarkS
       await onSaveNote(trimmedNote);
       setPhase("saved");
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save this note.");
+      setError(cause instanceof Error ? cause.message : t("dashboard.savedToast.couldNotSaveNote"));
     } finally {
       setIsSaving(false);
     }
   };
 
-  const text = phase === "saved" ? "Note saved" : message.replace(/^Nook:\s*/, "");
+  const text = phase === "saved" ? t("dashboard.savedToast.noteSaved") : message.replace(/^Nook:\s*/, "");
 
   return (
     <VStack
@@ -74,10 +76,10 @@ export function BookmarkSavedToast({ message, onSaveNote, onDismiss }: BookmarkS
           <Text type="body" maxLines={1}>{text}</Text>
         </StackItem>
         {phase === "idle" ? (
-          <Button label="Add a note" variant="ghost" size="sm" onClick={() => setPhase("editing")} />
+          <Button label={t("dashboard.savedToast.addANote")} variant="ghost" size="sm" onClick={() => setPhase("editing")} />
         ) : null}
         <IconButton
-          label="Close"
+          label={t("common.close")}
           variant="ghost"
           size="sm"
           icon={<Icon icon="close" size="sm" color="inherit" />}
@@ -88,12 +90,12 @@ export function BookmarkSavedToast({ message, onSaveNote, onDismiss }: BookmarkS
       {phase === "editing" ? (
         <VStack gap={2}>
           <TextArea
-            label="Note"
+            label={t("dashboard.savedToast.noteLabel")}
             isLabelHidden
             hasAutoFocus
             rows={2}
             width="100%"
-            placeholder="What do you want to remember?"
+            placeholder={t("dashboard.savedToast.notePlaceholder")}
             value={note}
             onChange={(value) => {
               setNote(value);
@@ -104,7 +106,7 @@ export function BookmarkSavedToast({ message, onSaveNote, onDismiss }: BookmarkS
           />
           <HStack gap={2} justify="end">
             <Button
-              label="Cancel"
+              label={t("common.cancel")}
               variant="ghost"
               size="sm"
               isDisabled={isSaving}
@@ -114,7 +116,7 @@ export function BookmarkSavedToast({ message, onSaveNote, onDismiss }: BookmarkS
               }}
             />
             <Button
-              label="Save note"
+              label={t("dashboard.shared.saveNote")}
               variant="primary"
               size="sm"
               isLoading={isSaving}

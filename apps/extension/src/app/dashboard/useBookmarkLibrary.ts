@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { useToast } from "@astryxdesign/core/Toast";
 import * as NookDB from "../../../lib/db";
+import { useI18n } from "../../i18n";
 import type { Bookmark, BookmarkList } from "../../../lib/types";
 
 type ToastFn = ReturnType<typeof useToast>;
@@ -18,6 +19,7 @@ type ToastFn = ReturnType<typeof useToast>;
  * separate network-backed hook.
  */
 export function useBookmarkLibrary(toast: ToastFn) {
+  const { t } = useI18n();
   const [items, setItems] = useState<Bookmark[]>([]);
   const [lists, setLists] = useState<BookmarkList[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -38,7 +40,7 @@ export function useBookmarkLibrary(toast: ToastFn) {
     void refresh().catch((error) => {
       console.error("[Nook] Failed to load bookmarks:", error);
       setIsLoading(false);
-      toast({ body: "Could not load bookmarks.", type: "error" });
+      toast({ body: t("dashboard.toast.couldNotLoadBookmarks"), type: "error" });
     });
 
     const channel = new BroadcastChannel("nook-db");
@@ -53,7 +55,7 @@ export function useBookmarkLibrary(toast: ToastFn) {
       channel.close();
       if (reloadTimer) clearTimeout(reloadTimer);
     };
-  }, [refresh, toast]);
+  }, [refresh, toast, t]);
 
   const importBookmarks = useCallback(async (file: File): Promise<boolean> => {
     setIsImporting(true);
@@ -77,16 +79,16 @@ export function useBookmarkLibrary(toast: ToastFn) {
       await NookDB.putBookmarks(validItems);
       await Promise.all(validLists.map((list) => NookDB.putList(list)));
       await refresh();
-      toast({ body: "Imported " + validItems.length + " bookmarks." });
+      toast({ body: t("dashboard.toast.importedCount", { count: validItems.length }) });
       return true;
     } catch (error) {
       console.error("[Nook] Import failed:", error);
-      toast({ body: "Could not import this JSON file.", type: "error" });
+      toast({ body: t("dashboard.toast.couldNotImportFile"), type: "error" });
       return false;
     } finally {
       setIsImporting(false);
     }
-  }, [refresh, toast]);
+  }, [refresh, toast, t]);
 
   const updateBookmark = useCallback(async (
     id: string,
@@ -99,62 +101,62 @@ export function useBookmarkLibrary(toast: ToastFn) {
       return updated;
     } catch (error) {
       console.error("[Nook] Failed to update bookmark:", error);
-      toast({ body: "Could not save changes.", type: "error" });
+      toast({ body: t("dashboard.toast.couldNotSaveChanges"), type: "error" });
       return null;
     }
-  }, [refresh, toast]);
+  }, [refresh, toast, t]);
 
   const deleteBookmark = useCallback(async (id: string): Promise<boolean> => {
     try {
       await NookDB.softDeleteBookmark(id);
       await refresh();
-      toast({ body: "Bookmark deleted." });
+      toast({ body: t("dashboard.toast.bookmarkDeleted") });
       return true;
     } catch (error) {
       console.error("[Nook] Failed to delete bookmark:", error);
-      toast({ body: "Could not delete this bookmark.", type: "error" });
+      toast({ body: t("dashboard.toast.couldNotDeleteBookmark"), type: "error" });
       return false;
     }
-  }, [refresh, toast]);
+  }, [refresh, toast, t]);
 
   const createList = useCallback(async (list: BookmarkList): Promise<boolean> => {
     try {
       await NookDB.putList(list);
       await refresh();
-      toast({ body: "Collection created." });
+      toast({ body: t("dashboard.toast.collectionCreated") });
       return true;
     } catch (error) {
       console.error("[Nook] Failed to create collection:", error);
-      toast({ body: "Could not create this collection.", type: "error" });
+      toast({ body: t("dashboard.toast.couldNotCreateCollection"), type: "error" });
       return false;
     }
-  }, [refresh, toast]);
+  }, [refresh, toast, t]);
 
   const deleteList = useCallback(async (id: string): Promise<boolean> => {
     try {
       await NookDB.softDeleteList(id);
       await refresh();
-      toast({ body: "Collection deleted." });
+      toast({ body: t("dashboard.toast.collectionDeleted") });
       return true;
     } catch (error) {
       console.error("[Nook] Failed to delete collection:", error);
-      toast({ body: "Could not delete this collection.", type: "error" });
+      toast({ body: t("dashboard.toast.couldNotDeleteCollection"), type: "error" });
       return false;
     }
-  }, [refresh, toast]);
+  }, [refresh, toast, t]);
 
   const clearAllBookmarks = useCallback(async (): Promise<boolean> => {
     try {
       await NookDB.softDeleteAllBookmarks();
       await refresh();
-      toast({ body: "Bookmarks cleared." });
+      toast({ body: t("dashboard.toast.bookmarksCleared") });
       return true;
     } catch (error) {
       console.error("[Nook] Failed to clear bookmarks:", error);
-      toast({ body: "Could not clear bookmarks.", type: "error" });
+      toast({ body: t("dashboard.toast.couldNotClearBookmarks"), type: "error" });
       return false;
     }
-  }, [refresh, toast]);
+  }, [refresh, toast, t]);
 
   return {
     items,

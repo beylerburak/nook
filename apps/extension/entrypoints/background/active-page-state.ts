@@ -5,8 +5,10 @@
  */
 
 import { findBookmarkForUrl } from "../../lib/bookmark-lookup";
+import { loadLocaleSetting } from "../../lib/locale";
 import { isXPostUrl } from "../../lib/url";
 import type { ActivePageState, ActivePageStateResponse, BackgroundToContentMessage } from "../../lib/types";
+import { resolveLocale, translate } from "../../src/i18n/core";
 import { classifyUnsavableUrl } from "./page-access";
 import { saveCurrentTab, savePage } from "./save-page";
 import { saveXPostFromTab } from "./x-save";
@@ -45,12 +47,13 @@ export async function getActivePageState(): Promise<ActivePageState> {
 
 export async function saveActivePage(): Promise<ActivePageStateResponse> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const locale = resolveLocale(await loadLocaleSetting());
   if (!tab || tab.id === undefined || !tab.url) {
-    return { success: false, error: "No active tab to save" };
+    return { success: false, error: translate(locale, "extension.errors.noActiveTab") };
   }
 
   if (await classifyUnsavableUrl(tab.url)) {
-    return { success: false, error: "This page can't be saved" };
+    return { success: false, error: translate(locale, "extension.errors.pageNotSavable") };
   }
 
   try {

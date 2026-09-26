@@ -4,6 +4,7 @@ import { Divider } from "@astryxdesign/core/Divider";
 import { Icon } from "@astryxdesign/core/Icon";
 import { useMediaQuery } from "@astryxdesign/core/hooks";
 import { Text } from "@astryxdesign/core/Text";
+import type { MessageKey } from "../../i18n";
 import { CloudGlyph, DatabaseGlyph, PaletteGlyph, ShieldGlyph, SparkGlyph, UserGlyph } from "./glyphs";
 
 /** Sections the Settings dialog can show — see product-contract.md section 4. */
@@ -12,21 +13,27 @@ export type SettingsSection = "profile" | "account" | "appearance" | "sync" | "a
 /** Anything `Icon`'s own `icon` prop accepts — a semantic name or an SVG component. */
 export type SettingsIcon = ComponentProps<typeof Icon>["icon"];
 
+/**
+ * Message keys rather than resolved strings — this is a module-level
+ * constant (evaluated once, outside any component), so it can't call
+ * `useI18n()` itself. Callers resolve `labelKey`/`descriptionKey` with
+ * `t()` at render time (see `SettingsDialog.tsx`).
+ */
 export interface SettingsSectionConfig {
   id: SettingsSection;
-  label: string;
-  description: string;
+  labelKey: MessageKey;
+  descriptionKey: MessageKey;
   icon: SettingsIcon;
 }
 
 export const SETTINGS_SECTIONS: SettingsSectionConfig[] = [
-  { id: "profile", label: "Profile", description: "Your name, photo and account basics.", icon: UserGlyph },
-  { id: "account", label: "Account & security", description: "Password, sessions and account deletion.", icon: ShieldGlyph },
-  { id: "appearance", label: "Appearance", description: "Choose how Nook looks on this device.", icon: PaletteGlyph },
-  { id: "sync", label: "Sync", description: "Cloud sync status and the browser extension link.", icon: CloudGlyph },
-  { id: "ai", label: "AI", description: "Let Nook file new bookmarks into collections and tags.", icon: SparkGlyph },
-  { id: "data", label: "Data", description: "Import, export and clear your library.", icon: DatabaseGlyph },
-  { id: "about", label: "About", description: "Version and app information.", icon: "info" },
+  { id: "profile", labelKey: "settings.sections.profile.label", descriptionKey: "settings.sections.profile.description", icon: UserGlyph },
+  { id: "account", labelKey: "settings.sections.account.label", descriptionKey: "settings.sections.account.description", icon: ShieldGlyph },
+  { id: "appearance", labelKey: "settings.sections.appearance.label", descriptionKey: "settings.sections.appearance.description", icon: PaletteGlyph },
+  { id: "sync", labelKey: "settings.sections.sync.label", descriptionKey: "settings.sections.sync.description", icon: CloudGlyph },
+  { id: "ai", labelKey: "settings.sections.ai.label", descriptionKey: "settings.sections.ai.description", icon: SparkGlyph },
+  { id: "data", labelKey: "settings.sections.data.label", descriptionKey: "settings.sections.data.description", icon: DatabaseGlyph },
+  { id: "about", labelKey: "settings.sections.about.label", descriptionKey: "settings.sections.about.description", icon: "info" },
 ];
 
 export function settingsSectionConfig(id: SettingsSection): SettingsSectionConfig {
@@ -107,6 +114,18 @@ export function SettingsRow({ title, description, icon, control, detail }: Setti
         direction={isNarrow ? "vertical" : "horizontal"}
         gap={isNarrow ? 2 : 3}
         align={isNarrow ? "stretch" : "center"}
+        // `SETTINGS_NARROW_QUERY` is a viewport-width query, not a
+        // container-width one — the desktop side-nav branch keeps this row
+        // horizontal on any wide screen even though its own content column
+        // is only ~600px (880 dialog − a fixed-width SideNav). A control with
+        // its own fixed width (e.g. AiPanel's `<Slider width={200}>`) is a
+        // plain flex child here, not a `StackItem`, so it keeps the browser's
+        // default content-based `min-width` and refuses to shrink — without
+        // `wrap`, that forces this row wider than the column and the content
+        // pane's `isScrollable` turns that into a horizontal scrollbar
+        // instead of the row simply breaking onto two lines the way the
+        // narrow layout already does.
+        wrap={isNarrow ? "nowrap" : "wrap"}
       >
         <StackItem size="fill">
           <HStack gap={2} align="start">

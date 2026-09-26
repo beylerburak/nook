@@ -1,5 +1,7 @@
 import { parseGraphQLBookmarks, extractBottomCursor, diagnoseGraphQLResponse } from "../../lib/x-parser";
 import type { Bookmark, MessageResponse } from "../../lib/types";
+import { translate } from "../../src/i18n/core";
+import { getContentLocale } from "./locale-state";
 import type { SendNookMessage } from "./messaging";
 import type { Notify } from "./notify";
 
@@ -63,14 +65,15 @@ async function fetchBookmarkPage(queryId: string, csrfToken: string, cursor: str
 
 function injectSyncOverlay(): void {
   if (document.getElementById("nook-sync-overlay")) return;
+  const locale = getContentLocale();
   const el = document.createElement("div");
   el.id = "nook-sync-overlay";
   el.style.cssText =
     "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.92);backdrop-filter:blur(10px);display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
   el.innerHTML = `
-    <div style="font-size:26px;font-weight:700;margin-bottom:10px">🔄 Nook Sync</div>
-    <div style="font-size:14px;opacity:.7;margin-bottom:28px">Fetching all your bookmarks…</div>
-    <div id="nook-sync-log" style="padding:12px 32px;background:#111;border:1px solid #2a2a2a;border-radius:12px;font-family:monospace;font-size:14px;min-width:260px;text-align:center">Starting…</div>
+    <div style="font-size:26px;font-weight:700;margin-bottom:10px">${translate(locale, "extension.sync.title")}</div>
+    <div style="font-size:14px;opacity:.7;margin-bottom:28px">${translate(locale, "extension.sync.fetchingAll")}</div>
+    <div id="nook-sync-log" style="padding:12px 32px;background:#111;border:1px solid #2a2a2a;border-radius:12px;font-family:monospace;font-size:14px;min-width:260px;text-align:center">${translate(locale, "extension.sync.starting")}</div>
   `;
   document.body.appendChild(el);
 }
@@ -99,7 +102,7 @@ export function initBookmarkSync(deps: BookmarkSyncDeps): void {
         if (items.length > 0) {
           deps.sendMessage({ type: "SYNC_ITEMS_BATCH", items }).then((response) => {
             if (response?.success && (response.count ?? 0) > 0) {
-              deps.notify(`Nook: ${response.count} bookmark${(response.count ?? 0) > 1 ? "s" : ""} synced ✓`);
+              deps.notify(translate(getContentLocale(), "extension.sync.syncedCount", { count: response.count ?? 0 }));
             }
             if (typeof window._nookUpdateSyncLog === "function") {
               window._nookUpdateSyncLog(response?.count ?? 0);
@@ -128,13 +131,14 @@ export function initBookmarkSync(deps: BookmarkSyncDeps): void {
 
     function finishSync(newCount: number, updatedCount: number) {
       window._nookAutoSyncing = false;
+      const locale = getContentLocale();
       const ov = document.getElementById("nook-sync-overlay");
       if (ov) {
         ov.innerHTML = `
-      <div style="font-size:26px;font-weight:700;margin-bottom:10px;color:#4ade80">✓ Done</div>
-      <div style="font-size:16px;margin-bottom:6px">${newCount} new bookmark${newCount === 1 ? "" : "s"} added to Nook.</div>
-      ${updatedCount ? `<div style="font-size:13px;opacity:.7;margin-bottom:6px">${updatedCount} bookmark${updatedCount === 1 ? "" : "s"} updated (quotes / media).</div>` : ""}
-      <div style="font-size:12px;opacity:.5">Closing tab…</div>
+      <div style="font-size:26px;font-weight:700;margin-bottom:10px;color:#4ade80">✓ ${translate(locale, "extension.sync.done")}</div>
+      <div style="font-size:16px;margin-bottom:6px">${translate(locale, "extension.sync.newBookmarksAdded", { count: newCount })}</div>
+      ${updatedCount ? `<div style="font-size:13px;opacity:.7;margin-bottom:6px">${translate(locale, "extension.sync.bookmarksUpdated", { count: updatedCount })}</div>` : ""}
+      <div style="font-size:12px;opacity:.5">${translate(locale, "extension.sync.closingTab")}</div>
     `;
       }
       setTimeout(() => deps.sendMessage({ type: "CLOSE_CURRENT_TAB" }), 2000);
@@ -143,10 +147,10 @@ export function initBookmarkSync(deps: BookmarkSyncDeps): void {
     try {
       // Step 1: CSRF token
       const csrfToken = getCsrfToken();
-      if (!csrfToken) throw new Error("CSRF token (ct0) not found. Are you logged in to X?");
+      if (!csrfToken) throw new Error(translate(getContentLocale(), "extension.sync.csrfMissing"));
 
       // Step 2: queryId resolution — priority: message arg > local > background.js cache
-      updateLog("Fetching query ID…");
+      updateLog(translate(getContentLocale(), "extension.sync.fetchingQueryId"));
       let queryId = msgQueryId || queryIdFromPage;
 
       if (!queryId) {
@@ -159,9 +163,7 @@ export function initBookmarkSync(deps: BookmarkSyncDeps): void {
       }
 
       if (!queryId) {
-        throw new Error(
-          "Could not find the X Bookmarks API query ID. Please open x.com/i/bookmarks manually first, then try again."
-        );
+        throw new Error(translate(getContentLocale(), "extension.sync.queryIdMissing"));
       }
 
       console.log("[Nook] Using queryId:", queryId);
@@ -183,7 +185,7 @@ export function initBookmarkSync(deps: BookmarkSyncDeps): void {
 
       while (true) {
         page++;
-        updateLog(`Fetching page ${page}… (${totalSynced} new)`);
+        updateLog(translate(getContentLocale(), "extension.sync.fetchingPage", { page, count: totalSynced }));
         console.log("[Nook] Fetching page", page, "cursor:", cursor);
 
         const data = await fetchBookmarkPage(queryId, csrfToken, cursor);
@@ -243,7 +245,13 @@ export function initBookmarkSync(deps: BookmarkSyncDeps): void {
           });
           totalSynced += result?.count ?? 0;
           totalUpdated += result?.updated ?? 0;
-          updateLog(`Page ${page} — ${totalSynced} new, ${totalUpdated} updated`);
+          updateLog(
+            translate(getContentLocale(), "extension.sync.pageProgress", {
+              page,
+              newCount: totalSynced,
+              updatedCount: totalUpdated,
+            }),
+          );
 
           if (!fullScan && result?.count === 0 && !result?.updated && cursor !== null) {
             console.log("[Nook] All items on page", page, "already saved — stopping");
@@ -266,12 +274,13 @@ export function initBookmarkSync(deps: BookmarkSyncDeps): void {
       finishSync(totalSynced, totalUpdated);
     } catch (err) {
       console.error("[Nook] Auto sync error:", err);
+      const locale = getContentLocale();
       const ov = document.getElementById("nook-sync-overlay");
       if (ov) {
         ov.innerHTML = `
-      <div style="font-size:22px;font-weight:700;margin-bottom:10px;color:#f87171">✗ Error</div>
+      <div style="font-size:22px;font-weight:700;margin-bottom:10px;color:#f87171">✗ ${translate(locale, "extension.sync.error")}</div>
       <div style="font-size:14px;opacity:.8;max-width:340px;text-align:center">${err instanceof Error ? err.message : String(err)}</div>
-      <div style="font-size:12px;opacity:.5;margin-top:16px">Closing tab…</div>
+      <div style="font-size:12px;opacity:.5;margin-top:16px">${translate(locale, "extension.sync.closingTab")}</div>
     `;
       }
       window._nookAutoSyncing = false;

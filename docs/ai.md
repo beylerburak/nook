@@ -740,28 +740,100 @@ pass:
 - A classification is an authenticated server call, so the section needs
   `host.user` (`SettingsDialog.visibleSections`). Signed out, it offers a
   sign-in banner instead.
-- **Run now can only enqueue.** The route wakes a worker rather than running a
-  batch inline, so the toast reports how many were queued for each pass and the
-  panel then re-reads the status every few seconds while `pending` is above
-  zero. A toast claiming "18 filed" would be a guess, and the copy says so
-  instead of implying it.
+- **Organize now can only enqueue.** The route wakes a worker rather than
+  running a batch inline, so the toast reports how many were queued for each
+  pass and the panel then re-reads the status every few seconds while
+  `pending` is above zero. A toast claiming "18 filed" would be a guess, and
+  the copy says so instead of implying it.
 
-The panel carries three feature toggles, three thresholds, a status card with a
-row per pass, the **Run now** button, and the taxonomy review flow. The button
-used to be **Classify now** and covers both passes now, each half gated on its own
-toggle, so it says which passes a click would queue and is disabled when neither
-toggle is on.
+### Structure
 
-The Summaries card is the part of the panel this document used to have to
-apologise for, and it no longer does. Its toggle was a real field that nothing
-acted on, and its two rows counted a local library nothing summarised and dated
-a last pass nothing wrote; both rows are now server counts — `summarised` and
-`pending` are SQL counts over the account's records with the same 400-character
-gate the pass applies, so the upper bound and the hedge that had to explain it
-are both gone. The toggle's own description carries the one thing nothing else
-in Settings does not: this is the first feature that sends page text to a third
-party. See [retrieval.md](./retrieval.md)'s "Summaries" for the pass behind those
-numbers.
+The panel used to be a pile of settings with no order to them — "Features",
+"Thresholds", "Summaries", "Status" — and a user with one collection and 1,061
+unfiled bookmarks had no way to tell, from that layout, that classification
+only ever files into a collection that already exists (see "Eligibility"
+above) and so was doing almost nothing for them. The panel is organized around
+that fact now, in `apps/extension/src/app/settings-dialog/AiPanel.tsx` and the
+files beside it under `settings-dialog/ai/`:
+
+- An **intro line**, plain about what Nook does with AI and that it runs on
+  the server rather than in this browser. One **banner** under it, only when
+  neither server deployment is configured (`ai/shared.ts`'s `outageKind`),
+  instead of the old panel's habit of repeating "no AI key" on every row that
+  happened to need it.
+- **"Organize your library"** (`ai/OrganizeCard.tsx`), two steps in an Astryx
+  `Stepper`, because that is the order that actually produces something —
+  filing has nothing to file *into* until a collection exists:
+  1. **Create collections** (`ai/SuggestCollections.tsx`) — the **Suggest
+     collections** button and review flow, unchanged in substance from the old
+     **Suggest taxonomy** action. The `autoTaxonomy` toggle is gone: reading
+     the route (`proposeTaxonomyForUser` in `apps/api/src/ai-jobs.ts` and its
+     handler in `server.ts`) shows the server never reads `autoTaxonomy` at
+     all — the propose route is gated only on a session and
+     `aiAvailability().proposeTaxonomy`, the same "is a proposer configured"
+     check `summarizeAvailability().summarize` makes for summarising. The
+     setting was a client-side lock in front of a door the server never
+     checked. It still exists as a stored preference — a first click of
+     **Suggest collections** turns it on — but nothing gates on it being off
+     any more, so there is no reason to make a user flip it before they can
+     press the button that is right there.
+  2. **File bookmarks automatically** (`ai/AutoFileStep.tsx`) — the
+     `autoClassify` switch, plus **Organize unfiled bookmarks now**. The old
+     copy ("File **new** bookmarks into collections") was wrong about what the
+     toggle does: `topUpClassificationQueue` (`apps/api/src/ai-jobs.ts`) has no
+     recency filter — it selects *any* eligible row
+     (`data->'ai' IS NULL AND data->'listId' IS NULL`, not already queued or
+     decided), ordered newest-first, whatever the toggle is on. The per-minute
+     worker tops it up 25 at a time and reconciles 500 at a time every 15
+     minutes (`tickAiWorker`), so turning the switch on works through the
+     *entire* unfiled library over time, saved-today or saved-two-years-ago
+     alike — new saves are simply enqueued sooner, at sync time
+     (`enqueueClassification`). **Organize unfiled bookmarks now** calls the
+     same `POST /api/ai/run` the old **Run now** button did; it does not do
+     anything the toggle would not eventually do on its own, it only skips the
+     wait for the next tick. The button also still queues a summarisation pass
+     if `autoSummarize` is on — the route always has, one enqueue per
+     toggle — so its tooltip and toast name both halves rather than pretending
+     the button is classification-only.
+- **Summaries** (`ai/SummariesCard.tsx`): the same toggle and the same
+  server-counted rows, but the paragraph explaining what leaves the browser is
+  now behind a collapsed `Collapsible` ("What gets sent") instead of sitting in
+  the switch's own description, which had grown long enough to bury the
+  switch's own point.
+- **Search by meaning** (`ai/SearchByMeaningRow.tsx`): one informational row,
+  no toggle. Semantic search embeds a signed-in account's library
+  automatically once the server has an embedding key (`docs/retrieval.md`,
+  "How the index gets built") — there is nothing in Settings that turns it on,
+  so the row says that rather than inventing a switch. `GET /api/ai/status`
+  carries no field for embedding availability (unlike `available` for
+  classification and `summarize.available` for the proposer), so this row
+  states the fact rather than adding a call just to draw a status dot.
+- **Advanced** (`ai/AdvancedSettings.tsx`): the four thresholds — collection
+  confidence, tag confidence, max tags, taxonomy language — behind a
+  `Collapsible`, collapsed by default, with a **Reset to defaults** button.
+  They are no longer conditionally rendered on `autoClassify`/`autoTaxonomy`
+  being on; a user tuning them ahead of turning a feature on is not a state
+  worth hiding a row over.
+
+The old **Status** card is gone as a standalone wall of rows. Its numbers moved
+to where they are relevant: the queue depth and the last pass's plain-language
+result ("Filed 312, left 40 alone because Nook wasn't sure") sit under **File
+bookmarks automatically**; the summarise counts sit in the Summaries card; a
+missing deployment is either the one top banner (both down) or a short local
+note on the one step it affects (`outageKind`'s `"classify"`/`"summarize"`
+cases) — never both, and never repeated per row the way four "Unavailable"
+labels used to be.
+
+The Summaries card is still the part of the panel this document used to have
+to apologise for, and it still does not need to. Its toggle was once a real
+field that nothing acted on, and its two rows counted a local library nothing
+summarised and dated a last pass nothing wrote; both rows are server counts —
+`summarised` and `pending` are SQL counts over the account's records with the
+same 400-character gate the pass applies. The toggle's own description still
+carries the one thing nothing else in Settings does: this is the first feature
+that sends page text to a third party, now folded into the disclosure above
+rather than the switch's own paragraph. See [retrieval.md](./retrieval.md)'s
+"Summaries" for the pass behind those numbers.
 
 ## Configuration
 
@@ -788,7 +860,7 @@ numbers.
 | `apps/api/test/ai-summary.unit.test.ts` | the work list (a content hash over the source text that excludes `summary`, an unchanged record inside the decline window still parked, a changed hash re-admitted), the outcome-to-window table, the pass (writing through `applyServerWrite`, deleting the attempt row on a write, upserting it on a decline, refusing a write whose guard fails on the fresh row, a lease held by someone else), the `autoSummarize` gate, and the status counts |
 | `apps/extension/tests/ai-client.test.ts` | the four calls: the signed-out gate before any request, bearer vs cookie auth, the status mapping, defensive reading of every response, the "nothing to read" vs "declined" distinction, sending a tag definition back with its name, and the status subscription |
 | `apps/extension/tests/ai-settings.test.ts` | server fetch/cache/fallback: offline, signed-out, a failed save, cross-context invalidation |
-| `apps/extension/tests/settings-ai-panel.test.tsx` | toggles, thresholds, the status card, **Run now**, proposal review, the signed-in gate — and, explicitly, that the status rows, on-demand classification and the taxonomy flow all work on the web host with cookie auth |
+| `apps/extension/tests/settings-ai-panel.test.tsx` | the intro and the one "unavailable" banner, the suggest-collections step (including that `autoTaxonomy` turns on by itself on first use), the file-automatically step (**Organize unfiled bookmarks now**, its queue depth and last-pass sentence, that it still queues summaries for a summarize-only account), the summaries card and its collapsed privacy note, the advanced disclosure (thresholds, reset to defaults), the signed-in gate — and, explicitly, that all of it works on the web host with cookie auth |
 | `apps/extension/tests/cloud-merge.test.ts` | attribution travels with the assignment |
 
 `apps/extension/tests/ai-classify.test.ts`, `ai-runner.test.ts` and

@@ -11,7 +11,20 @@ import {
   type SearchOutcome,
   type SearchReason,
 } from "../../../lib/retrieval";
+import { translate } from "../../i18n/core";
+import type { MessageKey, ParamsFor } from "../../i18n/types";
 import type { Bookmark, Media } from "../../../lib/types";
+
+/**
+ * The shape of `useI18n().t` — accepted as a parameter by the plain (non-React)
+ * helpers below instead of a hook call, so they stay pure and unit-testable
+ * without rendering. Every helper defaults its `t` param to English (see
+ * `defaultT`) so existing callers that don't pass one keep returning the same
+ * English copy they always have.
+ */
+export type TranslateFn = <K extends MessageKey>(key: K, params?: ParamsFor<K>) => string;
+
+const defaultT: TranslateFn = (key, params) => translate("en", key, params);
 
 // The dashboard names the reason a search stayed local, so the type travels with
 // the hook that reports it rather than making every caller reach into lib/ for it.
@@ -66,11 +79,11 @@ export function visibleText(item: Bookmark) {
   return item.description || item.shortDescription || item.title || "";
 }
 
-export function itemTitle(item: Bookmark) {
+export function itemTitle(item: Bookmark, t: TranslateFn = defaultT) {
   if (item.source === "chrome") {
-    return item.title || item.creator?.name || item.creator?.handle || "Web bookmark";
+    return item.title || item.creator?.name || item.creator?.handle || t("dashboard.detail.webBookmarkFallback");
   }
-  return item.creator?.name || item.creator?.handle || "X post";
+  return item.creator?.name || item.creator?.handle || t("dashboard.detail.xPostFallback");
 }
 
 export function getTags(items: Bookmark[]) {
@@ -306,31 +319,31 @@ export interface SearchSignalInfo {
  * and offline *do* get a line, because the user can leave both of those states and
  * the sync indicator already reports them elsewhere in the frame.
  */
-export function describeSearchSignal(search: LibrarySearch): SearchSignalInfo | null {
+export function describeSearchSignal(search: LibrarySearch, t: TranslateFn = defaultT): SearchSignalInfo | null {
   if (search.semantic) {
     return {
-      label: "Semantic",
-      detail: "Ranked by meaning, not just by matching words.",
+      label: t("dashboard.search.semanticLabel"),
+      detail: t("dashboard.search.semanticDetail"),
       variant: "accent",
     };
   }
   switch (search.fallback) {
     case "signed-out":
       return {
-        label: "Keyword match",
-        detail: "Sign in to search your library by meaning as well as by word.",
+        label: t("dashboard.search.keywordLabel"),
+        detail: t("dashboard.search.signedOutDetail"),
         variant: "neutral",
       };
     case "offline":
       return {
-        label: "Keyword match",
-        detail: "You're offline — searching what is saved on this device.",
+        label: t("dashboard.search.keywordLabel"),
+        detail: t("dashboard.search.offlineDetail"),
         variant: "warning",
       };
     case "unsearchable":
       return {
-        label: "Keyword match",
-        detail: "Nothing else in your library matches, by word or by meaning.",
+        label: t("dashboard.search.keywordLabel"),
+        detail: t("dashboard.search.unsearchableDetail"),
         variant: "neutral",
       };
     default:
@@ -347,12 +360,14 @@ export function describeSearchCount(
   search: LibrarySearch,
   shown: number,
   query: string,
+  t: TranslateFn = defaultT,
 ): string {
-  const label = `${shown} saved ${shown === 1 ? "item" : "items"}`;
-  if (!query) return label;
-  const matching = `matching “${query}”`;
+  if (!query) return t("dashboard.itemCount", { count: shown });
   const total = search.semantic?.total ?? 0;
-  return total > shown ? `${shown} of ${total} saved items ${matching}` : `${label} ${matching}`;
+  if (total > shown) {
+    return t("dashboard.search.countWithQueryTotal", { count: shown, shown, total, query });
+  }
+  return t("dashboard.search.countWithQuery", { count: shown, query });
 }
 
 export interface EmptySearchCopy {
@@ -369,27 +384,31 @@ export function describeEmptySearch(
   search: LibrarySearch,
   query: string,
   libraryCount: number,
+  t: TranslateFn = defaultT,
 ): EmptySearchCopy {
   if (libraryCount === 0) {
     return {
-      title: "Your library is ready",
-      description: "Save a post on X or a web page. Nook keeps it here for later.",
+      title: t("dashboard.emptyState.libraryReadyTitle"),
+      description: t("dashboard.emptyState.libraryReadyDescription"),
     };
   }
+  const noResultsTitle = query
+    ? t("dashboard.emptyState.noResultsForQuery", { query })
+    : t("dashboard.emptyState.noMatchingBookmarks");
   if (search.isPending) {
     return {
-      title: query ? `No results for “${query}”` : "No matching bookmarks",
-      description: "Nothing matches by word — still looking by meaning.",
+      title: noResultsTitle,
+      description: t("dashboard.emptyState.stillLookingDescription"),
     };
   }
   if (search.fallback === "unsearchable") {
     return {
-      title: query ? `No results for “${query}”` : "No matching bookmarks",
-      description: "Nothing in your library matches, by word or by meaning.",
+      title: noResultsTitle,
+      description: t("dashboard.emptyState.nothingMatchesDescription"),
     };
   }
   return {
-    title: "No matching bookmarks",
-    description: "Try another search or clear the current filter.",
+    title: t("dashboard.emptyState.noMatchingBookmarks"),
+    description: t("dashboard.emptyState.tryAnotherSearchDescription"),
   };
 }

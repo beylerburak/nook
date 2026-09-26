@@ -8,6 +8,7 @@ import { HStack, VStack } from "@astryxdesign/core/Layout";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { BookmarkGlyph } from "../../../extension/src/app/dashboard/glyphs";
+import { useI18n, type I18nContextValue } from "../../../extension/src/i18n";
 import { authClient, type AuthUser } from "./authClient";
 
 // Adapted from the Astryx "Login Card" template (npx astryx template login-card
@@ -18,7 +19,34 @@ import { authClient, type AuthUser } from "./authClient";
 
 type Mode = "sign-in" | "sign-up";
 
+/**
+ * Maps a Better Auth error code (`response.error.code`, from the server) to
+ * translated, user-facing copy. Only codes our own sign-in/sign-up form can
+ * actually trigger are named individually; anything else (a code we don't
+ * recognize, or none at all) falls back to a generic message — never the
+ * server's own `message` text, which isn't localized and may describe
+ * server internals.
+ */
+function describeAuthError(code: string | undefined, t: I18nContextValue["t"]): string {
+  switch (code) {
+    case "INVALID_EMAIL_OR_PASSWORD":
+      return t("web.auth.errorInvalidCredentials");
+    case "USER_ALREADY_EXISTS":
+    case "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL":
+      return t("web.auth.errorUserExists");
+    case "PASSWORD_TOO_SHORT":
+      return t("web.auth.errorPasswordTooShort");
+    case "PASSWORD_TOO_LONG":
+      return t("web.auth.errorPasswordTooLong");
+    case "INVALID_EMAIL":
+      return t("web.auth.errorInvalidEmail");
+    default:
+      return t("web.auth.errorGeneric");
+  }
+}
+
 export function AuthScreen({ onSignedIn }: { onSignedIn: (user: AuthUser) => Promise<void> | void }) {
+  const { t } = useI18n();
   const [mode, setMode] = useState<Mode>("sign-in");
   const [allowSignUp, setAllowSignUp] = useState(false);
   const [name, setName] = useState("");
@@ -53,17 +81,17 @@ export function AuthScreen({ onSignedIn }: { onSignedIn: (user: AuthUser) => Pro
         ? await authClient.signUp.email({ name: name.trim(), email: email.trim(), password })
         : await authClient.signIn.email({ email: email.trim(), password });
       if (response.error) {
-        setError(response.error.message || "Could not sign in.");
+        setError(describeAuthError(response.error.code, t));
         return;
       }
       const user = response.data?.user;
       if (!user) {
-        setError("Could not sign in.");
+        setError(t("web.auth.errorSignInFailed"));
         return;
       }
       await onSignedIn({ id: user.id, name: user.name, email: user.email, image: user.image ?? null });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not sign in. Check your connection and try again.");
+    } catch {
+      setError(t("web.auth.errorNetwork"));
     } finally {
       setBusy(false);
     }
@@ -80,17 +108,15 @@ export function AuthScreen({ onSignedIn }: { onSignedIn: (user: AuthUser) => Pro
         <VStack gap={2} hAlign="center">
           <Icon icon={BookmarkGlyph} size="lg" color="accent" />
           <Text weight="bold" size="lg">Nook</Text>
-          <Text color="secondary" type="supporting">Your visual library, available everywhere.</Text>
+          <Text color="secondary" type="supporting">{t("web.auth.tagline")}</Text>
         </VStack>
 
         <Card padding={8} width="100%">
           <VStack gap={4} hAlign="stretch">
             <VStack gap={1} hAlign="center">
-              <Heading level={2}>{mode === "sign-in" ? "Sign in" : "Create your account"}</Heading>
+              <Heading level={2}>{mode === "sign-in" ? t("web.auth.signInHeading") : t("web.auth.signUpHeading")}</Heading>
               <Text type="body" color="secondary" size="sm">
-                {mode === "sign-in"
-                  ? "Sign in to sync your library everywhere."
-                  : "Set up the first Nook account on this server."}
+                {mode === "sign-in" ? t("web.auth.signInSubtitle") : t("web.auth.signUpSubtitle")}
               </Text>
             </VStack>
 
@@ -100,10 +126,10 @@ export function AuthScreen({ onSignedIn }: { onSignedIn: (user: AuthUser) => Pro
 
             <VStack gap={2}>
               {mode === "sign-up" ? (
-                <TextInput label="Name" value={name} onChange={setName} isRequired size="lg" />
+                <TextInput label={t("web.auth.nameLabel")} value={name} onChange={setName} isRequired size="lg" />
               ) : null}
               <TextInput
-                label="Email"
+                label={t("web.auth.emailLabel")}
                 type="email"
                 value={email}
                 onChange={setEmail}
@@ -112,7 +138,7 @@ export function AuthScreen({ onSignedIn }: { onSignedIn: (user: AuthUser) => Pro
                 size="lg"
               />
               <TextInput
-                label="Password"
+                label={t("web.auth.passwordLabel")}
                 type="password"
                 value={password}
                 onChange={setPassword}
@@ -125,7 +151,7 @@ export function AuthScreen({ onSignedIn }: { onSignedIn: (user: AuthUser) => Pro
 
             <HStack gap={2}>
               <Button
-                label={mode === "sign-in" ? "Sign in" : "Create account"}
+                label={mode === "sign-in" ? t("web.auth.signInButton") : t("web.auth.createAccountButton")}
                 variant="primary"
                 size="lg"
                 isLoading={busy}
@@ -133,7 +159,7 @@ export function AuthScreen({ onSignedIn }: { onSignedIn: (user: AuthUser) => Pro
               />
               {allowSignUp ? (
                 <Button
-                  label={mode === "sign-in" ? "Create an account" : "I have an account"}
+                  label={mode === "sign-in" ? t("web.auth.switchToSignUp") : t("web.auth.switchToSignIn")}
                   variant="ghost"
                   size="lg"
                   onClick={toggleMode}

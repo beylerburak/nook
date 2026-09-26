@@ -9,6 +9,7 @@ import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { Token } from "@astryxdesign/core/Token";
+import { useI18n } from "../../i18n";
 import { MediaThumbnail } from "../components/MediaThumbnail";
 import { allItemMedia, itemTitle, visibleText } from "./bookmark-utils";
 import type { Bookmark, BookmarkList, Media } from "../../../lib/types";
@@ -51,6 +52,7 @@ export function BookmarkDetailPanel({
   onCopyUrl,
   onMedia,
 }: BookmarkDetailPanelProps) {
+  const { t } = useI18n();
   const addDraftTag = () => {
     const tag = tagDraft.trim().replace(/^#/, "");
     if (!tag) return;
@@ -63,7 +65,7 @@ export function BookmarkDetailPanel({
     <VStack gap={4}>
       <HStack justify="between" align="start" gap={2}>
         <VStack gap={1}>
-          <Heading level={3}>{itemTitle(item)}</Heading>
+          <Heading level={3}>{itemTitle(item, t)}</Heading>
           {item.creator?.handle ? (
             <Text type="supporting" color="secondary">@{item.creator.handle}</Text>
           ) : item.url ? (
@@ -71,7 +73,7 @@ export function BookmarkDetailPanel({
           ) : null}
         </VStack>
         <Button
-          label="Close details"
+          label={t("dashboard.detail.closeDetails")}
           variant="ghost"
           size="sm"
           isIconOnly
@@ -86,7 +88,7 @@ export function BookmarkDetailPanel({
           <Section variant="muted" padding={4}>
             <VStack gap={2}>
               <Text type="supporting" weight="semibold">
-                {item.quote.creator?.name || item.quote.creator?.handle || "Quoted post"}
+                {item.quote.creator?.name || item.quote.creator?.handle || t("dashboard.shared.quotedPost")}
               </Text>
               <Text type="body">{item.quote.text}</Text>
             </VStack>
@@ -99,35 +101,35 @@ export function BookmarkDetailPanel({
                 key={media.url + "-" + index}
                 mediaType={media.type}
                 src={media.url}
-                alt={media.alt || itemTitle(item) + " media " + (index + 1)}
-                label={media.alt || "Media " + (index + 1)}
+                alt={media.alt || t("dashboard.detail.mediaAlt", { title: itemTitle(item, t), index: index + 1 })}
+                label={media.alt || t("dashboard.detail.mediaLabel", { index: index + 1 })}
                 onClick={() => onMedia(media, item)}
               />
             ))}
           </Grid>
         ) : null}
         <TextArea
-          label="Personal note"
+          label={t("dashboard.detail.personalNoteLabel")}
           value={noteDraft}
           onChange={onNoteDraftChange}
-          placeholder="Add a thought or reminder…"
+          placeholder={t("dashboard.detail.notePlaceholder")}
           rows={3}
         />
         <HStack gap={2} align="end" wrap="wrap">
           <TextInput
-            label="Add a tag"
+            label={t("dashboard.detail.addTagLabel")}
             value={tagDraft}
             onChange={onTagDraftChange}
-            placeholder="e.g. inspiration"
+            placeholder={t("dashboard.detail.tagPlaceholder")}
             onEnter={addDraftTag}
           />
-          <Button label="Add tag" variant="secondary" onClick={addDraftTag} />
+          <Button label={t("dashboard.detail.addTag")} variant="secondary" onClick={addDraftTag} />
         </HStack>
         <HStack gap={2} wrap="wrap">
           {(item.tags || []).map((tag) => (
             <Button
               key={tag}
-              label={"Remove #" + tag}
+              label={t("dashboard.detail.removeTag", { tag })}
               variant="ghost"
               size="sm"
               onClick={() => void onUpdateTags((item.tags || []).filter((value) => value !== tag))}
@@ -138,7 +140,7 @@ export function BookmarkDetailPanel({
           (existing) => existing.toLowerCase().replace(/^#/, "") === tag,
         )) ? (
           <VStack gap={2}>
-            <Text type="supporting" color="secondary">Suggested tags</Text>
+            <Text type="supporting" color="secondary">{t("dashboard.detail.suggestedTags")}</Text>
             <HStack gap={2} wrap="wrap">
               {tagCounts
                 .filter(([tag]) => !(item.tags || []).some(
@@ -158,9 +160,9 @@ export function BookmarkDetailPanel({
           </VStack>
         ) : null}
         <Selector
-          label="Collection"
+          label={t("dashboard.detail.collectionLabel")}
           options={[
-            { value: "", label: "Unorganized" },
+            { value: "", label: t("dashboard.views.unorganized") },
             ...lists.map((list) => ({
               value: list.id,
               label: (list.icon || list.emoji || "📁") + " " + list.name,
@@ -182,14 +184,14 @@ export function BookmarkDetailPanel({
         <HStack gap={2} wrap="wrap">
           {item.url ? (
             <Button
-              label={item.source === "chrome" ? "Open page" : "Open on X"}
+              label={item.source === "chrome" ? t("dashboard.detail.openPage") : t("dashboard.detail.openOnX")}
               variant="secondary"
               icon={<Icon icon="externalLink" size="sm" />}
               onClick={() => onOpenUrl(item.url!)}
             />
           ) : null}
           <Button
-            label="Copy URL"
+            label={t("dashboard.detail.copyUrl")}
             variant="ghost"
             icon={<Icon icon="copy" size="sm" />}
             onClick={() => {
@@ -199,8 +201,8 @@ export function BookmarkDetailPanel({
           />
         </HStack>
         <HStack justify="between" gap={2}>
-          <Button label="Delete" variant="ghost" onClick={() => onDelete(item)} />
-          <Button label="Save note" variant="primary" onClick={onSaveNote} />
+          <Button label={t("dashboard.shared.delete")} variant="ghost" onClick={() => onDelete(item)} />
+          <Button label={t("dashboard.shared.saveNote")} variant="primary" onClick={onSaveNote} />
         </HStack>
       </VStack>
     </VStack>

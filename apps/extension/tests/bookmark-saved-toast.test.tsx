@@ -3,6 +3,20 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BookmarkSavedToast } from "../src/app/components/BookmarkSavedToast";
+import { LOCALE_STORAGE_KEY } from "../lib/locale";
+
+// Node ships its own global localStorage that shadows happy-dom's (see
+// tests/settings-dialog.test.tsx) — stub a plain in-memory one so the
+// Turkish-locale test below can actually read/write it.
+function stubLocalStorage() {
+  const store = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => void store.set(key, String(value)),
+    removeItem: (key: string) => void store.delete(key),
+    clear: () => store.clear(),
+  });
+}
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -34,6 +48,7 @@ function advance(ms: number) {
 describe("BookmarkSavedToast", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    stubLocalStorage();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -43,6 +58,7 @@ describe("BookmarkSavedToast", () => {
     act(() => root.unmount());
     container.remove();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it("renders a compact pill with the message, Add a note and Close", () => {
@@ -113,5 +129,12 @@ describe("BookmarkSavedToast", () => {
     expect(container.textContent).toContain("Note saved");
     advance(2100);
     expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders Add a note and Close in Turkish when the locale setting is 'tr'", () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "tr");
+    renderToast();
+    expect(button("Not ekle")).toBeTruthy();
+    expect(button("Kapat")).toBeTruthy();
   });
 });

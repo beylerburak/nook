@@ -5,13 +5,122 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#1b1b1b" />
     <meta name="description" content="Save what matters." />
-    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/icon.svg" />
+    <!--
+      Deliberately not the app: no manifest link, no service worker, no
+      bundle import — this is a static placeholder (see docs/cloud.md's
+      URL layout note). The manifest/PWA/offline machinery belongs to
+      app/index.html, not here (task contract, apps/web/vite.config.ts).
+      Colors are hand-copied from apps/extension/src/app/theme/nook.js's
+      dark tokens (--color-background-body/--color-text-primary/
+      --color-text-secondary/--color-accent) rather than importing the
+      Astryx theme, so this page never pulls in the design-system bundle.
+      The one inline <script>, at the end of <body>, only swaps its own
+      three strings to Turkish per the user's saved locale — see docs/i18n.md.
+    -->
     <title>Nook — Save what matters</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        padding: 24px;
+        background: #1b1b1b;
+        color: #ffffff;
+        font-family:
+          Figtree,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Roboto,
+          Helvetica,
+          Arial,
+          sans-serif;
+        text-align: center;
+      }
+      main {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      .mark {
+        width: 40px;
+        height: 40px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 1.5rem;
+        font-weight: 600;
+      }
+      p {
+        margin: 0;
+        color: #9e9e9e;
+        font-size: 0.875rem;
+      }
+      a {
+        margin-top: 8px;
+        padding: 10px 20px;
+        border-radius: 9999px;
+        background: #f1f1f1;
+        color: #1b1b1b;
+        font-size: 0.875rem;
+        font-weight: 500;
+        text-decoration: none;
+      }
+      a:hover {
+        opacity: 0.9;
+      }
+    </style>
   </head>
   <body>
-    <main id="app-root"></main>
-    <script type="module" src="/src/main.tsx"></script>
+    <main>
+      <svg class="mark" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <rect width="24" height="24" rx="5" fill="#f1f1f1" />
+        <path
+          d="M6.75 4.75A1.75 1.75 0 0 1 8.5 3h7A1.75 1.75 0 0 1 17.25 4.75V21l-5.25-3.75L6.75 21V4.75Z"
+          fill="none"
+          stroke="#1b1b1b"
+          stroke-width="1.6"
+          stroke-linejoin="round"
+        />
+      </svg>
+      <h1>Nook</h1>
+      <p id="tagline">Save what matters.</p>
+      <a id="cta" href="/app">Open the app</a>
+    </main>
+    <!--
+      Bilingual without a bundle: this page is deliberately script-free apart
+      from this one inline snippet (see the note up top). Mirrors
+      apps/extension/lib/locale.ts's "nook.locale" storage key/values exactly
+      ("system" | "en" | "tr", stored as a plain string, not JSON) so a
+      preference set in the app or extension carries over here.
+    -->
+    <script>
+      (function () {
+        try {
+          var setting = localStorage.getItem("nook.locale");
+          var isTr = setting === "tr" || ((!setting || setting === "system") && /^tr/i.test(navigator.language || ""));
+          if (!isTr) return;
+          document.documentElement.lang = "tr";
+          document.title = "Nook — Önemli olanı kaydet";
+          document.getElementById("tagline").textContent = "Önemli olanı kaydet.";
+          document.getElementById("cta").textContent = "Uygulamayı aç";
+        } catch (e) {}
+      })();
+    </script>
   </body>
 </html>

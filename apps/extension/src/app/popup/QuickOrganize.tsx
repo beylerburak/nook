@@ -7,6 +7,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextArea } from "@astryxdesign/core/TextArea";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Token } from "@astryxdesign/core/Token";
+import { useI18n } from "../../i18n";
 import type { Bookmark, BookmarkList, BookmarkPatch } from "../../../lib/types";
 
 export interface QuickOrganizeProps {
@@ -26,6 +27,7 @@ export interface QuickOrganizeProps {
  * write path, matching the popup contract in lib/types.ts.
  */
 export function QuickOrganize({ bookmark, lists, suggestedTags, defaultIsOpen, onPatch }: QuickOrganizeProps) {
+  const { t } = useI18n();
   const [noteDraft, setNoteDraft] = useState(bookmark.note || "");
   const [tagDraft, setTagDraft] = useState("");
   const tags = bookmark.tags || [];
@@ -52,15 +54,15 @@ export function QuickOrganize({ bookmark, lists, suggestedTags, defaultIsOpen, o
   const unusedSuggestions = suggestedTags.filter((tag) => !tags.includes(tag)).slice(0, 6);
 
   return (
-    <Collapsible trigger={<Text weight="semibold">Organize</Text>} defaultIsOpen={defaultIsOpen}>
+    <Collapsible trigger={<Text weight="semibold">{t("popup.organize.title")}</Text>} defaultIsOpen={defaultIsOpen}>
       <VStack gap={3} paddingBlockStart={2}>
         <TextArea
-          label="Personal note"
+          label={t("popup.organize.noteLabel")}
           isLabelHidden
           value={noteDraft}
           onChange={setNoteDraft}
           onBlur={saveNoteIfChanged}
-          placeholder="Add a note…"
+          placeholder={t("popup.organize.notePlaceholder")}
           rows={2}
           size="sm"
         />
@@ -68,16 +70,16 @@ export function QuickOrganize({ bookmark, lists, suggestedTags, defaultIsOpen, o
         <VStack gap={2}>
           <HStack gap={2} align="end">
             <TextInput
-              label="Add a tag"
+              label={t("popup.organize.addTagLabel")}
               isLabelHidden
               size="sm"
               value={tagDraft}
               onChange={setTagDraft}
-              placeholder="Add a tag…"
+              placeholder={t("popup.organize.addTagPlaceholder")}
               onEnter={() => addTag(tagDraft)}
             />
             <Button
-              label="Add tag"
+              label={t("popup.organize.addTagButton")}
               size="sm"
               variant="secondary"
               isDisabled={!tagDraft.trim()}
@@ -97,11 +99,11 @@ export function QuickOrganize({ bookmark, lists, suggestedTags, defaultIsOpen, o
         </VStack>
 
         <Selector
-          label="Collection"
+          label={t("popup.organize.collectionLabel")}
           isLabelHidden
           size="sm"
           options={[
-            { value: "", label: "Unorganized" },
+            { value: "", label: t("popup.organize.unorganized") },
             ...lists.map((list) => ({
               value: list.id,
               label: (list.icon || list.emoji || "📁") + " " + list.name,

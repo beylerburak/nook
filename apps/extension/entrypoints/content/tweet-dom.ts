@@ -1,4 +1,6 @@
 import type { Bookmark, Media, Quote } from "../../lib/types";
+import { translate } from "../../src/i18n/core";
+import { getContentLocale } from "./locale-state";
 
 /** querySelectorAll that skips matches inside `exclude` (e.g. the quoted tweet box). */
 export function queryAllOutside(root: Element, selector: string, exclude: Element | null = null): HTMLElement[] {
@@ -89,7 +91,7 @@ export function extractMedia(
         media.push({
           type: "video",
           url: poster,
-          alt: "Video thumbnail",
+          alt: translate(getContentLocale(), "extension.media.videoThumbnail"),
           ...(videoUrl ? { videoUrl } : {})
         });
       }
@@ -111,7 +113,7 @@ export function extractMedia(
         media.push({
           type: "card",
           url: src,
-          alt: img.getAttribute("alt") || "Link preview"
+          alt: img.getAttribute("alt") || translate(getContentLocale(), "extension.media.linkPreview")
         });
       }
     }

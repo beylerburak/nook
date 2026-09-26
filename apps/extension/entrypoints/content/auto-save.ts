@@ -1,4 +1,6 @@
+import { translate } from "../../src/i18n/core";
 import type { Bookmark } from "../../lib/types";
+import { getContentLocale } from "./locale-state";
 import type { SendNookMessage } from "./messaging";
 import type { Notify } from "./notify";
 
@@ -14,7 +16,7 @@ export interface AutoSaveDeps {
 async function saveItem(deps: AutoSaveDeps, item: Bookmark): Promise<boolean> {
   if (!deps.isExtensionValid()) {
     console.warn("[Nook] Extension context invalidated. Please refresh the page (F5).");
-    deps.notify("Nook was updated. Please refresh the page (F5) 🔄");
+    deps.notify(translate(getContentLocale(), "extension.xButton.extensionUpdated"));
     return false;
   }
 
@@ -55,7 +57,7 @@ export function attachNativeBookmarkAutoSave(deps: AutoSaveDeps, doc: Document =
 
         if (!deps.isExtensionValid()) {
           console.warn("[Nook] Extension was reloaded. Please refresh the page (F5).");
-          deps.notify("Nook was updated. Please refresh the page (F5) 🔄");
+          deps.notify(translate(getContentLocale(), "extension.xButton.extensionUpdated"));
           return;
         }
 
@@ -74,8 +76,11 @@ export function attachNativeBookmarkAutoSave(deps: AutoSaveDeps, doc: Document =
         const saved = await saveItem(deps, item);
         if (saved) {
           deps.onSaved(item.id, true);
+          const locale = getContentLocale();
           deps.notify(
-            item.media?.length ? `Nook: Saved with ${item.media.length} media ✓` : "Nook: Saved to bookmarks ✓",
+            item.media?.length
+              ? translate(locale, "extension.toast.bookmarkSavedWithMedia", { count: item.media.length })
+              : translate(locale, "extension.toast.bookmarkSaved"),
             item.id
           );
         }

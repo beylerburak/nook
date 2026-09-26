@@ -9,6 +9,7 @@ import { HStack, StackItem, VStack } from "@astryxdesign/core/Layout";
 import { SideNav, SideNavItem } from "@astryxdesign/core/SideNav";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import type { ThemeMode } from "@astryxdesign/core/theme";
+import { useI18n } from "../../i18n";
 import { useNookHost, type NookHost } from "../host/NookHost";
 import { AboutPanel } from "./AboutPanel";
 import { AccountPanel } from "./AccountPanel";
@@ -91,6 +92,7 @@ function renderSection(section: SettingsSection, props: SettingsDialogProps): Re
 
 export function SettingsDialog(props: SettingsDialogProps) {
   const { isOpen, onOpenChange, initialSection } = props;
+  const { t } = useI18n();
   const host = useNookHost();
   const sections = useMemo(() => visibleSections(host), [host]);
   const [activeSection, setActiveSection] = useState<SettingsSection>(() => resolveSection(initialSection, sections));
@@ -124,9 +126,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const config = settingsSectionConfig(activeSection);
   const heading = (
     <VStack gap={0.5}>
-      <Heading level={2}>{config.label}</Heading>
+      <Heading level={2}>{t(config.labelKey)}</Heading>
       <Text type="supporting" color="secondary">
-        {config.description}
+        {t(config.descriptionKey)}
       </Text>
     </VStack>
   );
@@ -155,10 +157,10 @@ export function SettingsDialog(props: SettingsDialogProps) {
       <VStack height="100%" minHeight={SETTINGS_DIALOG_HEIGHT}>
         <HStack padding={4} justify="between" align="center">
           <Heading level={3} id={titleId}>
-            Settings
+            {t("settings.dialog.title")}
           </Heading>
           <IconButton
-            label="Close"
+            label={t("common.close")}
             variant="ghost"
             size="sm"
             icon={<Icon icon="close" size="sm" />}
@@ -187,21 +189,29 @@ export function SettingsDialog(props: SettingsDialogProps) {
         <StackItem size="fill" style={{ display: "flex", flexDirection: "column" }}>
           {isNarrow ? (
             <VStack gap={0} height="100%" minHeight={0}>
-              <HStack as="nav" aria-label="Settings sections" gap={1} wrap="nowrap" isScrollable paddingInline={3} paddingBlock={2}>
-                {sections.map((id) => {
-                  const section = settingsSectionConfig(id);
-                  return (
-                    <Button
-                      key={id}
-                      label={section.label}
-                      icon={<Icon icon={section.icon} size="sm" />}
-                      variant={id === activeSection ? "secondary" : "ghost"}
-                      size="sm"
-                      onClick={() => setActiveSection(id)}
-                    />
-                  );
-                })}
-              </HStack>
+              {/*
+                Same reason as the side nav below: \`isScrollable\` gives this
+                strip \`overflow: auto\`, which lets a flex child shrink below
+                its content, so the fill pane squeezed it until the tab labels
+                were clipped. \`size="static"\` keeps it at its own height.
+              */}
+              <StackItem size="static">
+                <HStack as="nav" aria-label={t("settings.dialog.sectionsLabel")} gap={1} wrap="nowrap" isScrollable paddingInline={3} paddingBlock={2}>
+                  {sections.map((id) => {
+                    const section = settingsSectionConfig(id);
+                    return (
+                      <Button
+                        key={id}
+                        label={t(section.labelKey)}
+                        icon={<Icon icon={section.icon} size="sm" />}
+                        variant={id === activeSection ? "secondary" : "ghost"}
+                        size="sm"
+                        onClick={() => setActiveSection(id)}
+                      />
+                    );
+                  })}
+                </HStack>
+              </StackItem>
               <Divider />
               {/*
                 The scrollable pane itself is the StackItem (`size="fill"
@@ -232,20 +242,32 @@ export function SettingsDialog(props: SettingsDialogProps) {
               sizes purely from flexbox, with no such inherited cap.
             */
             <HStack gap={0} height="100%" minHeight={0}>
-              <SideNav aria-label="Settings sections">
-                {sections.map((id) => {
-                  const section = settingsSectionConfig(id);
-                  return (
-                    <SideNavItem
-                      key={id}
-                      label={section.label}
-                      icon={<Icon icon={section.icon} size="sm" />}
-                      isSelected={id === activeSection}
-                      onClick={() => setActiveSection(id)}
-                    />
-                  );
-                })}
-              </SideNav>
+              {/*
+                `StackItem size="static"` is what keeps the nav at its own
+                (260px) width: a bare `SideNav` here is a plain flex child of
+                `HStack` and gets the browser's default `flex-shrink: 1`, so
+                the content pane's wide rows (e.g. AiPanel) squeezed it down
+                to icons-plus-a-letter ("P..", "A..", "S.."). `size="static"`
+                sets `flex-shrink: 0` (see stackItem.stylex.ts), so the nav
+                never gives up width to its sibling — the sibling's own
+                `size="fill"` is what has to shrink instead.
+              */}
+              <StackItem size="static">
+                <SideNav aria-label={t("settings.dialog.sectionsLabel")}>
+                  {sections.map((id) => {
+                    const section = settingsSectionConfig(id);
+                    return (
+                      <SideNavItem
+                        key={id}
+                        label={t(section.labelKey)}
+                        icon={<Icon icon={section.icon} size="sm" />}
+                        isSelected={id === activeSection}
+                        onClick={() => setActiveSection(id)}
+                      />
+                    );
+                  })}
+                </SideNav>
+              </StackItem>
               <StackItem size="fill" isScrollable ref={setContentScrollRef}>
                 <VStack padding={4} gap={4}>
                   {heading}
