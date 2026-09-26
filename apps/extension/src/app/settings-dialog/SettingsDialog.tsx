@@ -41,25 +41,27 @@ export interface SettingsDialogProps {
  * Which sections apply to this host: Profile needs a signed-in user (hidden
  * in the extension's local-only mode), Account & security needs
  * `host.account` (web only — a signed-in extension manages its account on
- * the web instead, see `ProfilePanel`), and AI classification is extension-only
- * *and* needs a session, because the pass runs in the extension's service worker
- * and authenticates with the bearer token the cloud-sync bridge writes. A
- * connected extension has a `user` and no `account`, so gating on `host.user`
- * rather than `host.account` is what keeps this visible where it works.
+ * the web instead, see `ProfilePanel`), and AI needs a session on either host.
+ *
+ * AI settings are an account preference (`GET`/`PUT /api/ai/settings`,
+ * apps/api/src/ai-settings.ts) rather than a per-browser one, so the toggle a
+ * signed-in web user sees is the exact same one the extension's runner reads
+ * before every pass — there is no host-specific reason to hide it. What is
+ * still extension-only is *running* a pass: the classification queue is
+ * lib/ai-runner.ts, called only from the extension's service worker
+ * (entrypoints/background/index.ts), so AiPanel itself disables "Classify
+ * now" and "Suggest taxonomy" on the web host and explains why. See docs/ai.md.
+ *
+ * A connected extension has a `user` and no `account`, so gating on
+ * `host.user` rather than `host.account` is what keeps this visible where it
+ * works, on both hosts.
  */
 function visibleSections(host: NookHost): SettingsSection[] {
   const sections: SettingsSection[] = [];
   if (host.user) sections.push("profile");
   if (host.account) sections.push("account");
   sections.push("appearance", "sync");
-  // Extension-only, and gated on `host.user` as well. The classification pass
-  // runs in the extension's service worker (lib/ai-runner.ts is called from
-  // background/index.ts and nowhere else), and it needs a bearer token that only
-  // the cloud-sync bridge writes. The web app authenticates by cookie, so a
-  // toggle there would write `ai.settings` to a per-origin meta store that no
-  // reader ever consults — a switch that visibly does nothing. The same applies
-  // to `ai.taxonomy` and the status counters. See docs/ai.md.
-  if (host.user && host.kind === "extension") sections.push("ai");
+  if (host.user) sections.push("ai");
   sections.push("data", "about");
   return sections;
 }

@@ -37,14 +37,24 @@ import { SettingsCard, SettingsRow } from "./settings-shared";
 /**
  * Settings → AI. Two independent features (see `docs/ai.md`): filing new
  * bookmarks into the collections and tags you already have, and proposing new
- * ones. Both are off by default, and a classification is an authenticated
- * server call — so the dialog only offers this section when `host.user` is
- * set, and a signed-out host gets an explanation instead of the toggles.
+ * ones. Both are off by default.
+ *
+ * The settings this panel edits are an account preference (`GET`/`PUT
+ * /api/ai/settings`), not a per-browser one, so the panel itself is the same
+ * on both hosts. `SettingsDialog.visibleSections` only offers this section
+ * when `host.user` is set — a classification is always an authenticated
+ * server call, so there is nothing to configure while signed out — and the
+ * guard below is a defensive fallback for the one render that can land after
+ * a sign-out clears `host.user` but before the dialog switches away from this
+ * section. What *does* still depend on the host is where a pass actually
+ * runs: see `RUNS_IN_EXTENSION` and `StatusCard`.
  */
 export function AiPanel() {
   const host = useNookHost();
   const { settings, commit } = useAiSettings();
   const { run, reload } = useAiRunSummary(settings);
+
+  if (!host.user) return <SignInRequired host={host} />;
 
   if (!settings) {
     return (
@@ -88,23 +98,27 @@ export function AiPanel() {
 
       <SummaryCard settings={settings} commit={commit} />
 
-      {host.user ? <StatusCard settings={settings} run={run} onRun={reload} /> : <SignInRequired host={host} />}
+      <StatusCard settings={settings} run={run} onRun={reload} />
     </VStack>
   );
 }
 
 /**
- * Both AI actions run in the extension, and the panel says so rather than
- * offering a control that quietly does nothing.
+ * Actually running a pass is still extension-only, even though the settings
+ * that gate it now apply everywhere — the panel says so rather than offering a
+ * control that quietly does nothing.
  *
  * The reasons are not stylistic. A pass is the service worker's 5-minute alarm
  * and the single-flight-guarded `runClassification()` behind it, and there is no
- * service worker on the web origin. The runner's records are per-origin meta
- * keys and meta does not sync, so a taxonomy accepted here would never reach the
- * classifier that reads it — while the collections it creates *would* sync, and
- * would arrive everywhere with no evidence of what belongs in them, which is
- * the part of the digest the measurements in docs/ai-calibration.md say is
- * worth 8.7 points of top-1.
+ * service worker on the web origin. `ai.taxonomy` (the accepted taxonomy's
+ * sample titles, read only by that runner) and the run counters `StatusCard`
+ * shows are still per-origin IndexedDB `meta` for the same reason — nothing
+ * about them is a user-facing *setting*, so moving them server-side would add a
+ * sync path for state that only one host ever reads. A taxonomy accepted from
+ * the web would therefore never reach the classifier that reads it — while the
+ * collections it creates *would* sync, and would arrive everywhere with no
+ * evidence of what belongs in them, which is the part of the digest the
+ * measurements in docs/ai-calibration.md say is worth 8.7 points of top-1.
  */
 const RUNS_IN_EXTENSION = "Runs in the Nook browser extension, where classification runs.";
 
@@ -592,43 +606,62 @@ function StatusCard({ settings, run, onRun }: { settings: AiSettings; run: AiRun
           </HStack>
         }
       />
-      <SettingsRow
-        title="Last run"
-        control={
-          run.lastRunAt ? (
-            <Text color="secondary">
-              <Timestamp value={run.lastRunAt} format="relative" isLive />
-            </Text>
-          ) : (
-            <Text color="secondary">Never</Text>
-          )
-        }
-      />
       {/*
-        The counter the doc cares about: a feature under-firing on non-English
-        content shows up here as a small "filed" beside a large "skipped",
-        rather than as a silent mislabel. `processed` and `tagged` stay out —
-        `ai.log` keeps the per-decision detail this row is a summary of.
+        `run` comes from `ai.cursor`, a per-origin IndexedDB `meta` key the
+        extension's runner writes after every tick (lib/ai-runner.ts) — it is
+        run *history*, not a setting, so it was never moved server-side (see
+        the comment on RUNS_IN_EXTENSION above). On the web host that key is
+        simply never written, so showing it here would render "Never" and
+        "0 filed, 0 skipped" next to a feature the connected extension may be
+        actively running — degrade to a pointer at the real numbers instead of
+        a confidently wrong zero.
       */}
-      <SettingsRow
-        title="Last pass"
-        description={run.lastError ?? "Bookmarks filed and left alone since the last pass."}
-        control={
-          <HStack gap={2} align="center">
-            <Badge label={run.assigned} />
-            <Text type="supporting" color="secondary">
-              filed
-            </Text>
-            <Text type="supporting" color="secondary">
-              ·
-            </Text>
-            <Badge label={run.skipped} />
-            <Text type="supporting" color="secondary">
-              skipped
-            </Text>
-          </HStack>
-        }
-      />
+      {host.kind === "extension" ? (
+        <>
+          <SettingsRow
+            title="Last run"
+            control={
+              run.lastRunAt ? (
+                <Text color="secondary">
+                  <Timestamp value={run.lastRunAt} format="relative" isLive />
+                </Text>
+              ) : (
+                <Text color="secondary">Never</Text>
+              )
+            }
+          />
+          {/*
+            The counter the doc cares about: a feature under-firing on non-English
+            content shows up here as a small "filed" beside a large "skipped",
+            rather than as a silent mislabel. `processed` and `tagged` stay out —
+            `ai.log` keeps the per-decision detail this row is a summary of.
+          */}
+          <SettingsRow
+            title="Last pass"
+            description={run.lastError ?? "Bookmarks filed and left alone since the last pass."}
+            control={
+              <HStack gap={2} align="center">
+                <Badge label={run.assigned} />
+                <Text type="supporting" color="secondary">
+                  filed
+                </Text>
+                <Text type="supporting" color="secondary">
+                  ·
+                </Text>
+                <Badge label={run.skipped} />
+                <Text type="supporting" color="secondary">
+                  skipped
+                </Text>
+              </HStack>
+            }
+          />
+        </>
+      ) : (
+        <SettingsRow
+          title="Run history"
+          description="Classification runs in the Nook browser extension's background service worker. These toggles apply there as soon as it's connected to this account — open Settings → AI in the extension to see when it last ran and what it filed."
+        />
+      )}
     </SettingsCard>
   );
 }

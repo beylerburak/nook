@@ -10,6 +10,7 @@ import {
   parseProposeTaxonomyRequest,
   proposeTaxonomy,
 } from "./ai.js";
+import { getAiUserSettings, parseAiUserSettingsPatch, saveAiUserSettingsPatch } from "./ai-settings.js";
 import { embedTexts, reconcileIndex } from "./embeddings.js";
 import { parseSearchRequest, searchBookmarks } from "./retrieval.js";
 import { parseSummarizeRequest, summarizeAvailability, summarizeRecords } from "./summarize.js";
@@ -19,7 +20,7 @@ const app = new Hono();
 app.use("/api/*", cors({
   origin: (origin) => allowedOrigins.has(origin) ? origin : "",
   allowHeaders: ["Content-Type", "Authorization"],
-  allowMethods: ["GET", "POST", "OPTIONS"],
+  allowMethods: ["GET", "POST", "PUT", "OPTIONS"],
   exposeHeaders: ["set-auth-token"],
   credentials: true,
 }));
@@ -80,6 +81,29 @@ app.post("/api/ai/propose-taxonomy", async (c) => {
     return c.json({ error: error instanceof Error ? error.message : "Invalid request" }, 400);
   }
   return c.json(await proposeTaxonomy(request));
+});
+
+// The toggles and thresholds themselves — see apps/api/src/ai-settings.ts.
+// Account-wide, not per-browser: this is the fix for the gap docs/ai.md used
+// to describe under "AI settings scoped to the extension" — a toggle flipped
+// in the web app now writes the same row the extension's runner reads before
+// every pass, instead of a per-origin IndexedDB key nothing else could see.
+app.get("/api/ai/settings", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  return c.json(await getAiUserSettings(pool, session.user.id));
+});
+
+app.put("/api/ai/settings", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  let patch;
+  try {
+    patch = parseAiUserSettingsPatch(await c.req.json());
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Invalid request" }, 400);
+  }
+  return c.json(await saveAiUserSettingsPatch(pool, session.user.id, patch));
 });
 
 app.post("/api/search", async (c) => {

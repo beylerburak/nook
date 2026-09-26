@@ -1,14 +1,23 @@
 /**
- * AI feature toggles and thresholds, stored in the IndexedDB `meta` store
- * under `ai.settings`.
+ * AI feature toggles and thresholds — see docs/ai.md, "Settings surface".
  *
- * These are device preferences, in the same sense as the appearance mode: they
- * describe this browser's user, not the library. That is why they live in
- * `meta` rather than in a synced record - `wipeLocalLibrary()` clears bookmarks,
- * lists and every `cloud:`-namespaced key but keeps everything else, so signing
- * out (or switching accounts) can't silently switch classification back on, and
- * a second browser starts from the conservative defaults until its own user
- * turns the features on.
+ * These are account preferences, stored server-side (`GET`/`PUT /api/ai/settings`,
+ * apps/api/src/ai-settings.ts) rather than in this browser's own storage. That
+ * used to be backwards: `ai.settings` lived in per-origin IndexedDB `meta`, so
+ * a toggle flipped in the web app wrote a value the extension's service worker
+ * — the only place a pass actually runs — never read, and vice versa. A
+ * classification is an authenticated server call regardless of which host
+ * asked for it, so the setting that gates it belongs to the account, the same
+ * as the bookmarks and collections it acts on.
+ *
+ * `AI_SETTINGS_META_KEY` still names an IndexedDB `meta` key, but it is now a
+ * read-through CACHE of the last value this browser fetched, not the source
+ * of truth: `loadAiSettings()` always asks the server first and only falls
+ * back to it when there is nothing to ask (signed out) or the ask failed
+ * (offline, a 5xx). That is what keeps the panel showing something sane the
+ * instant it mounts, and what keeps `saveAiSettings` honest when a write
+ * fails: a write that throws propagates, exactly as before, rather than
+ * silently reporting success for a preference the server never stored.
  *
  * Every feature is off by default and every threshold defaults high: these are
  * background passes over someone's real library, and the safe failure for
@@ -18,6 +27,7 @@
  * user's decision, not a default.
  */
 
+import { cloudApiUrl, cloudRequestAuth, type RequestAuth } from "./cloud-sync";
 import * as NookDB from "./db";
 
 export const AI_SETTINGS_META_KEY = "ai.settings";
@@ -26,9 +36,6 @@ export const AI_SETTINGS_META_KEY = "ai.settings";
  *  reaches the proposer. Duplicated rather than shared: the api workspace has no
  *  dependency on the extension, and a six-value union is not worth coupling for. */
 export type TaxonomyLanguage = "auto" | "en" | "tr" | "de" | "fr" | "es";
-
-/** Same channel db.ts's notifyChange() broadcasts on, so existing listeners (cloud-runner, the dashboard) treat a settings write like any other write. */
-const DB_CHANNEL = "nook-db";
 
 export interface AiSettings {
   /** Feature 1: file into existing collections and add existing tags. */
@@ -134,8 +141,99 @@ function normalizeAiSettings(value: unknown): AiSettings {
   };
 }
 
-/** Always a usable value: a failed read is a closed or missing DB, and the defaults are the safe failure. */
-export async function loadAiSettings(): Promise<AiSettings> {
+// -- server I/O -----------------------------------------------------------
+
+/** Minimal structural fetch, so a test can hand in a plain stub. Mirrors AiFetch
+ *  in lib/ai-runner.ts and SearchFetch in lib/retrieval.ts. */
+export type AiSettingsFetch = (input: string, init: RequestInit) => Promise<Response>;
+
+export interface AiSettingsDeps {
+  /** Defaults to the global fetch. */
+  fetch?: AiSettingsFetch;
+  /** Defaults to cloudRequestAuth() — bearer in the extension, cookie on the web. */
+  requestAuth?: () => Promise<RequestAuth | null>;
+  /** Defaults to cloudApiUrl(). */
+  apiUrl?: string;
+  /** Epoch-ms clock; injected so the cache window below is testable without waiting. */
+  now?: () => number;
+}
+
+function buildRequestInit(auth: RequestAuth, init: RequestInit): RequestInit {
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...(init.headers as Record<string, string> | undefined) };
+  const requestInit: RequestInit = { ...init, headers };
+  if (auth.mode === "bearer") headers.Authorization = `Bearer ${auth.token}`;
+  else requestInit.credentials = "include";
+  return requestInit;
+}
+
+/** One round trip, no caching — always hits the server (or fails). The public
+ *  `loadAiSettings`/`saveAiSettings` below are what callers actually use. */
+async function requestServerSettings(deps: AiSettingsDeps, init: RequestInit): Promise<AiSettings | null> {
+  const requestAuth = deps.requestAuth ?? cloudRequestAuth;
+  const apiUrl = (deps.apiUrl ?? cloudApiUrl()).replace(/\/$/, "");
+  const doFetch: AiSettingsFetch = deps.fetch ?? ((input, requestInit) => fetch(input, requestInit));
+
+  let auth: RequestAuth | null;
+  try {
+    auth = await requestAuth();
+  } catch {
+    return null;
+  }
+  // No account bound to this browser at all: settings are server-side now, so
+  // there is nothing to ask for. Not an error — a local-only browser (or a web
+  // tab before its first sign-in) is a normal, expected state.
+  if (!auth) return null;
+
+  let response: Response;
+  try {
+    response = await doFetch(`${apiUrl}/api/ai/settings`, buildRequestInit(auth, init));
+  } catch {
+    return null; // offline / network error — the caller falls back to its cache.
+  }
+  if (!response.ok) return null;
+  try {
+    return normalizeAiSettings(await response.json());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How long a fetched value is trusted before the next `loadAiSettings()`
+ * asks the server again.
+ *
+ * A GET is cheap on its own, but `aiIsArmable()` (entrypoints/background/
+ * index.ts) calls `loadAiSettings()` once per saved bookmark, and importing a
+ * library one item at a time must not turn into one request per item. Long
+ * enough to absorb a burst of saves; short enough that a toggle flipped in
+ * another tab takes effect within the same browsing session. `saveAiSettings`
+ * and a cross-context change (the BroadcastChannel handler below) both clear
+ * it immediately, so neither has to wait out the window.
+ */
+const CACHE_TTL_MS = 60_000;
+
+let cache: { value: AiSettings; expiresAt: number } | null = null;
+
+/** Any dep override means a test (or a caller with its own transport, like
+ *  lib/ai-runner.ts reusing the runner's own fetch/session) is driving this
+ *  call directly, so the shared cache is bypassed rather than silently mixing
+ *  a real fetch's result with a stubbed one across calls. */
+function bypassesCache(deps: AiSettingsDeps): boolean {
+  return deps.fetch !== undefined || deps.requestAuth !== undefined || deps.apiUrl !== undefined;
+}
+
+function invalidateCache(): void {
+  cache = null;
+}
+
+/** Test-only, in the style of `NookDB._resetForTests()`: the cache is a module-
+ *  level singleton, so a test exercising it (rather than bypassing it with an
+ *  explicit dep) needs a way to start from cold between cases. */
+export function _resetAiSettingsCacheForTests(): void {
+  cache = null;
+}
+
+async function readLocalCache(): Promise<AiSettings> {
   try {
     return normalizeAiSettings(await NookDB.getMeta(AI_SETTINGS_META_KEY));
   } catch {
@@ -143,13 +241,66 @@ export async function loadAiSettings(): Promise<AiSettings> {
   }
 }
 
+/** Always a usable value, and never throws: signed out, offline, and a 5xx are
+ *  all ordinary states here, each answered by falling back to the last value
+ *  this browser saw (or the conservative defaults if it has never seen one). */
+export async function loadAiSettings(deps: AiSettingsDeps = {}): Promise<AiSettings> {
+  const now = deps.now ?? (() => Date.now());
+  const cacheable = !bypassesCache(deps);
+  if (cacheable && cache && now() < cache.expiresAt) return cache.value;
+
+  const fetched = await requestServerSettings(deps, { method: "GET" });
+  if (fetched) {
+    if (cacheable) cache = { value: fetched, expiresAt: now() + CACHE_TTL_MS };
+    // Best-effort local mirror for the next offline/signed-out fallback and for
+    // any reader that still expects the plain meta key (none in this codebase
+    // today, but the key predates this rewrite and costs nothing to keep warm).
+    // Deliberately no notifyLocal() here — this runs on every load (including a
+    // subscriber's own initial read), and firing it here would echo every
+    // listener's own load back at every other listener. saveAiSettings is the
+    // one write worth telling this context's other listeners about; a change
+    // from elsewhere reaches them through the BroadcastChannel handler below.
+    await NookDB.setMeta(AI_SETTINGS_META_KEY, fetched).catch(() => {});
+    return fetched;
+  }
+  if (cacheable) invalidateCache();
+  return readLocalCache();
+}
+
 /**
- * NookDB.setMeta doesn't broadcast (db.ts's notifyChange only fires from the
- * bookmark/list write paths), so a settings write has to announce itself for
- * the other extension contexts to notice. Same channel and message shape as a
- * normal write, which also means a settings flip nudges a cloud sync run -
- * harmless, and cheaper than a second notification mechanism nobody else knows
- * to listen to.
+ * Merges `patch` over the account's currently stored settings via
+ * `PUT /api/ai/settings` and returns what the server actually stored — the
+ * same shape `saveAiUserSettingsPatch` returns on the server (apps/api/src/
+ * ai-settings.ts), normalized again here in case a future field this build
+ * doesn't know about needs a safe local default too.
+ *
+ * A write that throws propagates, exactly as it did when this wrote straight
+ * to IndexedDB: silently reporting success for a preference that was never
+ * stored would be worse than the error the panel already knows how to show
+ * (`useAiSettings` in AiPanel.tsx toasts it).
+ */
+export async function saveAiSettings(patch: Partial<AiSettings>, deps: AiSettingsDeps = {}): Promise<AiSettings> {
+  const now = deps.now ?? (() => Date.now());
+  const saved = await requestServerSettings(deps, { method: "PUT", body: JSON.stringify(patch) });
+  if (!saved) throw new Error("Could not save AI settings.");
+  if (!bypassesCache(deps)) cache = { value: saved, expiresAt: now() + CACHE_TTL_MS };
+  await NookDB.setMeta(AI_SETTINGS_META_KEY, saved).catch(() => {});
+  notifyLocal(saved);
+  announceChange();
+  return saved;
+}
+
+// -- cross-context notification --------------------------------------------
+
+/** Same channel db.ts's notifyChange() broadcasts on, so existing listeners (cloud-runner, the dashboard) treat a settings write like any other write. */
+const DB_CHANNEL = "nook-db";
+
+/**
+ * A failed notification must not fail the write that already succeeded, so
+ * this is fire-and-forget the same way it always was — only now it also
+ * carries no data of its own: every context that hears it re-fetches from the
+ * server (bypassing its own cache, see the handler below) rather than trusting
+ * a value baked into the message.
  */
 function announceChange(): void {
   if (typeof BroadcastChannel === "undefined") return;
@@ -158,7 +309,7 @@ function announceChange(): void {
     channel.postMessage({ type: "changed", stores: ["meta"], ids: [] });
     channel.close();
   } catch {
-    // A failed notification must not fail the write that already succeeded.
+    // Ignored — see above.
   }
 }
 
@@ -176,43 +327,31 @@ function notifyLocal(settings: AiSettings): void {
 }
 
 /**
- * Merges `patch` over the currently stored value and returns the result, so a
- * caller flipping one toggle never has to read first. The stored value goes
- * through the same normalization as a load, so out-of-range input can't be
- * persisted. A write that throws propagates: silently reporting success for a
- * preference that wasn't stored would be worse than an error the panel shows.
- */
-export async function saveAiSettings(patch: Partial<AiSettings>): Promise<AiSettings> {
-  const next = normalizeAiSettings({ ...(await loadAiSettings()), ...patch });
-  await NookDB.setMeta(AI_SETTINGS_META_KEY, next);
-  notifyLocal(next);
-  announceChange();
-  return next;
-}
-
-/**
  * Calls `listener` now and again whenever the settings may have changed -
  * in this context (a save) or another one (the "nook-db" channel). Listens to
  * the whole channel rather than filtering on the meta store: db.ts never
  * broadcasts "meta", so a filtered listener would only ever see writes made
  * through saveAiSettings, and a settings write made elsewhere would be
- * invisible. Each message costs one single-key meta read. Returns an
+ * invisible. A cross-context message invalidates this context's own cache
+ * before re-fetching — otherwise a save landing in one tab could be masked by
+ * another tab's still-warm cache for up to CACHE_TTL_MS. Returns an
  * unsubscribe function; no browser globals are touched when BroadcastChannel
  * is unavailable (Node tests).
  */
 export function subscribeToAiSettings(listener: (settings: AiSettings) => void): () => void {
   let disposed = false;
-  const emit = () => {
+  const emit = (fromBroadcast: boolean) => {
     if (disposed) return;
+    if (fromBroadcast) invalidateCache();
     void loadAiSettings().then((settings) => {
       if (!disposed) listener(settings);
     });
   };
 
   const channel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel(DB_CHANNEL);
-  if (channel) channel.onmessage = emit;
+  if (channel) channel.onmessage = () => emit(true);
   localListeners.add(listener);
-  emit();
+  emit(false);
 
   return () => {
     disposed = true;

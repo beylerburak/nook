@@ -1,6 +1,6 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { DEFAULT_AI_SETTINGS, saveAiSettings, type AiSettings } from "../lib/ai-settings";
+import { DEFAULT_AI_SETTINGS, _resetAiSettingsCacheForTests, saveAiSettings, type AiSettings } from "../lib/ai-settings";
 import {
   AI_BATCH_SIZE,
   AI_CONCURRENCY,
@@ -61,8 +61,29 @@ class MockClassifyServer {
   lastAuthorization: string | null = null;
   lastUrl: string | null = null;
 
+  /**
+   * GET/PUT /api/ai/settings, since `execute()` now reads settings through the
+   * same injected `fetch` it uses for /api/ai/classify (see `AiRunnerDeps`,
+   * "the toggle is (almost) the whole gate"). Separate from `requests` above:
+   * that array's length is what most tests assert as "how many classify calls
+   * were made", and a settings GET must not pollute it.
+   */
+  settings: AiSettings = { ...DEFAULT_AI_SETTINGS };
+  settingsRequests: Array<{ method: string }> = [];
+
   json(body: unknown, status = 200): Response {
     return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+  }
+
+  respondSettings(init: RequestInit | undefined): Response {
+    this.lastAuthorization = (init?.headers as Record<string, string> | undefined)?.Authorization ?? null;
+    const method = init?.method ?? "GET";
+    this.settingsRequests.push({ method });
+    if (method === "PUT") {
+      const patch = JSON.parse(String(init?.body)) as Partial<AiSettings>;
+      this.settings = { ...this.settings, ...patch };
+    }
+    return this.json(this.settings);
   }
 
   async respond(body: ClassifyRequestBody, init: RequestInit | undefined): Promise<Response> {
@@ -113,6 +134,7 @@ class MockClassifyServer {
 
   fetch = async (input: string, init: RequestInit): Promise<Response> => {
     this.lastUrl = input;
+    if (input.endsWith("/api/ai/settings")) return this.respondSettings(init);
     return this.respond(JSON.parse(String(init.body)) as ClassifyRequestBody, init);
   };
 }
@@ -162,10 +184,16 @@ async function readLog(): Promise<AiLogEntry[]> {
 beforeEach(async () => {
   NookDB._resetForTests();
   await NookDB.ready();
+  _resetAiSettingsCacheForTests();
   clock = BASE_TIME;
   server = new MockClassifyServer();
+  server.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
+  // `execute()` reads settings through its own injected `apiUrl`/`fetch`, which
+  // `deps()` below always supplies — so this only matters for the handful of
+  // tests that call `saveAiSettings()` directly (its own default path, no deps,
+  // uses the global fetch and the real cloudSession()-derived bearer token).
+  vi.stubGlobal("fetch", server.fetch);
   await saveCloudSession("test-token", "user-1");
-  await NookDB.setMeta("ai.settings", { ...DEFAULT_AI_SETTINGS, autoClassify: true });
   await NookDB.putList({ id: "list-1", name: "Reading" });
 });
 
@@ -428,7 +456,11 @@ test("a repeated rate limit doubles the backoff and a success resets it", async 
 
 test("an unreachable server backs off rather than firing the rest of the batch", async () => {
   await seed(AI_BATCH_SIZE);
-  const throwing: AiRunnerDeps["fetch"] = async () => {
+  // Only the classify route is unreachable — the settings GET this tick also
+  // makes must still answer, or the run would never get past the toggle check
+  // at all and this test would be exercising the wrong gate entirely.
+  const throwing: AiRunnerDeps["fetch"] = async (input, init) => {
+    if (input.endsWith("/api/ai/settings")) return server.respondSettings(init);
     throw new TypeError("Failed to fetch");
   };
 
@@ -470,8 +502,10 @@ test("a malformed body degrades to nothing assigned without throwing", async () 
 
 test("a 200 with a truncated collection block is also treated as no decision", async () => {
   await seed(1);
-  const truncated: AiRunnerDeps["fetch"] = async () =>
-    new Response(JSON.stringify({ model: "jev-1.13.0", collection: { assign: true } }), { status: 200 });
+  const truncated: AiRunnerDeps["fetch"] = async (input, init) => {
+    if (input.endsWith("/api/ai/settings")) return server.respondSettings(init);
+    return new Response(JSON.stringify({ model: "jev-1.13.0", collection: { assign: true } }), { status: 200 });
+  };
 
   const result = await runClassification(deps({ fetch: truncated }));
 

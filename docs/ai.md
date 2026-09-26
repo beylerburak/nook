@@ -15,20 +15,25 @@ saving a bookmark.
 ## How the pieces fit
 
 ```
-extension (the only host where a pass can run)
-  lib/ai-settings.ts    toggles + thresholds, IndexedDB `meta` key `ai.settings`
+extension + web (AiPanel.tsx is literally the same component on both hosts)
+  lib/ai-settings.ts    toggles + thresholds: GET/PUT /api/ai/settings, IndexedDB
+                         `meta` key `ai.settings` as a read-through cache only
+  src/app/settings-dialog/AiPanel.tsx    the whole settings surface
+
+extension only (the only host where a pass can run)
   lib/ai-classify.ts    PURE: pick candidates, apply a decision, build the patch
   lib/ai-runner.ts      queue: batches, concurrency, backoff, alarm + cooldown
   lib/ai-taxonomy.ts    sampling, proposals, creating BookmarkList records
-  src/app/settings-dialog/AiPanel.tsx    the whole settings surface
   entrypoints/background/index.ts        the 5-minute alarm, and "Classify now"
         |
+        |  GET/PUT /api/ai/settings       toggles + thresholds (both hosts)
         |  POST /api/ai/classify          one bookmark  -> one decision
         |  POST /api/ai/propose-taxonomy  library sample -> new taxonomy
         v
 apps/api (the only place with secrets)
+  src/ai-settings.ts    the settings row: normalize, validate a PATCH, upsert
   src/ai.ts             Jev + proposer calls, thresholds, pure decision helpers
-  src/server.ts         the two routes, session-guarded
+  src/server.ts         the four routes, session-guarded
 ```
 
 `lib/ai-classify.ts` and `lib/ai-taxonomy.ts` are deliberately free of `fetch`,
@@ -313,15 +318,19 @@ interface AiAttribution {
 }
 ```
 
-Settings and progress live in the IndexedDB `meta` store, which survives
-`wipeLocalLibrary()` — these are device preferences, like appearance.
+Progress lives in the IndexedDB `meta` store, which survives
+`wipeLocalLibrary()` — these are run-history and device preferences, like
+appearance. Settings themselves are the one exception: `ai.settings` is now a
+read-through *cache* of the account-wide row `GET`/`PUT /api/ai/settings`
+serves (`apps/api/src/ai-settings.ts`, `nook_ai_settings` table) — see
+"Settings surface" below.
 
 | key | holds |
 | --- | --- |
-| `ai.settings` | toggles and thresholds |
-| `ai.taxonomy` | accepted taxonomy: `collections` (name + sample titles each) and `tags` (names with no members yet) |
-| `ai.cursor` | processed ids, counters, last run, cooldown windows |
-| `ai.log` | last 200 decisions, for the confidence histogram |
+| `ai.settings` | cache of the server's toggles and thresholds, for the offline/signed-out fallback |
+| `ai.taxonomy` | accepted taxonomy: `collections` (name + sample titles each) and `tags` (names with no members yet) — extension-only, never moved server-side (the runner that reads it is extension-only too) |
+| `ai.cursor` | processed ids, counters, last run, cooldown windows — extension-only run history |
+| `ai.log` | last 200 decisions, for the confidence histogram — extension-only run history |
 
 ## Merge semantics
 
@@ -342,17 +351,30 @@ Attribution and assignment therefore never disagree.
 
 ## Settings surface
 
-Settings → AI is **extension-only**, and requires a signed-in session. Both
-conditions are real, not caution:
+Settings → AI requires a signed-in session and nothing else — it shows on
+**either host** now, extension or web, because the toggles and thresholds it
+edits are an account preference, not a browser one:
 
-- A classification is an authenticated server call, so it needs `host.user`.
-- The pass runs in the extension's **service worker** and authenticates with the
-  bearer token the cloud-sync bridge writes. The web app has no service worker
-  and authenticates by cookie, so a toggle there would write `ai.settings` to a
-  per-origin meta store that nothing on that origin ever reads. The section is
-  hidden on the web host rather than offering a switch that visibly does
-  nothing. `ai.taxonomy` and the status counters are inert there for the same
-  reason, and meta does not sync — only bookmarks and lists do.
+- A classification is an authenticated server call either way, so the section
+  needs `host.user` (`SettingsDialog.visibleSections`), same as before.
+- `ai.settings` used to live in per-origin IndexedDB `meta`, which is why a
+  toggle flipped in the web app had no effect: the extension's service worker
+  — the only place a pass runs — never read the web origin's storage. It is
+  now `GET`/`PUT /api/ai/settings` (`apps/api/src/ai-settings.ts`,
+  `nook_ai_settings`, one row per account), so both hosts read and write the
+  same record. `lib/ai-settings.ts` still keeps a short-lived local cache
+  (`AI_SETTINGS_META_KEY`, IndexedDB `meta`) so the panel has something to
+  show instantly and something to fall back to offline or signed out, but that
+  cache is not the source of truth any more.
+
+What is still extension-only is *running* a pass: `lib/ai-runner.ts` is only
+called from the extension's service worker (`entrypoints/background/index.ts`),
+so `AiPanel.tsx`'s **Classify now** button, the taxonomy review flow, and the
+run-history rows ("Last run", "Last pass") are disabled — or, for run
+history, hidden — on the web host, with a tooltip/row explaining where they
+do work. `ai.taxonomy` and the run counters (`ai.cursor`, `ai.log`) stay
+per-origin `meta` for the same reason: they are run history the runner reads
+back, not a setting, so there is nothing for the web host to do with them.
 
 The panel carries two toggles, three thresholds, a status row, a **Classify now**
 button, and the taxonomy review flow. See `AiPanel.tsx`.
@@ -371,10 +393,13 @@ button, and the taxonomy review flow. See `AiPanel.tsx`.
 | file | covers |
 | --- | --- |
 | `apps/api/test/ai.unit.test.ts` | question building, decision thresholds, response parsing, the text-length floor, throttling — pure, no network |
+| `apps/api/test/ai-settings.unit.test.ts` | normalizing a stored row, validating a PATCH — pure, no database |
+| `apps/api/test/ai-settings.integration.test.ts` | defaults for a new account, patch-merges-onto-existing, per-account isolation, cascade delete — needs `NOOK_TEST_DATABASE_URL`, self-skips otherwise |
 | `apps/extension/tests/ai-classify.test.ts` | candidate selection, patch building, manual-assignment protection |
+| `apps/extension/tests/ai-settings.test.ts` | server fetch/cache/fallback: offline, signed-out, a failed save, cross-context invalidation |
 | `apps/extension/tests/ai-runner.test.ts` | batching, toggle off, session required, cooldowns, the neutral-placeholder guard |
 | `apps/extension/tests/ai-taxonomy.test.ts` | deterministic stride sampling, collision handling, BookmarkList creation |
-| `apps/extension/tests/settings-ai-panel.test.tsx` | toggles, thresholds, proposal review, and the extension-only gate |
+| `apps/extension/tests/settings-ai-panel.test.tsx` | toggles, thresholds, proposal review, the signed-in gate (both hosts), and the extension-only run actions |
 | `apps/extension/tests/cloud-merge.test.ts` | attribution travels with the assignment |
 
 ## Contract
@@ -391,16 +416,31 @@ export interface AiAttribution {
   taxonomyAt?: string;                      // ISO of the accepted taxonomy
 }
 
-// apps/extension/lib/ai-settings.ts — IndexedDB `meta` key "ai.settings"
+// apps/api/src/ai-settings.ts (AiUserSettings) — the account's row, served by
+// GET/PUT /api/ai/settings. apps/extension/lib/ai-settings.ts (AiSettings) is
+// the client-side copy of the same shape, kept in sync by hand like the other
+// duplicated wire types in this file; IndexedDB `meta` key "ai.settings" is
+// now only that client's short-lived cache, not the source of truth.
 export interface AiSettings {
   /** Feature 1: file into existing collections and add existing tags. */
   autoClassify: boolean;
   /** Feature 2: propose brand-new collection names and a tag vocabulary. */
   autoTaxonomy: boolean;
-  collectionMinConfidence: number;   // default 0.85
+  /** Feature 3: write a short summary on bookmarks long enough to need one. */
+  autoSummarize: boolean;
+  collectionMinConfidence: number;   // default 0.75
   tagMinNoul: number;                // default 0.80
   maxTags: number;                   // default 3
+  taxonomyLanguage: TaxonomyLanguage; // default "auto"
 }
+```
+
+```ts
+// GET /api/ai/settings -> AiUserSettings (defaults when the account has never
+// written a row).
+// PUT /api/ai/settings <- Partial<AiUserSettings> (a patch: only the fields
+// being changed) -> AiUserSettings (the full row, after the patch is merged
+// server-side — apps/api/src/ai-settings.ts, saveAiUserSettingsPatch).
 ```
 
 ```ts
@@ -458,6 +498,12 @@ missing auth header is **403**, and a malformed request is **400** or **422**
 depending on what is wrong with it. The route's own statuses are 401 (no
 session), 400 (malformed body), 429 (upstream throttling), 503 (`TYPESAFE_API_KEY`
 not configured) and 200.
+
+`GET`/`PUT /api/ai/settings` is simpler: 401 (no session) and 200. There is no
+503 — the settings row itself has no external dependency, unlike a
+classification — and a `PUT` with an invalid field (wrong type, an unknown
+`taxonomyLanguage`) is 400 rather than silently defaulted, so a client bug
+shows up immediately instead of writing a value nobody asked for.
 
 ## Progress notes
 
@@ -534,3 +580,25 @@ decision rules** — a calibration result may have already been measured.
   turning accepted ones into real `BookmarkList` records plus the
   `ai.taxonomy` record the runner already knew how to read. The proposed **tag**
   vocabulary was returned but not stored at this point; see the entry above.
+- **2026-09-26 — settings moved off the extension, closing the limitation two
+  entries up.** `ai.settings` is now an account row (`GET`/`PUT
+  /api/ai/settings`, `apps/api/src/ai-settings.ts`, `nook_ai_settings`) instead
+  of per-origin IndexedDB `meta`, so Settings → AI shows on both hosts and a
+  toggle flipped in the web app is the same toggle the extension's runner reads
+  before every tick. `lib/ai-runner.ts` fetches it fresh every tick (through
+  its own already-DI'd `fetch`/session, not the module-level cache) rather than
+  trusting a possibly-stale cached read, so a run always acts on the newest
+  saved value; `aiIsArmable()` in `entrypoints/background/index.ts`, which asks
+  on every saved bookmark, goes through the module-level default instead, which
+  now keeps a 60-second in-memory cache so importing a library one bookmark at
+  a time doesn't turn into one request per bookmark. What did **not** move:
+  `ai.taxonomy` and the run counters (`ai.cursor`, `ai.log`) are run history the
+  extension-only runner reads back, not a user-facing setting, so they stay
+  per-origin `meta` — `AiPanel.tsx` hides the run-history rows on the web host
+  rather than rendering a confident "Never" next to a feature the connected
+  extension may actually be running. The still-open half of the old
+  limitation stands: an account with no browser extension installed at all can
+  turn a toggle on from the web and nothing will ever act on it, because the
+  classification queue itself is still extension-only. That is unchanged by
+  this entry and is a bigger seam than a settings move — see "How the pieces
+  fit".

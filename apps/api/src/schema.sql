@@ -61,3 +61,21 @@ CREATE TABLE IF NOT EXISTS nook_embeddings (
 -- set a search reads (docs/retrieval.md, "one model per index").
 CREATE INDEX IF NOT EXISTS nook_embeddings_user_model_idx
   ON nook_embeddings (user_id, model);
+
+-- AI feature toggles and thresholds (docs/ai.md, "Settings surface"). Account-wide
+-- on purpose: the classification pass is a server call either way, so the
+-- setting that gates it belongs to the account, not to one browser's local
+-- storage — a toggle flipped in the web app must be the same toggle the
+-- extension's runner reads, and vice versa.
+--
+-- One row per user, no version column and no conflict handling: this is a
+-- small preferences blob, not a record with concurrent writers to merge, so
+-- last-write-wins is the whole story. `saveAiUserSettingsPatch` (apps/api/src/
+-- ai-settings.ts) upserts with a jsonb `||` merge in a single statement rather
+-- than a read-modify-write, which is what makes that true even under a race
+-- between two tabs saving at once.
+CREATE TABLE IF NOT EXISTS nook_ai_settings (
+  user_id text PRIMARY KEY REFERENCES "user"(id) ON DELETE CASCADE,
+  data jsonb NOT NULL DEFAULT '{}'::jsonb,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);

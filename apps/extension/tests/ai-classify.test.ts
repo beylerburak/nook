@@ -16,13 +16,34 @@ import {
 import {
   AI_SETTINGS_META_KEY,
   DEFAULT_AI_SETTINGS,
+  _resetAiSettingsCacheForTests,
   loadAiSettings,
   saveAiSettings,
   subscribeToAiSettings,
   type AiSettings,
 } from "../lib/ai-settings";
+import { saveCloudSession } from "../lib/cloud-sync";
 import type { Bookmark } from "../lib/types";
 import * as NookDB from "../lib/db";
+
+/**
+ * A minimal stand-in for PUT /api/ai/settings — merge-on-write, like the real
+ * route (apps/api/src/ai-settings.ts). `saveAiSettings` is a server call now
+ * (docs/ai.md, "Settings surface"), so the two tests below that exercise a
+ * write need both a session (`saveCloudSession`) and something to answer it;
+ * the read-only tests above them don't, since a signed-out `loadAiSettings()`
+ * falls back to the local cache without ever reaching the network.
+ */
+function stubSettingsServer(): { settings: AiSettings } {
+  const state = { settings: { ...DEFAULT_AI_SETTINGS } };
+  vi.stubGlobal("fetch", async (_url: string, init?: RequestInit) => {
+    if ((init?.method ?? "GET") === "PUT") {
+      state.settings = { ...state.settings, ...(JSON.parse(String(init?.body)) as Partial<AiSettings>) };
+    }
+    return new Response(JSON.stringify(state.settings), { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+  return state;
+}
 
 const NO_ASSIGNMENT: ClassifyResponse = {
   model: "jev-1.13.0",
@@ -356,47 +377,61 @@ test("loadAiSettings is total: partial, corrupt and out-of-range values all reso
 
 test("saveAiSettings merges over the stored value, so one field is enough", async () => {
   NookDB._resetForTests();
-  const first = await saveAiSettings({ autoClassify: true, collectionMinConfidence: 0.9 });
-  expect(first).toEqual({ ...DEFAULT_AI_SETTINGS, autoClassify: true, collectionMinConfidence: 0.9 });
+  _resetAiSettingsCacheForTests();
+  stubSettingsServer();
+  await saveCloudSession("test-token", "user-1");
+  try {
+    const first = await saveAiSettings({ autoClassify: true, collectionMinConfidence: 0.9 });
+    expect(first).toEqual({ ...DEFAULT_AI_SETTINGS, autoClassify: true, collectionMinConfidence: 0.9 });
 
-  const second = await saveAiSettings({ maxTags: 5 });
-  expect(second).toEqual({ ...first, maxTags: 5 });
-  expect(await loadAiSettings()).toEqual(second);
-  expect(await NookDB.getMeta(AI_SETTINGS_META_KEY)).toEqual(second);
+    const second = await saveAiSettings({ maxTags: 5 });
+    expect(second).toEqual({ ...first, maxTags: 5 });
+    expect(await loadAiSettings()).toEqual(second);
+    expect(await NookDB.getMeta(AI_SETTINGS_META_KEY)).toEqual(second);
 
-  // Out-of-range input is normalized on the way in, not just on the way out.
-  expect(await saveAiSettings({ tagMinNoul: 7 })).toMatchObject({ tagMinNoul: 1, autoClassify: true });
+    // Out-of-range input is normalized on the way in, not just on the way out.
+    expect(await saveAiSettings({ tagMinNoul: 7 })).toMatchObject({ tagMinNoul: 1, autoClassify: true });
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 test("subscribeToAiSettings picks up a settings write from another context", async () => {
   NookDB._resetForTests();
-  const seen: AiSettings[] = [];
-  const stop = subscribeToAiSettings((settings) => seen.push(settings));
-  // The first emission is asynchronous - it reads storage, like the panel's own
-  // initial load - so a listener is never called with a guess.
-  expect(seen).toEqual([]);
-  await vi.waitFor(() => expect(seen).toEqual([DEFAULT_AI_SETTINGS]));
+  _resetAiSettingsCacheForTests();
+  stubSettingsServer();
+  await saveCloudSession("test-token", "user-1");
+  try {
+    const seen: AiSettings[] = [];
+    const stop = subscribeToAiSettings((settings) => seen.push(settings));
+    // The first emission is asynchronous - it reads the server, like the
+    // panel's own initial load - so a listener is never called with a guess.
+    expect(seen).toEqual([]);
+    await vi.waitFor(() => expect(seen).toEqual([DEFAULT_AI_SETTINGS]));
 
-  // A settings surface writes; a panel in the same context hears it directly,
-  // because a BroadcastChannel never posts back to its own sender. This is the
-  // only cross-context path there is: NookDB.setMeta doesn't broadcast.
-  await saveAiSettings({ autoClassify: true, maxTags: 4 });
-  expect(seen[seen.length - 1]).toEqual({ ...DEFAULT_AI_SETTINGS, autoClassify: true, maxTags: 4 });
+    // A settings surface writes; a panel in the same context hears it directly,
+    // because a BroadcastChannel never posts back to its own sender. This is the
+    // only cross-context path there is: NookDB.setMeta doesn't broadcast.
+    await saveAiSettings({ autoClassify: true, maxTags: 4 });
+    expect(seen[seen.length - 1]).toEqual({ ...DEFAULT_AI_SETTINGS, autoClassify: true, maxTags: 4 });
 
-  // ...and a panel in another context hears it through "nook-db".
-  const remote: AiSettings[] = [];
-  const other = new BroadcastChannel("nook-db");
-  other.onmessage = () => void loadAiSettings().then((settings) => remote.push(settings));
-  await saveAiSettings({ autoTaxonomy: true });
-  await vi.waitFor(() => expect(remote[remote.length - 1]?.autoTaxonomy).toBe(true));
-  other.close();
+    // ...and a panel in another context hears it through "nook-db".
+    const remote: AiSettings[] = [];
+    const other = new BroadcastChannel("nook-db");
+    other.onmessage = () => void loadAiSettings().then((settings) => remote.push(settings));
+    await saveAiSettings({ autoTaxonomy: true });
+    await vi.waitFor(() => expect(remote[remote.length - 1]?.autoTaxonomy).toBe(true));
+    other.close();
 
-  // Unsubscribed means unsubscribed: the channel is closed, not just ignored.
-  stop();
-  const count = seen.length;
-  await saveAiSettings({ maxTags: 1 });
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  expect(seen).toHaveLength(count);
+    // Unsubscribed means unsubscribed: the channel is closed, not just ignored.
+    stop();
+    const count = seen.length;
+    await saveAiSettings({ maxTags: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(seen).toHaveLength(count);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });
 
 // Turkish casing. Both of these were found by running the proposer against the

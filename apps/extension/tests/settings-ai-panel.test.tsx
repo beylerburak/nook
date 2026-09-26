@@ -8,7 +8,7 @@ import { NookHostProvider, type NookHost } from "../src/app/host/NookHost";
 import { AiPanel } from "../src/app/settings-dialog/AiPanel";
 import { SettingsDialog } from "../src/app/settings-dialog/SettingsDialog";
 import { AI_TAXONOMY_META_KEY } from "../lib/ai-runner";
-import { DEFAULT_AI_SETTINGS } from "../lib/ai-settings";
+import { DEFAULT_AI_SETTINGS, _resetAiSettingsCacheForTests, type AiSettings } from "../lib/ai-settings";
 import { saveCloudSession } from "../lib/cloud-sync";
 import * as NookDB from "../lib/db";
 import type { AcceptedTaxonomy } from "../lib/ai-taxonomy";
@@ -25,6 +25,52 @@ vi.mock("../src/app/host/useCloudStatus", () => ({
 
 const AI_SETTINGS_KEY = "ai.settings";
 const AI_CURSOR_KEY = "ai.cursor";
+
+// -- settings server ------------------------------------------------------
+//
+// Stands in for GET/PUT {apiUrl}/api/ai/settings, which `useAiSettings` (in
+// AiPanel.tsx) now calls instead of reading `ai.settings` straight out of
+// IndexedDB — see docs/ai.md, "Settings surface". `settings` starts at the
+// documented defaults, matching a brand-new account.
+class MockSettingsServer {
+  settings: AiSettings = { ...DEFAULT_AI_SETTINGS };
+  requests: Array<{ method: string; body?: unknown }> = [];
+  lastAuthorization: string | null = null;
+
+  respond = (init: RequestInit | undefined): Response => {
+    this.lastAuthorization = (init?.headers as Record<string, string> | undefined)?.Authorization ?? null;
+    const method = init?.method ?? "GET";
+    const body = init?.body ? (JSON.parse(String(init.body)) as Partial<AiSettings>) : undefined;
+    this.requests.push({ method, body });
+    if (method === "PUT" && body) this.settings = { ...this.settings, ...body };
+    return new Response(JSON.stringify(this.settings), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+}
+
+let settingsServer: MockSettingsServer;
+
+/**
+ * The taxonomy-proposal handler for the current test, set by `stubProposer`
+ * below. A mutable slot rather than a wholesale `vi.stubGlobal("fetch", ...)`
+ * per test, because the same global `fetch` now also has to answer the
+ * settings server above — one test replacing all of `fetch` for its one
+ * proposal call used to be harmless when settings lived in IndexedDB; now it
+ * would silently break every toggle in the same test.
+ */
+let proposerHandler: ((init: RequestInit | undefined) => Response) | null = null;
+
+/** Installed once per test as the global `fetch`, routing by path to whichever
+ *  of the two servers above the request is actually for. */
+function installFetchRouter(): void {
+  vi.stubGlobal("fetch", async (input: string, init?: RequestInit): Promise<Response> => {
+    if (input.endsWith("/api/ai/settings")) return settingsServer.respond(init);
+    if (input.endsWith("/api/ai/propose-taxonomy")) {
+      if (proposerHandler) return proposerHandler(init);
+      return new Response(JSON.stringify({ collections: [], tags: [] }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch in this test: ${input}`);
+  });
+}
 
 function webHost(overrides: Partial<NookHost> = {}): NookHost {
   return {
@@ -82,8 +128,17 @@ function fakeLibrary() {
 let container: HTMLElement;
 let root: Root;
 
-beforeEach(() => {
+beforeEach(async () => {
   NookDB._resetForTests();
+  _resetAiSettingsCacheForTests();
+  settingsServer = new MockSettingsServer();
+  proposerHandler = null;
+  installFetchRouter();
+  // A bearer session by default: every route this panel calls (settings and,
+  // for the taxonomy tests below, proposals) is session-guarded now, and most
+  // of this file is about what a signed-in host does. The couple of tests that
+  // are specifically about a missing/expired session clear it explicitly.
+  await saveCloudSession("test-token", "user-1");
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -93,6 +148,7 @@ afterEach(async () => {
   await settle();
   act(() => root.unmount());
   container.remove();
+  vi.unstubAllGlobals();
 });
 
 function renderDialog(host: NookHost, overrides: Partial<Parameters<typeof SettingsDialog>[0]> = {}) {
@@ -214,6 +270,11 @@ function readLists(): Promise<BookmarkList[]> {
   return settled(() => NookDB.getAllLists());
 }
 
+/** The local read-through cache `loadAiSettings`/`saveAiSettings` write to —
+ *  useful for asserting the offline/signed-out fallback still works. Most
+ *  tests should read `settingsServer.settings` instead: that is the account's
+ *  actual stored value now, the way a real deploy would judge "did the save
+ *  work". */
 const readAiSettings = () => readMeta<Record<string, unknown>>(AI_SETTINGS_KEY);
 
 /** The extension host, signed in: the only host where an AI action can run. */
@@ -224,7 +285,7 @@ const readAiSettings = () => readMeta<Record<string, unknown>>(AI_SETTINGS_KEY);
  */
 async function seedLibrary(options: { taxonomy?: boolean; tagged?: string } = {}): Promise<void> {
   await saveCloudSession("test-token", "user-1");
-  await NookDB.setMeta(AI_SETTINGS_KEY, { ...DEFAULT_AI_SETTINGS, autoTaxonomy: options.taxonomy ?? true });
+  settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoTaxonomy: options.taxonomy ?? true };
   await NookDB.putBookmark({
     id: "b-1",
     source: "web",
@@ -244,11 +305,12 @@ async function renderAiPanel(host: NookHost): Promise<void> {
 /**
  * Mounts <AiPanel/> on its own, bypassing the dialog.
  *
- * The AI section is gated to the extension host, because that is the only place
- * a classification pass can run — so the panel's own "this host has no service
- * worker" branch is unreachable through the dialog. The branch stays (it is a
- * real precondition, and it is what makes the panel correct if it is ever
- * mounted directly or the gate is relaxed), so it needs a way to be exercised.
+ * The dialog now shows the AI section for any signed-in host (extension or
+ * web) and switches away the moment `host.user` goes away (see
+ * `SettingsDialog`'s "re-pick the requested section" effect), so
+ * `AiPanel`'s own `!host.user` guard is not reachable through it at all —
+ * only a race during that switch could ever hit it for real. This helper is
+ * what exercises that guard directly.
  */
 async function renderAiPanelDirectly(host: NookHost): Promise<void> {
   act(() => {
@@ -263,13 +325,18 @@ async function renderAiPanelDirectly(host: NookHost): Promise<void> {
   await settle();
 }
 
-/** Stands in for POST /api/ai/propose-taxonomy, and records that it was called. */
+/**
+ * Stands in for POST /api/ai/propose-taxonomy, and records that it was called.
+ * Sets `proposerHandler` rather than replacing all of `fetch` (installFetchRouter
+ * already did that in `beforeEach`) — settings GET/PUT still has to work in a
+ * test that also calls this, since the panel's toggles are live the whole time.
+ */
 function stubProposer(body: unknown, status = 200): { calls: number } {
   const state = { calls: 0 };
-  vi.stubGlobal("fetch", async () => {
+  proposerHandler = () => {
     state.calls++;
     return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-  });
+  };
   return state;
 }
 
@@ -359,14 +426,34 @@ describe("Settings → AI — section visibility", () => {
     expect(hasText("File new bookmarks into collections")).toBe(true);
   });
 
-  // The pass runs in the extension's service worker and authenticates with the
-  // bearer token the cloud-sync bridge writes. The web app has neither, so a
-  // toggle there would write ai.settings to a per-origin meta store that nothing
-  // on that origin ever reads — a switch that visibly does nothing.
-  it("hides the section on the web host even when signed in", async () => {
+  // AI settings are an account preference (GET/PUT /api/ai/settings) now, not a
+  // per-browser one, so a signed-in web user gets the exact same toggles a
+  // signed-in extension does — see docs/ai.md, "Settings surface".
+  it("shows the section on the web host when signed in, with the toggles live", async () => {
     renderDialog(webHost());
     await settle();
+    expect(sectionLabels()).toContain("AI");
+
+    clickText("AI");
+    await settle();
+    expect(hasText("File new bookmarks into collections")).toBe(true);
+    expect(hasText("Suggest new categories and tags")).toBe(true);
+  });
+
+  it("hides the section on the web host with no session", async () => {
+    renderDialog(webHost({ user: null }));
+    await settle();
     expect(sectionLabels()).not.toContain("AI");
+  });
+
+  // The dialog never mounts AiPanel with `host.user` falsy (the section is not
+  // offered at all), so this exercises the panel's own defensive guard
+  // directly — the fallback for the one render that could land mid sign-out,
+  // before the dialog's own effect switches away from this section.
+  it("AiPanel itself falls back to the sign-in banner when mounted without a user", async () => {
+    await renderAiPanelDirectly(webHost({ user: null }));
+    expect(hasText("Sign in to use AI classification")).toBe(true);
+    expect(hasText("File new bookmarks into collections")).toBe(false);
   });
 });
 
@@ -421,14 +508,15 @@ describe("Settings → AI — feature toggles", () => {
 });
 
 describe("Settings → AI — thresholds", () => {
-  beforeEach(async () => {
-    await NookDB.setMeta(AI_SETTINGS_KEY, {
+  beforeEach(() => {
+    settingsServer.settings = {
+      ...DEFAULT_AI_SETTINGS,
       autoClassify: true,
       autoTaxonomy: false,
       collectionMinConfidence: 0.9,
       tagMinNoul: 0.65,
       maxTags: 5,
-    });
+    };
   });
 
   it("renders each threshold's current value", async () => {
@@ -476,13 +564,14 @@ describe("Settings → AI — thresholds", () => {
   });
 
   it("still renders a stored value the loader had to clamp", async () => {
-    await NookDB.setMeta(AI_SETTINGS_KEY, {
+    settingsServer.settings = {
+      ...DEFAULT_AI_SETTINGS,
       autoClassify: true,
       autoTaxonomy: true,
       collectionMinConfidence: 7,
       tagMinNoul: -3,
       maxTags: 99,
-    });
+    };
 
     renderDialog(aiHost());
     clickText("AI");
@@ -504,13 +593,7 @@ describe("Settings → AI — thresholds", () => {
 
 describe("Settings → AI — status", () => {
   it("reports the runner's last run and its counters", async () => {
-    await NookDB.setMeta(AI_SETTINGS_KEY, {
-      autoClassify: true,
-      autoTaxonomy: false,
-      collectionMinConfidence: 0.85,
-      tagMinNoul: 0.8,
-      maxTags: 3,
-    });
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
     await NookDB.setMeta(AI_CURSOR_KEY, {
       processed: 25,
       assigned: 18,
@@ -576,6 +659,31 @@ describe("Settings → AI — status", () => {
     await settle();
 
     expect(hasText("Unavailable")).toBe(false);
+  });
+
+  // `ai.cursor` is per-origin IndexedDB `meta` the extension's runner writes —
+  // it was never moved server-side (docs/ai.md, "Settings surface"), so the web
+  // host has none of it and must not render a confident "Never"/"0 filed" next
+  // to a feature the connected extension may actually be running.
+  it("hides run-history counters on the web host and points at the extension instead", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
+    await NookDB.setMeta(AI_CURSOR_KEY, {
+      processed: 25,
+      assigned: 18,
+      tagged: 40,
+      skipped: 7,
+      lastRunAt: "2026-09-20T10:00:00.000Z",
+    });
+
+    renderDialog(webHost());
+    clickText("AI");
+    await settle();
+
+    expect(hasText("Last run")).toBe(false);
+    expect(hasText("Last pass")).toBe(false);
+    expect(hasText("18")).toBe(false);
+    expect(hasText("Run history")).toBe(true);
+    expect(hasText("open Settings → AI in the extension")).toBe(true);
   });
 });
 
@@ -794,6 +902,13 @@ describe("Settings → AI — suggest taxonomy", () => {
   });
 
   it("asks for a session before it reads anything", async () => {
+    // The global beforeEach signs this browser in by default (most of this
+    // file needs that for the settings routes); this test is specifically
+    // about there being no session, so it clears the token cloudSession()
+    // reads. The panel still has yesterday's cached settings locally
+    // (autoTaxonomy: true), which is exactly the point: the toggle looking on
+    // is not what gates the request — the session is.
+    await NookDB.setMeta("cloud:https://nook.beyler.co:token", null);
     await NookDB.setMeta(AI_SETTINGS_KEY, { ...DEFAULT_AI_SETTINGS, autoTaxonomy: true });
     await NookDB.putBookmark({
       id: "b-1",
@@ -816,11 +931,12 @@ describe("Settings → AI — suggest taxonomy", () => {
     await seedLibrary();
     const server = stubProposer(PROPOSALS);
 
-    await renderAiPanelDirectly(webHost());
+    await renderAiPanel(webHost());
 
     expect(isDisabled(buttonFor("Suggest taxonomy"))).toBe(true);
-    // The toggle still persists on this origin; the action is what cannot run
-    // here, and the button has to say so rather than look broken.
+    // The toggle is the account's and is on (seedLibrary turned autoTaxonomy
+    // on server-side); the action is what cannot run here, and the button has
+    // to say so rather than look broken.
     act(() => buttonFor("Suggest taxonomy").click());
     await settle();
     expect(server.calls).toBe(0);
@@ -869,7 +985,7 @@ describe("Settings → AI — classify now", () => {
   }
 
   async function seedClassify(): Promise<void> {
-    await NookDB.setMeta(AI_SETTINGS_KEY, { ...DEFAULT_AI_SETTINGS, autoClassify: true });
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
   }
 
   afterEach(() => {
@@ -927,7 +1043,7 @@ describe("Settings → AI — classify now", () => {
   });
 
   it("is disabled until a feature is on", async () => {
-    await NookDB.setMeta(AI_SETTINGS_KEY, { ...DEFAULT_AI_SETTINGS });
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS };
     const sent = stubBackground({ processed: 0, assigned: 0, tagged: 0, skipped: 0 });
 
     await renderAiPanel(aiHost());
@@ -959,7 +1075,7 @@ describe("Settings → AI — classify now", () => {
     await seedClassify();
     const sent = stubBackground({ processed: 1, assigned: 1, tagged: 0, skipped: 0 });
 
-    await renderAiPanelDirectly(webHost());
+    await renderAiPanel(webHost());
 
     expect(isDisabled(buttonFor("Classify now"))).toBe(true);
     act(() => buttonFor("Classify now").click());

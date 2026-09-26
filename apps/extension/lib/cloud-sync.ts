@@ -528,7 +528,29 @@ export function subscribeCloudStatus(listener: (status: CloudStatus) => void): (
 
 // -- request plumbing ---------------------------------------------------
 
-type RequestAuth = { mode: "bearer"; token: string } | { mode: "cookie" };
+export type RequestAuth = { mode: "bearer"; token: string } | { mode: "cookie" };
+
+/**
+ * The auth a fresh authenticated call from THIS browser should use, computed
+ * exactly the way `syncCloud()` computes it for `/api/sync` above: bearer mode
+ * reads the stored token, cookie mode just confirms an account is bound (the
+ * browser sends the session cookie itself, so there is no token to read).
+ * `null` means there is no request worth sending — signed out in bearer mode,
+ * or no account ever connected in cookie mode.
+ *
+ * Exported so other host-agnostic modules (lib/ai-settings.ts) that need to
+ * call a Nook route from code shared between the extension and the web app
+ * don't each re-derive the bearer/cookie branch — this is the one place that
+ * reads `cloudConfig.auth`.
+ */
+export async function cloudRequestAuth(): Promise<RequestAuth | null> {
+  if (cloudConfig.auth === "bearer") {
+    const session = await cloudSession();
+    return session ? { mode: "bearer", token: session.token } : null;
+  }
+  const boundOwner = await NookDB.getMeta<string>(ownerKey());
+  return boundOwner ? { mode: "cookie" } : null;
+}
 
 async function syncRequest(auth: RequestAuth, cursor: string, changes: Outgoing[], epoch: string | undefined): Promise<SyncResponse> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };

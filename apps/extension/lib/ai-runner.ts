@@ -599,27 +599,33 @@ function withTaxonomyAt(patch: Partial<Bookmark>, acceptedAt: string | undefined
 
 async function execute(deps: AiRunnerDeps): Promise<AiRunResult> {
   const now = deps.now ?? (() => Date.now());
-  const loadSettings = deps.loadSettings ?? loadAiSettings;
   const readSession = deps.session ?? cloudSession;
   const apiUrl = (deps.apiUrl ?? cloudApiUrl()).replace(/\/$/, "");
   const doFetch: AiFetch = deps.fetch ?? ((input, init) => fetch(input, init));
 
-  // 1. The toggle is the whole gate. Off means no meta write, no bookmark
-  //    read, no request — the feature ships off by default, and a user who
-  //    never turned it on should pay for nothing, not even the IndexedDB reads.
-  const settings = await loadSettings();
-  if (!settings.autoClassify) return emptyResult();
-
-  // 2. Both routes are session-guarded and the extension speaks to them with
+  // 1. Both routes are session-guarded and the extension speaks to them with
   //    the cloud bearer token, so a library with no session can never classify
-  //    anything. cloudSession() is the same helper syncCloud() gates on.
+  //    anything — and settings are the signed-in account's now (docs/ai.md,
+  //    "Settings surface"), not this browser's, so there is nothing to even
+  //    ask for. cloudSession() is the same helper syncCloud() gates on.
   const session = await readSession();
   if (!session) return emptyResult();
 
-  // 3. Offline is a normal state — the same kind of thing the 401/503 paths
+  // 2. Offline is a normal state — the same kind of thing the 401/503 paths
   //    are — so it leaves `lastError` alone and shows up through the cloud
-  //    status the panel already renders.
+  //    status the panel already renders. Checked before the settings fetch
+  //    below so a known-offline tick fails fast instead of waiting out one.
   if (isOffline()) return emptyResult();
+
+  // 3. The toggle is (almost) the whole gate. `loadAiSettings` reuses this
+  //    tick's own token/fetch rather than the module-level default (which
+  //    caches briefly for callers like `aiIsArmable()` that ask on every saved
+  //    bookmark) — a run that gets this far should always act on the freshest
+  //    settings, not a minute-old cached answer.
+  const loadSettings = deps.loadSettings ??
+    (() => loadAiSettings({ apiUrl, fetch: doFetch, requestAuth: async () => ({ mode: "bearer", token: session.token }) }));
+  const settings = await loadSettings();
+  if (!settings.autoClassify) return emptyResult();
 
   const nowMs = now();
   const cursor = await readCursor();

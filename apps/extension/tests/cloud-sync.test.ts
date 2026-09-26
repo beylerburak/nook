@@ -5,6 +5,7 @@ import {
   DEFAULT_CLOUD_API_URL,
   bindCloudAccount,
   cloudApiUrl,
+  cloudRequestAuth,
   cloudStatus,
   cloudUser,
   configureCloud,
@@ -590,6 +591,29 @@ test("cookie mode sends credentials: include and no Authorization header", async
 
   await syncCloud();
   expect(fetchMock).toHaveBeenCalled();
+});
+
+// -- cloudRequestAuth --------------------------------------------------------
+//
+// The shared bearer/cookie branch other host-agnostic modules build on —
+// lib/ai-settings.ts is the first of these, since Settings → AI now reads and
+// writes GET/PUT /api/ai/settings from both the extension and the web app.
+
+test("cloudRequestAuth: bearer mode returns the stored token, or null when signed out", async () => {
+  NookDB._resetForTests();
+  expect(await cloudRequestAuth()).toBeNull();
+
+  await saveCloudSession("bearer-token", "owner-1");
+  expect(await cloudRequestAuth()).toEqual({ mode: "bearer", token: "bearer-token" });
+});
+
+test("cloudRequestAuth: cookie mode returns the cookie mode, or null when no account is bound", async () => {
+  NookDB._resetForTests();
+  configureCloud({ apiUrl: "https://cookie.example", auth: "cookie" });
+  expect(await cloudRequestAuth()).toBeNull();
+
+  await bindCloudAccount({ id: "user-a", name: "A", email: "a@example.com" });
+  expect(await cloudRequestAuth()).toEqual({ mode: "cookie" });
 });
 
 // -- status -----------------------------------------------------------------
