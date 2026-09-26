@@ -14,6 +14,7 @@ export const dashboard = {
     x: "X yer imleri",
     web: "Web sayfaları",
     unorganized: "Düzenlenmemiş",
+    organize: "Düzenle",
     collectionFallback: "Koleksiyon",
   },
 
@@ -277,5 +278,40 @@ export const dashboard = {
   canvasEditor: {
     resizeHandleLabel: "Yer imi detay panelini yeniden boyutlandır",
     defaultInspectorLabel: "Yer imi detayları",
+  },
+
+  organize: {
+    title: "Kütüphaneni düzenle",
+    description: "Nook, yer imlerini kendi başına koleksiyonlara ayırabilir. Öneri iste, beğendiklerini tut, dosyalamayı Nook yapsın.",
+
+    filedCount: { one: "{count} yer imi dosyalandı", other: "{count} yer imi dosyalandı" },
+    unfiledCount: { one: "{count} tanesi düzenlenmeyi bekliyor", other: "{count} tanesi düzenlenmeyi bekliyor" },
+
+    workingTitle: "Nook düzenliyor",
+    workingBody: {
+      one: "Yaklaşık {count} yer imi kaldı — yaklaşık {minutes} dk.",
+      other: "Yaklaşık {count} yer imi kaldı — yaklaşık {minutes} dk.",
+    },
+
+    suggestPrompt: {
+      one: "Hâlâ dosyalanmamış {count} yer imi için koleksiyon öner.",
+      other: "Hâlâ dosyalanmamış {count} yer imi için koleksiyonlar öner.",
+    },
+    suggestMoreButton: "Daha fazla koleksiyon öner",
+    allCaughtUp: "Her şey dosyalandı. Aferin.",
+    autoFileEnabledNote: "Dosyalama da açıldı, yeni yer imleri de düzenlenmeye devam edecek.",
+
+    recentlyFiledTitle: "Son dosyalananlar",
+    recentlyFiledEmpty: "Henüz bir şey dosyalanmadı.",
+    remainderNoneFit: {
+      one: "{count} yer imi hiçbir koleksiyona uymadı.",
+      other: "{count} yer imi hiçbir koleksiyona uymadı.",
+    },
+    remainderUnsure: {
+      one: "{count} tanesi yaklaştı ama güven ayarının altında kaldı.",
+      other: "{count} tanesi yaklaştı ama güven ayarının altında kaldı.",
+    },
+
+    openAiSettings: "Yapay zekâ ayarları",
   },
 } satisfies Messages["dashboard"];

@@ -36,6 +36,10 @@ export interface SettingsDialogProps {
   appearance: ThemeMode;
   onAppearanceChange(mode: ThemeMode): void;
   library: SettingsLibrary;
+  /** Settings → AI's "Open Organize" button: closes this dialog and switches
+   *  the dashboard to the Organize page (dashboard/organize/OrganizePage.tsx).
+   *  Optional only so a test can render this dialog without wiring it up. */
+  onOpenOrganize?(): void;
 }
 
 /**
@@ -82,7 +86,7 @@ function renderSection(section: SettingsSection, props: SettingsDialogProps): Re
     case "sync":
       return <SyncPanel />;
     case "ai":
-      return <AiPanel />;
+      return <AiPanel onOpenOrganize={props.onOpenOrganize} />;
     case "data":
       return <DataPanel library={props.library} />;
     case "about":

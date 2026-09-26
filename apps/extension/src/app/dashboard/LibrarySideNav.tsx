@@ -4,6 +4,7 @@ import { Icon } from "@astryxdesign/core/Icon";
 import { SideNav, SideNavItem, SideNavSection } from "@astryxdesign/core/SideNav";
 import { Text } from "@astryxdesign/core/Text";
 import { useI18n } from "../../i18n";
+import { SparkGlyph } from "../settings-dialog/glyphs";
 import { BookmarkGlyph, XGlyph, PlusGlyph } from "./glyphs";
 import type { LibraryView } from "./bookmark-utils";
 import type { BookmarkList } from "../../../lib/types";
@@ -62,6 +63,13 @@ export function LibrarySideNav({
           isSelected={view.kind === "unorganized"}
           endContent={<Badge label={counts.unorganized} />}
           onClick={() => onSelectView({ kind: "unorganized" })}
+        />
+        <SideNavItem
+          label={t("dashboard.views.organize")}
+          icon={<Icon icon={SparkGlyph} />}
+          isSelected={view.kind === "organize"}
+          endContent={<Badge label={counts.unorganized} />}
+          onClick={() => onSelectView({ kind: "organize" })}
         />
       </SideNavSection>
 

@@ -19,11 +19,12 @@ export const ai = {
 
   organize: {
     title: "Kütüphaneni düzenle",
-    step1Label: "Koleksiyon oluştur",
-    step1Description: "Nook, dosyalanmamış yer imlerinden koleksiyon ve etiket önerir.",
     step2Label: "Yer imlerini otomatik dosyala",
-    step2Description: "Yer imlerini yukarıdaki koleksiyon ve etiketlere dosyalar.",
+    step2Description: "Yer imlerini koleksiyon ve etiketlerine dosyalar.",
   },
+
+  openOrganize: "Düzenle sayfasını aç",
+  openOrganizeDescription: "Önerileri incele, ilerlemeyi izle ve neyin dosyalandığını gör — kendi sayfasında.",
 
   suggest: {
     button: "Koleksiyon öner",

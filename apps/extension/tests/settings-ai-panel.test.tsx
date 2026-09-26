@@ -25,12 +25,14 @@ vi.mock("../src/app/host/useCloudStatus", () => ({
 const AI_SETTINGS_KEY = "ai.settings";
 const CLOUD_ORIGIN = "https://nook.beyler.co";
 
-// -- the four AI routes ----------------------------------------------------
+// -- the AI routes this (slimmer) panel still touches -----------------------
 //
-// A pass runs on Nook's server now, so the panel's every read and write is an
-// HTTP call (docs/ai-cloud-contract.md). Everything below is one fetch router
-// standing in for GET/PUT /api/ai/settings, GET /api/ai/status, POST
-// /api/ai/run, POST /api/ai/taxonomy/propose and PUT /api/ai/taxonomy.
+// Settings → AI is just the switches, "Search by meaning"'s informational
+// row, Advanced, and a button to the Organize page now — the suggest/accept/
+// run-now flow moved to dashboard/organize/ (see tests/organize-page.test.tsx
+// for its own coverage). This panel still reads GET/PUT /api/ai/settings and
+// GET /api/ai/status (for the outage banner and the per-row "not available"
+// notes), so those two routes still need a fetch router.
 
 /** Stands in for GET/PUT /api/ai/settings — the account's row. */
 class MockSettingsServer {
@@ -121,10 +123,6 @@ let statusServer: MockStatusServer;
 type RouteReply = () => Response | Promise<Response>;
 
 let statusHandler: RouteReply | null;
-let runHandler: RouteReply | null;
-let proposerHandler: RouteReply | null;
-let acceptHandler: RouteReply | null;
-let acceptBodies: unknown[];
 
 /** Every request the panel made, in order, whichever route it was for. */
 let fetchLog: Array<{ url: string; method: string; headers: Record<string, string>; credentials?: string }>;
@@ -141,19 +139,6 @@ function installFetchRouter(): void {
     if (input.endsWith("/api/ai/status")) {
       if (statusHandler) return statusHandler();
       return statusServer.respond();
-    }
-    if (input.endsWith("/api/ai/run")) {
-      if (runHandler) return runHandler();
-      return json({ queued: 0, summariesQueued: 0, status: status() });
-    }
-    if (input.endsWith("/api/ai/taxonomy/propose")) {
-      if (proposerHandler) return proposerHandler();
-      return json({ sampleSize: 0, collections: [], tags: [], existingCollections: [] });
-    }
-    if (input.endsWith("/api/ai/taxonomy")) {
-      acceptBodies.push(init?.body ? JSON.parse(String(init.body)) : undefined);
-      if (acceptHandler) return acceptHandler();
-      return json({ createdCollections: 0, addedTags: 0, dropped: 0, taxonomy: { acceptedAt: null, collections: [], tags: [] } });
     }
     throw new Error(`Unexpected fetch in this test: ${input}`);
   });
@@ -238,10 +223,6 @@ beforeEach(async () => {
   // which has its own dedicated tests and overrides this explicitly.
   statusServer.body = status();
   statusHandler = null;
-  runHandler = null;
-  proposerHandler = null;
-  acceptHandler = null;
-  acceptBodies = [];
   fetchLog = [];
   installFetchRouter();
   stubLocalStorage();
@@ -295,21 +276,8 @@ async function settle() {
   });
 }
 
-async function settled<T>(work: () => Promise<T>): Promise<T> {
-  let value: T;
-  await act(async () => {
-    value = await work();
-    for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
-  });
-  return value!;
-}
-
 function hasText(text: string): boolean {
   return container.textContent?.includes(text) ?? false;
-}
-
-function countText(text: string): number {
-  return (container.textContent?.split(text).length ?? 1) - 1;
 }
 
 function rowText(title: string): string {
@@ -394,33 +362,15 @@ function isExpanded(triggerText: string): boolean {
   return buttonFor(triggerText).getAttribute("aria-expanded") === "true";
 }
 
-function tooltipFor(label: string): string {
-  const describedBy = buttonFor(label).getAttribute("aria-describedby");
-  return describedBy ? (document.getElementById(describedBy)?.textContent ?? "") : "";
-}
-
-function reviewCheckboxes(): HTMLInputElement[] {
-  return [...container.querySelectorAll<HTMLInputElement>(".astryx-checkbox-list input[type='checkbox']")];
-}
-
-function reviewCheckbox(label: string): HTMLInputElement {
-  const item = [...container.querySelectorAll<HTMLElement>("li.astryx-list-item")].find((element) =>
-    element.textContent?.includes(label),
-  );
-  const box = item?.querySelector<HTMLInputElement>("input[type='checkbox']");
-  if (!box) throw new Error(`No review checkbox labelled "${label}".`);
-  return box;
-}
-
 function readMeta<T>(key: string): Promise<T | undefined> {
-  return settled(() => NookDB.getMeta<T>(key));
+  return NookDB.getMeta<T>(key);
 }
 
 const readAiSettings = () => readMeta<Record<string, unknown>>(AI_SETTINGS_KEY);
 
 /** Renders the dialog on the AI section and waits for its reads. */
-async function renderAiPanel(host: NookHost): Promise<void> {
-  renderDialog(host);
+async function renderAiPanel(host: NookHost, overrides: Partial<Parameters<typeof SettingsDialog>[0]> = {}): Promise<void> {
+  renderDialog(host, overrides);
   clickText("AI");
   await settle();
 }
@@ -430,38 +380,18 @@ async function renderAiPanel(host: NookHost): Promise<void> {
  * exercise its own `!host.user` fallback, since the dialog never offers the
  * section (and so never mounts the panel) for a signed-out host.
  */
-async function renderAiPanelDirectly(host: NookHost): Promise<void> {
+async function renderAiPanelDirectly(host: NookHost, onOpenOrganize?: () => void): Promise<void> {
   act(() => {
     root.render(
       <NookHostProvider host={host}>
         <ToastViewport>
-          <AiPanel />
+          <AiPanel onOpenOrganize={onOpenOrganize} />
         </ToastViewport>
       </NookHostProvider>,
     );
   });
   await settle();
 }
-
-/** The proposal response, as the server sends it. */
-function stubProposer(body: unknown, responseStatus = 200): { calls: number } {
-  const state = { calls: 0 };
-  proposerHandler = () => {
-    state.calls++;
-    return json(body, { status: responseStatus });
-  };
-  return state;
-}
-
-const PROPOSALS = {
-  sampleSize: 200,
-  existingCollections: [],
-  collections: [
-    { name: "Tasarım", why: "Design systems, type and UI craft." },
-    { name: "Sistem ve Altyapı", why: "Servers, networking and deployment." },
-  ],
-  tags: [{ name: "ücretsiz", why: "Free to use.", coveredBy: [] }],
-};
 
 /** Opens the collapsed "Advanced" disclosure — the thresholds live behind it
  *  now, so a test that needs a slider or the language selector has to open it
@@ -481,7 +411,7 @@ describe("Settings → AI — section visibility", () => {
     clickText("AI");
     await settle();
     expect(hasText("File bookmarks automatically")).toBe(true);
-    expect(hasText("Suggest collections")).toBe(true);
+    expect(hasText("Open Organize")).toBe(true);
   });
 
   it("hides the section with no session", async () => {
@@ -508,8 +438,7 @@ describe("Settings → AI — section visibility", () => {
     clickText("AI");
     await settle();
     expect(hasText("File bookmarks automatically")).toBe(true);
-    expect(hasText("Suggest collections")).toBe(true);
-    expect(isDisabled(buttonFor("Organize unfiled bookmarks now"))).toBe(true); // off: no pass is switched on
+    expect(hasText("Summarise long pages")).toBe(true);
   });
 
   it("hides the section on the web host with no session", async () => {
@@ -552,161 +481,14 @@ describe("Settings → AI — intro and availability", () => {
     await renderAiPanel(aiHost());
 
     expect(hasText("AI isn't set up on this server yet")).toBe(false);
-    // The local note still says so, on the step it affects.
+    // The local note still says so, on the row it affects.
     expect(hasText("Not available on this server yet.")).toBe(true);
   });
 });
 
-// -- step 1: suggest collections -------------------------------------------
+// -- file bookmarks automatically (just the switch now) ---------------------
 
-describe("Settings → AI — step 1, suggest collections", () => {
-  it("is offered with no toggle to turn on first, and says what it does", async () => {
-    const server = stubProposer(PROPOSALS);
-    await renderAiPanel(aiHost());
-
-    expect(isDisabled(buttonFor("Suggest collections"))).toBe(false);
-    expect(hasText("Nook looks at your unfiled bookmarks")).toBe(true);
-    expect(server.calls).toBe(0);
-  });
-
-  it("shows whether the account has accepted suggestions yet", async () => {
-    statusServer.body = status({ taxonomy: { acceptedAt: null, collections: [], tags: [] } });
-    await renderAiPanel(aiHost());
-    expect(hasText("You haven't asked for suggestions yet.")).toBe(true);
-
-    act(() => root.unmount());
-    root = createRoot(container);
-    statusServer.body = status({
-      taxonomy: { acceptedAt: "2026-09-01T00:00:00.000Z", collections: [{ id: "1", name: "Tasarım", samples: [] }], tags: [] },
-    });
-    await renderAiPanel(aiHost());
-    expect(hasText("You've accepted 1 collection so far.")).toBe(true);
-  });
-
-  it("turns autoTaxonomy on the first time it is used, without a switch of its own", async () => {
-    stubProposer(PROPOSALS);
-    await renderAiPanel(aiHost());
-
-    expect(settingsServer.settings.autoTaxonomy).toBe(false);
-    act(() => buttonFor("Suggest collections").click());
-    await settle();
-
-    expect(settingsServer.settings.autoTaxonomy).toBe(true);
-  });
-
-  it("shows each proposal with a checkbox, its reason, and ticked by default", async () => {
-    stubProposer(PROPOSALS);
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Suggest collections").click());
-    await settle();
-
-    const boxes = reviewCheckboxes();
-    expect(boxes).toHaveLength(3);
-    expect(boxes.every((box) => box.checked)).toBe(true);
-    expect(hasText("Tasarım")).toBe(true);
-    expect(hasText("Design systems, type and UI craft.")).toBe(true);
-    expect(hasText("New collections")).toBe(true);
-    expect(hasText("New tags")).toBe(true);
-    expect(hasText("Nook looked at 200 bookmarks.")).toBe(true);
-    expect(buttonFor("Add 2 collections and 1 tag")).toBeTruthy();
-  });
-
-  it("starts a tag unticked when a collection above already covers it, and re-ticks it when that collection is unticked", async () => {
-    stubProposer({
-      sampleSize: 200,
-      existingCollections: [],
-      collections: [{ name: "Açık Kaynak Projeleri", why: "Open source work." }],
-      tags: [
-        { name: "açık kaynak", why: "Open source.", coveredBy: ["Açık Kaynak Projeleri"] },
-        { name: "ücretsiz", why: "Free to use.", coveredBy: [] },
-      ],
-    });
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Suggest collections").click());
-    await settle();
-
-    expect(reviewCheckbox("Açık Kaynak Projeleri").checked).toBe(true);
-    expect(reviewCheckbox("açık kaynak").checked).toBe(false);
-    expect(hasText("A collection above already covers this.")).toBe(true);
-
-    act(() => reviewCheckbox("Açık Kaynak Projeleri").click());
-    await settle();
-
-    expect(reviewCheckbox("açık kaynak").checked).toBe(true);
-    expect(hasText("A collection above already covers this.")).toBe(false);
-  });
-
-  it("accepts the ticked names through PUT /api/ai/taxonomy, and nothing else", async () => {
-    stubProposer(PROPOSALS);
-    acceptHandler = () =>
-      json({
-        createdCollections: 2,
-        addedTags: 1,
-        dropped: 0,
-        taxonomy: { acceptedAt: "2026-09-26T00:00:00.000Z", collections: [], tags: [{ name: "ücretsiz" }] },
-      });
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Suggest collections").click());
-    await settle();
-    act(() => buttonFor("Add 2 collections and 1 tag").click());
-    await settle();
-
-    expect(acceptBodies).toEqual([
-      { collections: ["Tasarım", "Sistem ve Altyapı"], tags: [{ name: "ücretsiz", definition: "Free to use." }] },
-    ]);
-    expect(hasText("2 collections and 1 tag added.")).toBe(true);
-    expect(hasText("You can rename or delete these anytime.")).toBe(true);
-  });
-
-  it("treats an empty proposal list as a legitimate answer", async () => {
-    stubProposer({ sampleSize: 200, existingCollections: [], collections: [], tags: [] });
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Suggest collections").click());
-    await settle();
-
-    expect(hasText("Nothing new to suggest right now.")).toBe(true);
-    expect(reviewCheckboxes()).toHaveLength(0);
-  });
-
-  it("says so when the server had nothing unfiled to read", async () => {
-    stubProposer({ sampleSize: 0, existingCollections: [], collections: [], tags: [] });
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Suggest collections").click());
-    await settle();
-
-    expect(hasText("Nothing unfiled to look at yet.")).toBe(true);
-  });
-
-  it("reports a server with no AI key as unconfigured, not as a failure", async () => {
-    stubProposer({ error: "AI classification is not configured" }, 503);
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Suggest collections").click());
-    await settle();
-
-    expect(hasText("Not available on this server yet.")).toBe(true);
-    expect(reviewCheckboxes()).toHaveLength(0);
-    expect(isDisabled(buttonFor("Suggest collections"))).toBe(false);
-  });
-
-  it("asks for a session before it reads anything, even with the preference cached on from before", async () => {
-    await NookDB.setMeta(`cloud:${CLOUD_ORIGIN}:token`, null);
-    await NookDB.setMeta(AI_SETTINGS_KEY, { ...DEFAULT_AI_SETTINGS, autoTaxonomy: true });
-    const server = stubProposer(PROPOSALS);
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Suggest collections").click());
-    await settle();
-
-    expect(server.calls).toBe(0);
-    expect(hasText("Your session has expired.")).toBe(true);
-  });
-});
-
-// -- step 2: file bookmarks automatically -----------------------------------
-
-describe("Settings → AI — step 2, file bookmarks automatically", () => {
+describe("Settings → AI — file bookmarks automatically", () => {
   it("commits autoClassify through the settings route and survives a remount", async () => {
     renderDialog(aiHost());
     clickText("AI");
@@ -733,110 +515,6 @@ describe("Settings → AI — step 2, file bookmarks automatically", () => {
     expect(hasText("Works through your whole library, not just new bookmarks")).toBe(true);
   });
 
-  it("is disabled when neither filing nor summarising is on, and explains why", async () => {
-    await renderAiPanel(aiHost());
-    expect(isDisabled(buttonFor("Organize unfiled bookmarks now"))).toBe(true);
-    expect(tooltipFor("Organize unfiled bookmarks now")).toContain("Turn on");
-  });
-
-  it("POSTs to /api/ai/run, queues, and re-reads the status", async () => {
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
-    statusServer.body = status();
-    runHandler = () => json({ queued: 3, summariesQueued: 0, status: status({ pending: 3 }) });
-
-    await renderAiPanel(aiHost());
-    const before = requestsTo("/api/ai/status").length;
-    act(() => buttonFor("Organize unfiled bookmarks now").click());
-    await settle();
-
-    expect(requestsTo("/api/ai/run")).toMatchObject([{ method: "POST" }]);
-    expect(hasText("Now working on 3 bookmarks to organize.")).toBe(true);
-    expect(requestsTo("/api/ai/status").length).toBeGreaterThan(before);
-  });
-
-  it("also reports summaries queued by the same click, since the route queues both", async () => {
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true, autoSummarize: true };
-    statusServer.body = status();
-    runHandler = () => json({ queued: 3, summariesQueued: 8, status: status() });
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Organize unfiled bookmarks now").click());
-    await settle();
-
-    expect(hasText("Now working on 3 bookmarks to organize and 8 pages to summarise.")).toBe(true);
-  });
-
-  it("stays usable for a summarize-only account", async () => {
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoSummarize: true };
-    statusServer.body = status();
-    runHandler = () => json({ queued: 0, summariesQueued: 6, status: status() });
-
-    await renderAiPanel(aiHost());
-    expect(isDisabled(buttonFor("Organize unfiled bookmarks now"))).toBe(false);
-    act(() => buttonFor("Organize unfiled bookmarks now").click());
-    await settle();
-
-    expect(hasText("Now working on 6 pages to summarise.")).toBe(true);
-  });
-
-  it("says so when neither queue got anything", async () => {
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
-    statusServer.body = status();
-    runHandler = () => json({ queued: 0, summariesQueued: 0, status: status() });
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Organize unfiled bookmarks now").click());
-    await settle();
-
-    expect(hasText("Nothing to organize right now.")).toBe(true);
-  });
-
-  it("reports a request that did not complete, and stays clickable", async () => {
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
-    runHandler = () => json({ error: "nope" }, { status: 500 });
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Organize unfiled bookmarks now").click());
-    await settle();
-
-    expect(hasText("Could not start this.")).toBe(true);
-    expect(isDisabled(buttonFor("Organize unfiled bookmarks now"))).toBe(false);
-  });
-
-  it("shows a pulsing queue depth while it drains", async () => {
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
-    statusServer.body = status({ pending: 12 });
-    await renderAiPanel(aiHost());
-
-    expect(hasText("Working on 12 bookmarks")).toBe(true);
-  });
-
-  it("reports the last pass in plain words", async () => {
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
-    statusServer.body = status({
-      run: { processed: 25, assigned: 18, tagged: 40, skipped: 7, lastRunAt: "2026-09-20T10:00:00.000Z", lastError: null, isUnavailable: false, isBackingOff: false, log: [] },
-    });
-    await renderAiPanel(aiHost());
-
-    expect(hasText("Filed 18, left 7 alone because Nook wasn't sure.")).toBe(true);
-  });
-
-  it("says a pass has never run rather than guessing", async () => {
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
-    statusServer.body = status();
-    await renderAiPanel(aiHost());
-    expect(hasText("Nook hasn't organized anything yet.")).toBe(true);
-  });
-
-  it("surfaces the run's own error instead of the filed/skipped sentence", async () => {
-    statusServer.body = status({
-      run: { processed: 3, assigned: 0, tagged: 0, skipped: 3, lastRunAt: null, lastError: "Nook's AI key isn't configured.", isUnavailable: false, isBackingOff: false, log: [] },
-    });
-    await renderAiPanel(aiHost());
-    expect(hasText("Nook's AI key isn't configured.")).toBe(true);
-    expect(hasText("Filed 0, left 3 alone")).toBe(false);
-  });
-
   it("names the missing deployment locally when it, and only it, is down", async () => {
     settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
     statusServer.body = status({ available: false });
@@ -844,10 +522,15 @@ describe("Settings → AI — step 2, file bookmarks automatically", () => {
     expect(hasText("Not available on this server yet.")).toBe(true);
   });
 
-  it("survives a status body that is missing everything", async () => {
-    statusServer.body = {};
+  it("no longer shows the run-now button or run history — that moved to the Organize page", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
+    statusServer.body = status({
+      run: { processed: 25, assigned: 18, tagged: 40, skipped: 7, lastRunAt: "2026-09-20T10:00:00.000Z", lastError: null, isUnavailable: false, isBackingOff: false, log: [] },
+    });
     await renderAiPanel(aiHost());
-    expect(hasText("Nook hasn't organized anything yet.")).toBe(true);
+
+    expect(hasText("Filed 18, left 7 alone")).toBe(false);
+    expect(() => buttonFor("Organize unfiled bookmarks now")).toThrow();
   });
 });
 
@@ -1028,56 +711,30 @@ describe("Settings → AI — advanced", () => {
   });
 });
 
-// -- both hosts ---------------------------------------------------------------
+// -- Open Organize ------------------------------------------------------------
 
-describe("Settings → AI — the web host", () => {
-  it("renders the run history and organizes on demand", async () => {
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
-    statusServer.body = status({
-      run: { processed: 25, assigned: 18, tagged: 40, skipped: 7, lastRunAt: "2026-09-20T10:00:00.000Z", lastError: null, isUnavailable: false, isBackingOff: false, log: [] },
-    });
-    const sent: string[] = [];
-    runHandler = () => {
-      sent.push("run");
-      return json({ queued: 2, summariesQueued: 0, status: status() });
-    };
-
-    await renderAiPanel(webHost());
-    expect(hasText("Filed 18, left 7 alone because Nook wasn't sure.")).toBe(true);
-
-    expect(isDisabled(buttonFor("Organize unfiled bookmarks now"))).toBe(false);
-    act(() => buttonFor("Organize unfiled bookmarks now").click());
-    await settle();
-    expect(sent).toEqual(["run"]);
-    expect(hasText("Now working on 2 bookmarks to organize.")).toBe(true);
+describe("Settings → AI — Open Organize", () => {
+  it("is a prominent, always-present button once wired up", async () => {
+    await renderAiPanel(aiHost(), { onOpenOrganize: vi.fn() });
+    expect(hasText("Open Organize")).toBe(true);
+    expect(isDisabled(buttonFor("Open Organize"))).toBe(false);
   });
 
-  it("proposes collections on the web host too", async () => {
-    const proposer = stubProposer(PROPOSALS);
-    await renderAiPanel(webHost());
-
-    expect(isDisabled(buttonFor("Suggest collections"))).toBe(false);
-    act(() => buttonFor("Suggest collections").click());
+  it("closes the dialog and switches the dashboard to the Organize page", async () => {
+    const onOpenChange = vi.fn();
+    const onOpenOrganize = vi.fn();
+    renderDialog(aiHost(), { onOpenChange, onOpenOrganize });
+    clickText("AI");
     await settle();
 
-    expect(proposer.calls).toBe(1);
-    expect(hasText("New collections")).toBe(true);
+    act(() => buttonFor("Open Organize").click());
+
+    expect(onOpenOrganize).toHaveBeenCalledTimes(1);
   });
 
-  it("authenticates with the cookie rather than a token", async () => {
-    configureCloud({ apiUrl: "https://nook.beyler.co", auth: "cookie" });
-    await NookDB.setMeta(`cloud:${CLOUD_ORIGIN}:token`, null);
-    await NookDB.setMeta(`cloud:${CLOUD_ORIGIN}:owner`, "user-1");
-    stubProposer(PROPOSALS);
-
-    await renderAiPanel(webHost());
-    act(() => buttonFor("Suggest collections").click());
-    await settle();
-
-    expect(hasText("New collections")).toBe(true);
-    const [proposal] = requestsTo("/api/ai/taxonomy/propose");
-    expect(proposal.headers.Authorization).toBeUndefined();
-    expect(proposal.credentials).toBe("include");
+  it("is disabled rather than silently doing nothing when no callback was wired up", async () => {
+    await renderAiPanelDirectly(aiHost());
+    expect(isDisabled(buttonFor("Open Organize"))).toBe(true);
   });
 });
 
@@ -1087,7 +744,7 @@ describe("Settings → AI — Turkish locale", () => {
   // Mounted directly (bypassing the Settings dialog's section nav), so these
   // don't depend on the AI section's own translated label/description —
   // that's `settings-shared.tsx`, owned by another agent and out of scope here.
-  it("renders the intro, the sign-in banner and the organize steps in Turkish", async () => {
+  it("renders the intro, the sign-in banner and the file-automatically switch in Turkish", async () => {
     localStorage.setItem(LOCALE_STORAGE_KEY, "tr");
 
     await renderAiPanelDirectly(webHost({ user: null }));
@@ -1095,17 +752,17 @@ describe("Settings → AI — Turkish locale", () => {
 
     await renderAiPanelDirectly(aiHost());
     expect(hasText("Nook yer imlerini koleksiyonlara ayırabilir")).toBe(true);
-    expect(hasText("Koleksiyon oluştur")).toBe(true);
-    expect(hasText("Koleksiyon öner")).toBe(true);
+    expect(hasText("Yer imlerini otomatik dosyala")).toBe(true);
+    expect(hasText("Düzenle sayfasını aç")).toBe(true);
   });
 
   it("pluralises and formats counts through the Turkish catalog", async () => {
     localStorage.setItem(LOCALE_STORAGE_KEY, "tr");
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
-    statusServer.body = status({ pending: 12 });
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoSummarize: true };
+    statusServer.body = status({ summarize: summariseStatus({ summarised: 12, pending: 3 }) });
 
     await renderAiPanelDirectly(aiHost());
-    expect(hasText("12 yer imi üzerinde çalışılıyor")).toBe(true);
+    expect(hasText("12 sayfanın özeti var, 3 tanesi bekliyor.")).toBe(true);
   });
 
   it("translates the summaries card and the shared 'not available' note", async () => {

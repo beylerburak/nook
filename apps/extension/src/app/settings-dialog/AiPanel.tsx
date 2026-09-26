@@ -1,31 +1,26 @@
-import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
+import { Banner } from "@astryxdesign/core/Banner";
 import { HStack, VStack } from "@astryxdesign/core/Layout";
 import { Text } from "@astryxdesign/core/Text";
 import { useI18n } from "../../i18n";
 import { useNookHost, type NookHost } from "../host/NookHost";
 import { AdvancedSettings } from "./ai/AdvancedSettings";
-import { OrganizeCard } from "./ai/OrganizeCard";
+import { AiUnavailableBanner } from "./ai/AiOutageBanner";
+import { AutoFileSwitch } from "./ai/AutoFileSwitch";
 import { outageKind, useAiSettings, useAiStatus } from "./ai/shared";
 import { SearchByMeaningRow } from "./ai/SearchByMeaningRow";
 import { SummariesCard } from "./ai/SummariesCard";
 
 /**
- * Settings → AI, redesigned around one question: what does Nook actually do
- * with AI, and what should I do next?
+ * Settings → AI — short by design. The review/organize workflow used to live
+ * here (a Stepper wedged into an 880px dialog, with the "Accept N collections"
+ * button clipped off the right edge at anything but the widest viewport) but
+ * it is a primary workflow, not a setting, so it moved to its own page: the
+ * Organize page (`dashboard/organize/OrganizePage.tsx`), reached from the
+ * side nav or from the button at the bottom of this panel.
  *
- * - An intro line, plus one banner if the server has no AI key at all — see
- *   `outageKind` in `ai/shared.ts` for the two independent deployments that
- *   fact is drawn from.
- * - "Organize your library": two guided steps — suggest collections and tags,
- *   then file into them (new saves *and* the existing library — see
- *   `AutoFileStep`'s own comment for why that is true of the toggle alone, not
- *   just the on-demand button).
- * - "Summaries", short by design, with the privacy detail behind a disclosure
- *   rather than in the switch's own paragraph.
- * - "Search by meaning", one informational line: no toggle, it just works for
- *   a signed-in account once the server is configured for it.
- * - "Advanced": the four thresholds, collapsed by default.
+ * What is left is genuinely settings: the two switches, the informational
+ * "Search by meaning" row, and the advanced thresholds, collapsed by default.
  *
  * This panel is host-agnostic: every read and write here is an authenticated
  * call to Nook's server (`lib/ai-client.ts`, `lib/ai-settings.ts`), so it
@@ -38,7 +33,7 @@ import { SummariesCard } from "./ai/SummariesCard";
  * Every user-visible string in this file and the ones under `./ai/` is under
  * the `ai` namespace — see `src/i18n/locales/en/ai.ts` / `tr/ai.ts`.
  */
-export function AiPanel() {
+export function AiPanel({ onOpenOrganize }: { onOpenOrganize?(): void }) {
   const { t } = useI18n();
   const host = useNookHost();
   const { settings, commit } = useAiSettings();
@@ -57,10 +52,16 @@ export function AiPanel() {
   return (
     <VStack gap={4}>
       <IntroBanner status={status} isLoading={isLoading} onRefresh={refresh} />
-      <OrganizeCard settings={settings} status={status} commit={commit} onRefresh={refresh} />
+      <AutoFileSwitch settings={settings} status={status} commit={commit} />
       <SummariesCard settings={settings} status={status} commit={commit} />
       <SearchByMeaningRow />
       <AdvancedSettings settings={settings} commit={commit} />
+      <VStack gap={1.5}>
+        <Text type="supporting" color="secondary">
+          {t("ai.openOrganizeDescription")}
+        </Text>
+        <Button label={t("ai.openOrganize")} variant="primary" onClick={onOpenOrganize} isDisabled={!onOpenOrganize} />
+      </VStack>
     </VStack>
   );
 }
@@ -81,9 +82,7 @@ function IntroBanner({
         <Text color="secondary">{t("ai.intro.text")}</Text>
         <Button label={t("ai.intro.refresh")} variant="ghost" size="sm" isLoading={isLoading} onClick={onRefresh} />
       </HStack>
-      {outageKind(status) === "all" ? (
-        <Banner status="warning" title={t("ai.intro.unavailableTitle")} description={t("ai.intro.unavailableDescription")} />
-      ) : null}
+      {outageKind(status) === "all" ? <AiUnavailableBanner /> : null}
     </VStack>
   );
 }

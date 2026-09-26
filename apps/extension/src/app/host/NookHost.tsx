@@ -69,6 +69,22 @@ export interface NookHost {
   };
   /** Extension only, e.g. `openWebApp("/?connect=extension")` to sign in. */
   openWebApp?(path?: string): void;
+  /**
+   * Web only — lets the Organize page (dashboard/organize/OrganizePage.tsx)
+   * keep the URL in step with the dashboard's view state, so a direct link to
+   * `/app/dashboard/organize`, a browser back/forward, and picking "Organize"
+   * from the side nav all agree with each other. `isOrganizeOpen` reflects
+   * the current URL and changes identity (via the host's own memo) whenever
+   * the route does, so a component that reads it in a `useEffect` dependency
+   * list re-syncs on back/forward without polling. The extension has no
+   * notion of a URL for this — its dashboard keeps the same view in plain
+   * React state and never sets this field, which is deliberate: don't build
+   * other dashboard routes off this hook, it exists only for Organize.
+   */
+  navigation?: {
+    isOrganizeOpen: boolean;
+    onOrganizeOpenChange(open: boolean): void;
+  };
 }
 
 const NookHostContext = createContext<NookHost | null>(null);

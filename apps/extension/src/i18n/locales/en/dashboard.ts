@@ -15,6 +15,7 @@ export const dashboard = {
     x: "X bookmarks",
     web: "Web pages",
     unorganized: "Unorganized",
+    organize: "Organize",
     collectionFallback: "Collection",
   },
 
@@ -280,5 +281,50 @@ export const dashboard = {
   canvasEditor: {
     resizeHandleLabel: "Resize bookmark details panel",
     defaultInspectorLabel: "Bookmark details",
+  },
+
+  /**
+   * The Organize page (dashboard/organize/OrganizePage.tsx) — reached from
+   * the side nav's "Organize" item or Settings → AI's "Open Organize"
+   * button. Everything about *suggesting* collections/tags and *filing* into
+   * them reuses the `ai.suggest`/`ai.errors`/`ai.status` keys unchanged
+   * (`dashboard/organize/useSuggestCollections.ts` is the same flow that used
+   * to live in Settings); this namespace is only the page's own copy —
+   * header, progress, and the plain-language explanation of what got left
+   * out.
+   */
+  organize: {
+    title: "Organize your library",
+    description: "Nook can sort your bookmarks into collections on its own. Ask for suggestions, keep the ones you like, and Nook does the filing.",
+
+    filedCount: { one: "{count} bookmark filed", other: "{count} bookmarks filed" },
+    unfiledCount: { one: "{count} left to organize", other: "{count} left to organize" },
+
+    workingTitle: "Nook is organizing",
+    workingBody: {
+      one: "About {count} bookmark left — about {minutes} min.",
+      other: "About {count} bookmarks left — about {minutes} min.",
+    },
+
+    suggestPrompt: {
+      one: "Suggest a collection for the {count} bookmark that's still unfiled.",
+      other: "Suggest collections for the {count} bookmarks that are still unfiled.",
+    },
+    suggestMoreButton: "Suggest more collections",
+    allCaughtUp: "Everything is filed. Nice work.",
+    autoFileEnabledNote: "Filing is now on too, so new bookmarks keep getting sorted.",
+
+    recentlyFiledTitle: "Recently filed",
+    recentlyFiledEmpty: "Nothing filed yet.",
+    remainderNoneFit: {
+      one: "{count} bookmark didn't fit any collection.",
+      other: "{count} bookmarks didn't fit any collection.",
+    },
+    remainderUnsure: {
+      one: "{count} came close, but below your confidence setting.",
+      other: "{count} came close, but below your confidence setting.",
+    },
+
+    openAiSettings: "AI settings",
   },
 } as const;

@@ -22,7 +22,7 @@ import { AuthScreen } from "./auth/AuthScreen";
 import { authClient, type AuthUser } from "./auth/authClient";
 import { disconnectExtension } from "./host/extensionBridge";
 import { useWebHost } from "./host/useWebHost";
-import { navigate, useRoute } from "./router";
+import { navigate, useRoute, type Route } from "./router";
 
 // Must run before any other cloud/NookDB call anywhere in the app —
 // module-level, so it executes on import, ahead of React rendering.
@@ -94,10 +94,13 @@ type RouteResolution =
 
 /**
  * The whole /app/* route table (URL layout note in docs/cloud.md):
- *   /app             -> /app/dashboard (signed in) or /app/login (signed out)
- *   /app/login       -> AuthScreen; if already signed in, bounce onward (see below)
- *   /app/dashboard   -> DashboardApp; if signed out, bounce to /app/login?next=...
- *   anything else    -> /app/dashboard
+ *   /app                     -> /app/dashboard (signed in) or /app/login (signed out)
+ *   /app/login               -> AuthScreen; if already signed in, bounce onward (see below)
+ *   /app/dashboard           -> DashboardApp; if signed out, bounce to /app/login?next=...
+ *   /app/dashboard/organize  -> DashboardApp, opened straight to the Organize
+ *                               page (dashboard/organize/OrganizePage.tsx) —
+ *                               see useWebHost's `navigation` capability
+ *   anything else            -> /app/dashboard
  *
  * Pure and side-effect-free so both the render path (what to show *now*,
  * before the effect below has a chance to run) and that effect (which
@@ -133,11 +136,15 @@ function resolveAppRoute(pathname: string, search: string, signedIn: boolean): R
     if (!signedIn) {
       return { kind: "redirect", to: `/app/login?next=${encodeURIComponent(pathname + search)}` };
     }
-    // Only /app/dashboard itself is built today. A future nested route
-    // (e.g. /app/dashboard/collections/:id) still round-trips correctly
-    // through /app/login above once signed out — it just lands back here
-    // instead of on a page that doesn't exist yet.
-    if (pathname !== "/app/dashboard") return { kind: "redirect", to: "/app/dashboard" };
+    // /app/dashboard and /app/dashboard/organize are the only two dashboard
+    // paths built today (the Organize page — see useWebHost's `navigation`
+    // capability, read by DashboardApp.tsx). A future nested route (e.g.
+    // /app/dashboard/collections/:id) still round-trips correctly through
+    // /app/login above once signed out — it just lands back on the plain
+    // dashboard instead of a page that doesn't exist yet.
+    if (pathname !== "/app/dashboard" && pathname !== "/app/dashboard/organize") {
+      return { kind: "redirect", to: "/app/dashboard" };
+    }
     return { kind: "dashboard" };
   }
 
@@ -341,6 +348,7 @@ export function App() {
       requestSync={requestSync}
       signOut={signOut}
       cleanupAfterAccountDeleted={cleanupAfterAccountDeleted}
+      route={route}
     />
   );
 }
@@ -350,14 +358,16 @@ function SignedInApp({
   requestSync,
   signOut,
   cleanupAfterAccountDeleted,
+  route,
 }: {
   user: NookUser;
   requestSync: () => Promise<void>;
   signOut: () => Promise<void>;
   cleanupAfterAccountDeleted: () => Promise<void>;
+  route: Route;
 }) {
   const { t } = useI18n();
-  const host = useWebHost({ user, requestSync, signOut, cleanupAfterAccountDeleted });
+  const host = useWebHost({ user, requestSync, signOut, cleanupAfterAccountDeleted, route });
   const [confirmation, setConfirmation] = useState<{ status: "success" | "error"; message: string } | null>(null);
 
   // `?connect=extension` (contract section 6/task 2): connect the extension

@@ -33,7 +33,12 @@ export type { SearchFallback } from "../../../lib/retrieval";
 export type LibraryView =
   | { kind: "all" | "x" | "chrome" | "unorganized" }
   | { kind: "list"; id: string }
-  | { kind: "tag"; id: string };
+  | { kind: "tag"; id: string }
+  /** The Organize page (dashboard/organize/OrganizePage.tsx) — suggest
+   *  collections, watch filing progress, see what got filed. Replaces the
+   *  bookmark grid/table in the main content area entirely rather than
+   *  filtering it, which is why it carries no bookmarks of its own here. */
+  | { kind: "organize" };
 export type MediaFilter = "all" | "media" | "text";
 export type BookmarkViewMode = "cards" | "table";
 export type LightboxState = { media: Media[]; index: number } | null;

@@ -1,13 +1,10 @@
 import { useState } from "react";
-import { Button } from "@astryxdesign/core/Button";
-import { CheckboxList, CheckboxListItem } from "@astryxdesign/core/CheckboxList";
-import { HStack, VStack } from "@astryxdesign/core/Layout";
-import { StatusDot, type StatusDotVariant } from "@astryxdesign/core/StatusDot";
-import { Text } from "@astryxdesign/core/Text";
 import { useToast } from "@astryxdesign/core/Toast";
+import type { StatusDotVariant } from "@astryxdesign/core/StatusDot";
 import {
   acceptTaxonomy,
   announceAiStatusChange,
+  requestClassificationRun,
   requestTaxonomyProposals,
   type AiStatus,
   type ProposeOutcome,
@@ -17,23 +14,35 @@ import {
 import type { AiSettings } from "../../../../lib/ai-settings";
 import { useI18n } from "../../../i18n";
 import { useNookHost } from "../../host/NookHost";
-import { type TFunction, useIsMounted } from "./shared";
+import { type TFunction, useIsMounted } from "../../settings-dialog/ai/shared";
 
 /**
- * Step 1 — "Suggest collections": ask the server what to call the themes in
- * this library, show the answer for review, and turn the names the user keeps
- * into real collections plus the tag vocabulary in force
- * (docs/ai.md, "Taxonomy growth").
+ * "Suggest collections": ask the server what to call the themes in this
+ * library, show the answer for review, and turn the names the user keeps
+ * into real collections plus the tag vocabulary in force (docs/ai.md,
+ * "Taxonomy growth").
  *
- * Everything the client used to own is the server's now. The sample is drawn
- * from the account's own unfiled bookmarks, so this sends no library and holds
- * no `Bookmark[]`; acceptance sends names only, and the server reads the
- * account's existing lists, its own tags and the sample from the same store it
- * classifies against.
+ * This is the same state machine that used to live in Settings
+ * (`settings-dialog/ai/SuggestCollections.tsx`, now deleted) — moved here
+ * rather than duplicated, because it is a primary workflow (the Organize
+ * page) now, not a setting. The one behavioural addition on top of the old
+ * component: accepting is the moment the whole point of this page — getting
+ * bookmarks filed — becomes possible, so `accept()` now also makes sure
+ * `autoClassify` is on and immediately queues a filing pass
+ * (`requestClassificationRun`), instead of leaving the user to find and
+ * click a second button. `onAccepted` lets the page re-read the status right
+ * away so the "working" progress view shows up without waiting for the next
+ * poll.
+ *
+ * The sample is drawn from the account's own unfiled bookmarks, so this sends
+ * no library and holds no `Bookmark[]`; acceptance sends names only, and the
+ * server reads the account's existing lists, its own tags and the sample from
+ * the same store it classifies against.
  *
  * Every user-visible string is under the `ai.suggest` (plus shared
  * `ai.errors`/`ai.status`) keys — see `src/i18n/locales/en/ai.ts`.
  */
+
 function statusLine(t: TFunction, status: AiStatus | null): string {
   if (!status) return "";
   const { taxonomy } = status;
@@ -47,16 +56,16 @@ function statusLine(t: TFunction, status: AiStatus | null): string {
 /** "{n} collection(s)" and "{m} tag(s)", joined with a translated "and" — the
  *  one place a two-count sentence is built, shared by the status line, the
  *  accept button's label and both post-accept messages. */
-function countParts(t: TFunction, collections: number, tags: number): string {
+export function countParts(t: TFunction, collections: number, tags: number): string {
   const parts: string[] = [];
   if (collections > 0) parts.push(t("ai.suggest.collectionsCount", { count: collections }));
   if (tags > 0) parts.push(t("ai.suggest.tagsCount", { count: tags }));
   return parts.join(` ${t("ai.suggest.and")} `);
 }
 
-type SuggestPhase = "idle" | "reading" | "review" | "accepting" | "done";
+export type SuggestPhase = "idle" | "reading" | "review" | "accepting" | "done";
 
-interface SuggestState {
+export interface SuggestState {
   phase: SuggestPhase;
   proposals: TaxonomyProposal[];
   /** The names still ticked. Default-checked, and the user may take any away. */
@@ -71,9 +80,12 @@ interface SuggestState {
   sampleSize: number;
   existingCollections: string[];
   note: SuggestNote | null;
+  /** Set once accept() has turned filing on as a side effect — the page shows
+   *  this once, right after acceptance, then it's just an ordinary setting. */
+  autoFileJustEnabled: boolean;
 }
 
-interface SuggestNote {
+export interface SuggestNote {
   variant: StatusDotVariant;
   text: string;
 }
@@ -87,17 +99,40 @@ const IDLE_STATE: SuggestState = {
   sampleSize: 0,
   existingCollections: [],
   note: null,
+  autoFileJustEnabled: false,
 };
 
-export function SuggestCollectionsStep({
-  status,
-  settings,
-  commit,
-}: {
+export interface UseSuggestCollectionsParams {
   status: AiStatus | null;
   settings: AiSettings;
   commit(patch: Partial<AiSettings>): void;
-}) {
+  /** Called right after a successful accept (and the filing pass it queues),
+   *  so the caller can re-read `GET /api/ai/status` immediately. */
+  onAccepted?(): void;
+}
+
+export interface UseSuggestCollections {
+  state: SuggestState;
+  isReading: boolean;
+  isReviewing: boolean;
+  isAccepting: boolean;
+  isBusy: boolean;
+  disabledReason: string | undefined;
+  tickedTags: TagProposal[];
+  statusLine: string;
+  acceptCollections(values: string[]): void;
+  acceptTags(values: string[]): void;
+  ask(): void;
+  accept(): void;
+  cancel(): void;
+}
+
+export function useSuggestCollections({
+  status,
+  settings,
+  commit,
+  onAccepted,
+}: UseSuggestCollectionsParams): UseSuggestCollections {
   const { t } = useI18n();
   const host = useNookHost();
   const toast = useToast();
@@ -109,9 +144,9 @@ export function SuggestCollectionsStep({
   const isAccepting = state.phase === "accepting";
   const isBusy = isReading || isAccepting;
   // The propose route needs no toggle of its own on the server — see
-  // `outageKind` in ./shared for why `status.summarize.available` is the right
-  // signal for it — so the button is gated on a session and the deployment
-  // being configured, nothing else.
+  // `outageKind` in settings-dialog/ai/shared for why
+  // `status.summarize.available` is the right signal for it — so asking is
+  // gated on a session and the deployment being configured, nothing else.
   const proposerUnavailable = status !== null && !status.summarize.available;
 
   const isTagTicked = (tag: TagProposal): boolean => state.tagChoice[tag.name] ?? !isCoveredBy(tag, state.accepted);
@@ -141,10 +176,11 @@ export function SuggestCollectionsStep({
 
   const ask = async () => {
     // Best-effort: the server does not gate the propose route on this field
-    // (see ./shared's `outageKind` comment), but the setting is still the
-    // account's record of "I want suggestions", so a click turns it on the
-    // first time rather than leaving it permanently false. A failure here is
-    // the ordinary settings-save failure and already toasts on its own.
+    // (see settings-dialog/ai/shared's `outageKind` comment), but the setting
+    // is still the account's record of "I want suggestions", so a click turns
+    // it on the first time rather than leaving it permanently false. A
+    // failure here is the ordinary settings-save failure and already toasts
+    // on its own.
     if (!settings.autoTaxonomy) commit({ autoTaxonomy: true });
 
     setState({ ...IDLE_STATE, phase: "reading" });
@@ -170,6 +206,7 @@ export function SuggestCollectionsStep({
       sampleSize: outcome.sampleSize,
       existingCollections: outcome.existingCollections,
       note: null,
+      autoFileJustEnabled: false,
     });
   };
 
@@ -188,9 +225,25 @@ export function SuggestCollectionsStep({
       }
       const { createdCollections, addedTags, dropped } = result;
       toast({ body: addedMessage(t, createdCollections, addedTags) });
+
+      // The whole point of accepting is getting bookmarks filed — make sure
+      // the toggle that lets the server's worker do that is on, and queue a
+      // pass right now rather than waiting for the next tick.
+      const autoFileJustEnabled = !settings.autoClassify;
+      if (autoFileJustEnabled) commit({ autoClassify: true });
+      try {
+        await requestClassificationRun();
+      } catch (error) {
+        // The taxonomy is real either way — a failed "start filing now" is
+        // not worth undoing the acceptance for. The per-minute worker will
+        // pick this account up on its own tick regardless.
+        console.error("[Nook] Could not start filing after accepting suggestions:", error);
+      }
+
       if (!isMounted()) return;
       announceAiStatusChange();
-      setState({ ...IDLE_STATE, phase: "done", note: acceptedNote(t, createdCollections, addedTags, dropped) });
+      onAccepted?.();
+      setState({ ...IDLE_STATE, phase: "done", note: acceptedNote(t, createdCollections, addedTags, dropped), autoFileJustEnabled });
     } catch (error) {
       console.error("[Nook] Could not create the suggested taxonomy:", error);
       if (isMounted()) setState((previous) => ({ ...previous, phase: "review" }));
@@ -198,111 +251,38 @@ export function SuggestCollectionsStep({
     }
   };
 
+  const cancel = () => setState(IDLE_STATE);
+
   const disabledReason = !host.user ? t("ai.suggest.signedOutTooltip") : proposerUnavailable ? t("ai.errors.notAvailable") : undefined;
 
-  return (
-    <VStack gap={2} width="100%">
-      {status ? (
-        <Text type="supporting" color="secondary">
-          {statusLine(t, status)}
-        </Text>
-      ) : null}
-      <HStack justify="end">
-        {isReviewing ? (
-          <Button label={t("common.cancel")} variant="ghost" size="sm" onClick={() => setState(IDLE_STATE)} />
-        ) : (
-          <Button
-            label={t("ai.suggest.button")}
-            variant="secondary"
-            size="sm"
-            isLoading={isReading}
-            isDisabled={Boolean(disabledReason) || isBusy}
-            tooltip={disabledReason ?? t("ai.suggest.buttonTooltip")}
-            onClick={() => void ask()}
-          />
-        )}
-      </HStack>
-
-      {isReading ? (
-        <HStack gap={2} align="center">
-          <StatusDot variant="accent" label={t("ai.suggest.reading")} isPulsing />
-          <Text type="supporting" color="secondary">
-            {t("ai.suggest.readingBody")}
-          </Text>
-        </HStack>
-      ) : null}
-
-      {isReviewing ? (
-        <VStack gap={2} width="100%">
-          {state.proposals.length > 0 ? (
-            <CheckboxList
-              label={t("ai.suggest.newCollections")}
-              description={collectionsReviewDescription(t, state.sampleSize, state.existingCollections)}
-              hasDividers
-              width="100%"
-              value={state.accepted}
-              onChange={acceptCollections}
-            >
-              {state.proposals.map((proposal) => (
-                <CheckboxListItem key={proposal.name} value={proposal.name} label={proposal.name} description={proposal.why} />
-              ))}
-            </CheckboxList>
-          ) : null}
-          {state.tags.length > 0 ? (
-            <CheckboxList
-              label={t("ai.suggest.newTags")}
-              description={t("ai.suggest.newTagsDescription")}
-              hasDividers
-              width="100%"
-              value={tickedTags.map((tag) => tag.name)}
-              onChange={acceptTags}
-            >
-              {state.tags.map((tag) => (
-                <CheckboxListItem
-                  key={tag.name}
-                  value={tag.name}
-                  label={tag.name}
-                  description={isCoveredBy(tag, state.accepted) ? t("ai.suggest.alreadyCovered") : tag.why}
-                />
-              ))}
-            </CheckboxList>
-          ) : null}
-          <HStack justify="end" gap={2}>
-            <Button
-              label={t("ai.suggest.addLabel", { parts: countParts(t, state.accepted.length, tickedTags.length) })}
-              variant="primary"
-              size="sm"
-              isLoading={isAccepting}
-              isDisabled={state.accepted.length === 0 && tickedTags.length === 0}
-              onClick={() => void accept()}
-            />
-          </HStack>
-        </VStack>
-      ) : null}
-
-      {state.note ? (
-        <HStack gap={2} align="start">
-          <StatusDot variant={state.note.variant} label={noteLabel(t, state.note.variant)} />
-          <Text type="supporting" color="secondary">
-            {state.note.text}
-          </Text>
-        </HStack>
-      ) : null}
-    </VStack>
-  );
+  return {
+    state,
+    isReading,
+    isReviewing,
+    isAccepting,
+    isBusy,
+    disabledReason,
+    tickedTags,
+    statusLine: statusLine(t, status),
+    acceptCollections,
+    acceptTags,
+    ask: () => void ask(),
+    accept: () => void accept(),
+    cancel,
+  };
 }
 
-function isCoveredBy(tag: TagProposal, acceptedNames: string[]): boolean {
+export function isCoveredBy(tag: TagProposal, acceptedNames: string[]): boolean {
   return tag.coveredBy.some((name) => acceptedNames.includes(name));
 }
 
-function collectionsReviewDescription(t: TFunction, sampleSize: number, existingCollections: string[]): string {
+export function collectionsReviewDescription(t: TFunction, sampleSize: number, existingCollections: string[]): string {
   const read = t("ai.suggest.sampleRead", { count: sampleSize });
   if (existingCollections.length === 0) return `${read} ${t("ai.suggest.reviewHintNoExisting")}`;
   return `${read} ${t("ai.suggest.reviewHintExisting", { names: existingCollections.join(", ") })}`;
 }
 
-function noteLabel(t: TFunction, variant: StatusDotVariant): string {
+export function noteLabel(t: TFunction, variant: StatusDotVariant): string {
   if (variant === "error") return t("ai.status.failed");
   if (variant === "warning") return t("ai.status.unavailable");
   if (variant === "success") return t("ai.status.done");

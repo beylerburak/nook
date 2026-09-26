@@ -26,11 +26,12 @@ export const ai = {
 
   organize: {
     title: "Organize your library",
-    step1Label: "Create collections",
-    step1Description: "Nook suggests collections and tags from your unfiled bookmarks.",
     step2Label: "File bookmarks automatically",
-    step2Description: "Files bookmarks into the collections and tags above.",
+    step2Description: "Files bookmarks into your collections and tags.",
   },
+
+  openOrganize: "Open Organize",
+  openOrganizeDescription: "Review suggestions, watch progress, and see what got filed — in its own page.",
 
   suggest: {
     button: "Suggest collections",

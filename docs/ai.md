@@ -707,11 +707,22 @@ result.ai = listSource.ai;
 
 Attribution and assignment therefore never disagree.
 
-## Settings surface
+## Settings surface, and the Organize page
 
-Settings → AI requires a signed-in session and nothing else, and it is the
-**same panel on both hosts** — `AiPanel.tsx` no longer branches on `host.kind` to
-decide what is enabled.
+Review and filing used to live in Settings → AI: a Stepper wedged into an
+880px dialog, with the accept button clipped off the right edge and the
+Stepper's own rail as a stray bright bar down the left of the content. That
+was the wrong container for it — suggesting collections and watching Nook file
+them is a primary workflow, done by someone actively organizing their library,
+not a preference set once and forgotten — so it moved to its own page:
+**Organize**, in the dashboard's side nav (a sparkle icon, badged with the
+unfiled count), and reachable from the web app directly at
+`/app/dashboard/organize`. Settings → AI is short now: the two switches, the
+"Search by meaning" info row, Advanced, and a button to Organize.
+
+Both surfaces require a signed-in session and nothing else, and both are the
+**same components on both hosts** — nothing under `settings-dialog/ai/` or
+`dashboard/organize/` branches on `host.kind` to decide what is enabled.
 
 That used to need two paragraphs of explanation, and the reason is worth keeping
 because the fix is not obvious. There was a time when the section was gated on
@@ -746,94 +757,97 @@ pass:
   `pending` is above zero. A toast claiming "18 filed" would be a guess, and
   the copy says so instead of implying it.
 
-### Structure
+### Structure — Settings → AI
 
-The panel used to be a pile of settings with no order to them — "Features",
-"Thresholds", "Summaries", "Status" — and a user with one collection and 1,061
-unfiled bookmarks had no way to tell, from that layout, that classification
-only ever files into a collection that already exists (see "Eligibility"
-above) and so was doing almost nothing for them. The panel is organized around
-that fact now, in `apps/extension/src/app/settings-dialog/AiPanel.tsx` and the
-files beside it under `settings-dialog/ai/`:
+Short, in `apps/extension/src/app/settings-dialog/AiPanel.tsx` and the files
+beside it under `settings-dialog/ai/`:
 
 - An **intro line**, plain about what Nook does with AI and that it runs on
-  the server rather than in this browser. One **banner** under it, only when
-  neither server deployment is configured (`ai/shared.ts`'s `outageKind`),
-  instead of the old panel's habit of repeating "no AI key" on every row that
-  happened to need it.
-- **"Organize your library"** (`ai/OrganizeCard.tsx`), two steps in an Astryx
-  `Stepper`, because that is the order that actually produces something —
-  filing has nothing to file *into* until a collection exists:
-  1. **Create collections** (`ai/SuggestCollections.tsx`) — the **Suggest
-     collections** button and review flow, unchanged in substance from the old
-     **Suggest taxonomy** action. The `autoTaxonomy` toggle is gone: reading
-     the route (`proposeTaxonomyForUser` in `apps/api/src/ai-jobs.ts` and its
-     handler in `server.ts`) shows the server never reads `autoTaxonomy` at
-     all — the propose route is gated only on a session and
-     `aiAvailability().proposeTaxonomy`, the same "is a proposer configured"
-     check `summarizeAvailability().summarize` makes for summarising. The
-     setting was a client-side lock in front of a door the server never
-     checked. It still exists as a stored preference — a first click of
-     **Suggest collections** turns it on — but nothing gates on it being off
-     any more, so there is no reason to make a user flip it before they can
-     press the button that is right there.
-  2. **File bookmarks automatically** (`ai/AutoFileStep.tsx`) — the
-     `autoClassify` switch, plus **Organize unfiled bookmarks now**. The old
-     copy ("File **new** bookmarks into collections") was wrong about what the
-     toggle does: `topUpClassificationQueue` (`apps/api/src/ai-jobs.ts`) has no
-     recency filter — it selects *any* eligible row
-     (`data->'ai' IS NULL AND data->'listId' IS NULL`, not already queued or
-     decided), ordered newest-first, whatever the toggle is on. The per-minute
-     worker tops it up 25 at a time and reconciles 500 at a time every 15
-     minutes (`tickAiWorker`), so turning the switch on works through the
-     *entire* unfiled library over time, saved-today or saved-two-years-ago
-     alike — new saves are simply enqueued sooner, at sync time
-     (`enqueueClassification`). **Organize unfiled bookmarks now** calls the
-     same `POST /api/ai/run` the old **Run now** button did; it does not do
-     anything the toggle would not eventually do on its own, it only skips the
-     wait for the next tick. The button also still queues a summarisation pass
-     if `autoSummarize` is on — the route always has, one enqueue per
-     toggle — so its tooltip and toast name both halves rather than pretending
-     the button is classification-only.
-- **Summaries** (`ai/SummariesCard.tsx`): the same toggle and the same
-  server-counted rows, but the paragraph explaining what leaves the browser is
-  now behind a collapsed `Collapsible` ("What gets sent") instead of sitting in
-  the switch's own description, which had grown long enough to bury the
-  switch's own point.
-- **Search by meaning** (`ai/SearchByMeaningRow.tsx`): one informational row,
-  no toggle. Semantic search embeds a signed-in account's library
-  automatically once the server has an embedding key (`docs/retrieval.md`,
-  "How the index gets built") — there is nothing in Settings that turns it on,
-  so the row says that rather than inventing a switch. `GET /api/ai/status`
-  carries no field for embedding availability (unlike `available` for
-  classification and `summarize.available` for the proposer), so this row
-  states the fact rather than adding a call just to draw a status dot.
-- **Advanced** (`ai/AdvancedSettings.tsx`): the four thresholds — collection
-  confidence, tag confidence, max tags, taxonomy language — behind a
-  `Collapsible`, collapsed by default, with a **Reset to defaults** button.
-  They are no longer conditionally rendered on `autoClassify`/`autoTaxonomy`
-  being on; a user tuning them ahead of turning a feature on is not a state
-  worth hiding a row over.
+  the server rather than in this browser. One **banner** under it
+  (`ai/AiOutageBanner.tsx`), only when neither server deployment is configured
+  (`ai/shared.ts`'s `outageKind`), instead of repeating "no AI key" on every
+  row that happened to need it.
+- **File bookmarks automatically** (`ai/AutoFileSwitch.tsx`) — just the
+  `autoClassify` switch and a short description now. The **Organize unfiled
+  bookmarks now** button, the queue depth and the run history all moved to the
+  Organize page below; this row only decides whether the per-minute worker
+  tops its queue up from the account's eligible bookmarks at all.
+- **Summaries** (`ai/SummariesCard.tsx`, unchanged): the toggle and the
+  server-counted rows, with the paragraph explaining what leaves the browser
+  behind a collapsed `Collapsible` ("What gets sent").
+- **Search by meaning** (`ai/SearchByMeaningRow.tsx`, unchanged): one
+  informational row, no toggle — see the pre-existing explanation below.
+- **Advanced** (`ai/AdvancedSettings.tsx`, unchanged): the four thresholds —
+  collection confidence, tag confidence, max tags, taxonomy language — behind
+  a `Collapsible`, collapsed by default, with a **Reset to defaults** button.
+- **Open Organize**: a primary button at the bottom. Closes the dialog and
+  switches the dashboard to the Organize page (`onOpenOrganize`, threaded from
+  `DashboardApp.tsx` through `SettingsDialog` to `AiPanel`).
 
-The old **Status** card is gone as a standalone wall of rows. Its numbers moved
-to where they are relevant: the queue depth and the last pass's plain-language
-result ("Filed 312, left 40 alone because Nook wasn't sure") sit under **File
-bookmarks automatically**; the summarise counts sit in the Summaries card; a
-missing deployment is either the one top banner (both down) or a short local
-note on the one step it affects (`outageKind`'s `"classify"`/`"summarize"`
-cases) — never both, and never repeated per row the way four "Unavailable"
-labels used to be.
+### Structure — the Organize page
 
-The Summaries card is still the part of the panel this document used to have
-to apologise for, and it still does not need to. Its toggle was once a real
-field that nothing acted on, and its two rows counted a local library nothing
-summarised and dated a last pass nothing wrote; both rows are server counts —
-`summarised` and `pending` are SQL counts over the account's records with the
-same 400-character gate the pass applies. The toggle's own description still
-carries the one thing nothing else in Settings does: this is the first feature
-that sends page text to a third party, now folded into the disclosure above
-rather than the switch's own paragraph. See [retrieval.md](./retrieval.md)'s
-"Summaries" for the pass behind those numbers.
+`apps/extension/src/app/dashboard/organize/`:
+
+- **`OrganizePage.tsx`** — the page itself. Reached from the side nav's
+  "Organize" item (`LibrarySideNav.tsx`, badged with the unfiled count —
+  `dashboard/bookmark-utils.ts`'s `LibraryView` grew an `{ kind: "organize" }`
+  case that `DashboardApp.tsx` renders in place of the bookmark grid/table,
+  rather than filtering it) or from Settings' **Open Organize** button.
+  Renders, top to bottom: a header (title, one-sentence description, and a
+  progress bar + "N bookmarks filed · M left to organize" line, computed
+  straight from the local library's own `listId` — `organize-utils.ts`'s
+  `libraryProgress`); the one active thing to do — a review in progress, a
+  filing pass draining, or the next "suggest collections" prompt — chosen in
+  that priority order; then **Recently filed**; then a link back to AI
+  settings.
+- **`useSuggestCollections.ts`** — the suggest/review/accept state machine,
+  moved here from the deleted `settings-dialog/ai/SuggestCollections.tsx`
+  rather than duplicated (same routes, same phases: `idle` → `reading` →
+  `review` → `accepting` → `done`). One behavioural addition: `accept()` now
+  also makes sure `autoClassify` is on and immediately calls `POST /api/ai/run`
+  — the whole point of accepting is getting bookmarks filed, so the page does
+  not make the user find a second button for it the way Settings used to.
+- **`SuggestionReview.tsx`** — the review step's UI, full width instead of
+  squeezed into the settings dialog's column, with a sticky accept/cancel bar
+  (`position: sticky`, no ancestor-height plumbing needed since it sits inside
+  the dashboard's own scrolling content pane) that stays reachable at any
+  width — the old panel's "Accept 8 collections and 7 tags" button clipping
+  off the right edge at 880px was exactly this problem.
+- **`RecentlyFiled.tsx`** + **`organize-utils.ts`** — "Recently filed" reads
+  `status.run.log` (last 200 decisions, `{ id, confidence, assigned, at }` —
+  see "The job queue" above) and maps `assigned: true` entries onto the local
+  library by id, showing title + collection name as dense rows (`Item`, not
+  cards). The remaining entries become the plain-language explanation line
+  ("25 bookmarks didn't fit any collection. 33 came close, but below your
+  confidence setting."). The log carries no collection id and no reason, only
+  a confidence — so `remainderCounts` buckets purely on
+  `confidence >= settings.collectionMinConfidence`. That happens to be exact,
+  not a guess: reading `decideClassification` in `apps/api/src/ai.ts`, the
+  `skipped: "low-confidence"` outcome is only ever returned when confidence is
+  *below* the threshold, so any unassigned entry at or above it can only be
+  `"none-fit"` (the model chose `__none__`, confidently). Below the threshold
+  the two outcomes are genuinely indistinguishable from the log alone, but
+  both mean the same true thing to the user — "Nook wasn't confident enough" —
+  so they're one bucket rather than a guess dressed as two.
+
+The old **Status** card is gone as a standalone wall of rows on either surface.
+Its numbers live where they're relevant: the queue depth and progress estimate
+are the Organize page's own "working" state; the summarise counts stay in the
+Summaries card; a missing deployment is either the one top banner (both down)
+or a short local note on the one row/step it affects (`outageKind`'s
+`"classify"`/`"summarize"` cases) — never both, never repeated per row.
+
+The Summaries card is still the part of this surface this document used to
+have to apologise for, and it still does not need to. Its toggle was once a
+real field that nothing acted on, and its two rows counted a local library
+nothing summarised and dated a last pass nothing wrote; both rows are server
+counts — `summarised` and `pending` are SQL counts over the account's records
+with the same 400-character gate the pass applies. The toggle's own
+description still carries the one thing nothing else on this surface does:
+this is the first feature that sends page text to a third party, now folded
+into the disclosure above rather than the switch's own paragraph. See
+[retrieval.md](./retrieval.md)'s "Summaries" for the pass behind those
+numbers.
 
 ## Configuration
 

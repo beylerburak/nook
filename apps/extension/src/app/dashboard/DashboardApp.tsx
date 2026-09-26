@@ -31,10 +31,12 @@ import { DataTableViewOptions } from "../data-table/view-options";
 import { DataTableViewProvider } from "../data-table/view-state";
 import { SettingsDialog, type SettingsSection } from "../settings-dialog/SettingsDialog";
 import { useCloudStatus } from "../host/useCloudStatus";
+import { useNookHost } from "../host/NookHost";
 import { BookmarkDetailPanel } from "./BookmarkDetailPanel";
 import { CreateListDialog, DeleteListDialog } from "./dialogs";
 import { BookmarkGlyph } from "./glyphs";
 import { LibrarySideNav } from "./LibrarySideNav";
+import { OrganizePage } from "./organize/OrganizePage";
 import { useBookmarkLibrary } from "./useBookmarkLibrary";
 import {
   DEFAULT_CARD_PAGE_SIZE,
@@ -70,6 +72,7 @@ function DashboardScreen({
 }) {
   const toast = useToast();
   const { t } = useI18n();
+  const host = useNookHost();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const {
     items,
@@ -85,7 +88,15 @@ function DashboardScreen({
   } = useBookmarkLibrary(toast);
 
   const [search, setSearch] = useState("");
-  const [view, setView] = useState<LibraryView>(DEFAULT_VIEW);
+  // The web host's `navigation.isOrganizeOpen` mirrors the URL
+  // (/app/dashboard/organize vs /app/dashboard) — start there directly so a
+  // direct link or a page refresh lands on Organize without a flash of the
+  // bookmark grid first. The extension has no `navigation` capability (see
+  // NookHost.tsx), so it always starts at the default view, exactly as
+  // before.
+  const [view, setView] = useState<LibraryView>(() =>
+    host.navigation?.isOrganizeOpen ? { kind: "organize" } : DEFAULT_VIEW,
+  );
   const [mediaFilter, setMediaFilter] = useState<MediaFilter>("all");
   const [notesOnly, setNotesOnly] = useState(false);
   const [viewMode, setViewMode] = useState<BookmarkViewMode>("cards");
@@ -118,7 +129,30 @@ function DashboardScreen({
   const selectLibraryView = useCallback((nextView: LibraryView) => {
     setView(nextView);
     resetPagination();
-  }, [resetPagination]);
+    // Web only (see NookHost.tsx) — keeps the URL in step with whatever view
+    // was just picked, so Organize gets a real, linkable, back/forward-able
+    // URL without any other view needing one (host.navigation is undefined
+    // for the extension, so this is a no-op there).
+    host.navigation?.onOrganizeOpenChange(nextView.kind === "organize");
+  }, [resetPagination, host]);
+
+  // The other direction: a browser back/forward, or a direct link to
+  // /app/dashboard/organize, changes `host.navigation.isOrganizeOpen` out
+  // from under this component (App.tsx's route state re-renders SignedInApp,
+  // which recomputes the web host) — reconcile the local view to match
+  // rather than leaving the URL and the rendered page disagreeing. Compares
+  // only the organize/non-organize distinction, the one thing the URL knows
+  // about, so it never clobbers the user's own click into a collection or tag.
+  useEffect(() => {
+    const isOrganizeOpen = host.navigation?.isOrganizeOpen;
+    if (isOrganizeOpen === undefined) return;
+    setView((current) => {
+      if (isOrganizeOpen && current.kind !== "organize") return { kind: "organize" };
+      if (!isOrganizeOpen && current.kind === "organize") return DEFAULT_VIEW;
+      return current;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [host.navigation?.isOrganizeOpen]);
 
   // Search-focus / Settings shortcuts and whole-page JSON drag & drop.
   // Purely UI wiring — the bookmark data effects (initial load, cross-tab
@@ -463,6 +497,10 @@ function DashboardScreen({
         inspectorLabel={activeItem ? t("dashboard.detail.panelLabel", { title: itemTitle(activeItem, t) }) : undefined}
       >
         <VStack className="nook-main-content" gap={5} padding={6}>
+          {view.kind === "organize" ? (
+            <OrganizePage items={items} lists={lists} onOpenAiSettings={() => openSettings("ai")} />
+          ) : (
+          <>
           <HStack justify="between" align="center" wrap="wrap" gap={3}>
             <VStack gap={1}>
               <Heading level={1}>{viewTitle}</Heading>
@@ -681,6 +719,8 @@ function DashboardScreen({
               </HStack>
             ) : null}
           </DataTableViewProvider>
+          </>
+          )}
         </VStack>
       </CanvasEditorShell>
 
@@ -701,6 +741,10 @@ function DashboardScreen({
         initialSection={settingsSection}
         appearance={appearance}
         onAppearanceChange={onAppearanceChange}
+        onOpenOrganize={() => {
+          setIsSettingsOpen(false);
+          selectLibraryView({ kind: "organize" });
+        }}
         library={{
           bookmarkCount: items.length,
           collectionCount: lists.length,
