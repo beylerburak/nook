@@ -1607,6 +1607,16 @@ export async function acceptTaxonomyForUser(
       previous.tags,
     );
     const saved = await saveAcceptedTaxonomy(client, userId, taxonomy);
+
+    // A decision to file nothing was a decision against the options that existed
+    // then. New collections or tags change the question, so every "nothing fit"
+    // in `nook_ai_decided` is stale the moment they land — without this, a library
+    // classified before it had any collections would never be filed into them.
+    // Only the memory goes: a bookmark that was filed carries `ai`/`listId` and is
+    // excluded by the eligibility rule itself, so this re-bills nothing already done.
+    if (planned.length > 0 || plannedTags.length > 0) {
+      await client.query("DELETE FROM nook_ai_decided WHERE user_id = $1", [userId]);
+    }
     await client.query("COMMIT");
 
     return {
