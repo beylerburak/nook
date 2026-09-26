@@ -147,8 +147,15 @@ export const DEFAULT_MAX_TAGS = 3;
  *  Not a language guard and not a quality heuristic: media-only bookmarks reduce
  *  to a bare title, an emoji, or just the author's handle once the state filter
  *  runs, and 39 of a real 1,061-bookmark library fall under 40 characters (15
- *  under 20). Spending a request on those returns a coin flip at full price. */
-const MIN_CLASSIFIABLE_CHARS = 40;
+ *  under 20). Spending a request on those returns a coin flip at full price.
+ *
+ *  Exported so the worker can apply the same floor *before* it builds a request,
+ *  rather than reading the floor back out of the neutral placeholder this function
+ *  returns for a bookmark under it. The deleted runner could not make that
+ *  distinction — it saw `model: "unavailable"` and treated it as a terminal
+ *  failure, so one 39-character bookmark ended the whole pass. See
+ *  `classifyOne` in ai-jobs.ts. */
+export const MIN_CLASSIFIABLE_CHARS = 40;
 
 /** The doc's "top 20 by frequency" cap on tag questions: past this the Nouls cost
  *  context and dilute each other without changing the top of the ranking. */

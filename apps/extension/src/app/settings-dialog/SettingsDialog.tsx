@@ -43,14 +43,13 @@ export interface SettingsDialogProps {
  * `host.account` (web only — a signed-in extension manages its account on
  * the web instead, see `ProfilePanel`), and AI needs a session on either host.
  *
- * AI settings are an account preference (`GET`/`PUT /api/ai/settings`,
- * apps/api/src/ai-settings.ts) rather than a per-browser one, so the toggle a
- * signed-in web user sees is the exact same one the extension's runner reads
- * before every pass — there is no host-specific reason to hide it. What is
- * still extension-only is *running* a pass: the classification queue is
- * lib/ai-runner.ts, called only from the extension's service worker
- * (entrypoints/background/index.ts), so AiPanel itself disables "Classify
- * now" and "Suggest taxonomy" on the web host and explains why. See docs/ai.md.
+ * AI needs `host.user` for one reason: every AI route is session-guarded, so
+ * nothing this section can do — flip a toggle, queue a pass, accept a proposed
+ * taxonomy — is possible without an account. The features themselves
+ * (classification and the accepted taxonomy) run on Nook's server now, and the
+ * settings are the account's own row, so there is no host-specific reason to
+ * hide the section: AiPanel is the same panel on both hosts, and the numbers it
+ * shows are the account's. See docs/ai.md, "Settings surface".
  *
  * A connected extension has a `user` and no `account`, so gating on
  * `host.user` rather than `host.account` is what keeps this visible where it

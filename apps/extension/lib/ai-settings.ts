@@ -4,11 +4,10 @@
  * These are account preferences, stored server-side (`GET`/`PUT /api/ai/settings`,
  * apps/api/src/ai-settings.ts) rather than in this browser's own storage. That
  * used to be backwards: `ai.settings` lived in per-origin IndexedDB `meta`, so
- * a toggle flipped in the web app wrote a value the extension's service worker
- * — the only place a pass actually runs — never read, and vice versa. A
- * classification is an authenticated server call regardless of which host
- * asked for it, so the setting that gates it belongs to the account, the same
- * as the bookmarks and collections it acts on.
+ * a toggle flipped in the web app wrote a value nothing read on the extension's
+ * side, and vice versa. A classification is an authenticated server call
+ * regardless of which host asked for it, so the setting that gates it belongs
+ * to the account, the same as the bookmarks and collections it acts on.
  *
  * `AI_SETTINGS_META_KEY` still names an IndexedDB `meta` key, but it is now a
  * read-through CACHE of the last value this browser fetched, not the source
@@ -48,6 +47,12 @@ export interface AiSettings {
    * this one puts text in the user's own voice next to what they saved, and a
    * summary is only worth having where `shortDescription`'s 180-character
    * truncation is actually hiding something.
+   *
+   * The pass that acts on it runs on Nook's server, like the other two
+   * (apps/api/src/summarize.ts), so the toggle is the account's for the same
+   * reason theirs are. It is also the one that sends page text to a third-party
+   * model, which `SummaryCard` in AiPanel.tsx spells out on the switch itself
+   * rather than in a doc.
    */
   autoSummarize: boolean;
   collectionMinConfidence: number; // default 0.75
@@ -123,7 +128,7 @@ function clampTagCount(value: unknown, fallback: number): number {
  * complete, in-range AiSettings. Total by construction: every field has a
  * defined output for every input, so no caller ever has to check.
  */
-function normalizeAiSettings(value: unknown): AiSettings {
+export function normalizeAiSettings(value: unknown): AiSettings {
   const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   return {
     autoClassify: typeof raw.autoClassify === "boolean" ? raw.autoClassify : DEFAULT_AI_SETTINGS.autoClassify,
@@ -143,8 +148,8 @@ function normalizeAiSettings(value: unknown): AiSettings {
 
 // -- server I/O -----------------------------------------------------------
 
-/** Minimal structural fetch, so a test can hand in a plain stub. Mirrors AiFetch
- *  in lib/ai-runner.ts and SearchFetch in lib/retrieval.ts. */
+/** Minimal structural fetch, so a test can hand in a plain stub. Mirrors
+ *  `AiFetch` in lib/ai-client.ts and SearchFetch in lib/retrieval.ts. */
 export type AiSettingsFetch = (input: string, init: RequestInit) => Promise<Response>;
 
 export interface AiSettingsDeps {
@@ -202,22 +207,21 @@ async function requestServerSettings(deps: AiSettingsDeps, init: RequestInit): P
  * How long a fetched value is trusted before the next `loadAiSettings()`
  * asks the server again.
  *
- * A GET is cheap on its own, but `aiIsArmable()` (entrypoints/background/
- * index.ts) calls `loadAiSettings()` once per saved bookmark, and importing a
- * library one item at a time must not turn into one request per item. Long
- * enough to absorb a burst of saves; short enough that a toggle flipped in
- * another tab takes effect within the same browsing session. `saveAiSettings`
- * and a cross-context change (the BroadcastChannel handler below) both clear
- * it immediately, so neither has to wait out the window.
+ * A GET is cheap on its own, but the settings dialog re-reads on every mount
+ * and every cross-context notification, and importing a library one item at a
+ * time must not turn into a request per item. Long enough to absorb a burst of
+ * those; short enough that a toggle flipped in another tab takes effect within
+ * the same browsing session. `saveAiSettings` and a cross-context change (the
+ * BroadcastChannel handler below) both clear it immediately, so neither has to
+ * wait out the window.
  */
 const CACHE_TTL_MS = 60_000;
 
 let cache: { value: AiSettings; expiresAt: number } | null = null;
 
-/** Any dep override means a test (or a caller with its own transport, like
- *  lib/ai-runner.ts reusing the runner's own fetch/session) is driving this
- *  call directly, so the shared cache is bypassed rather than silently mixing
- *  a real fetch's result with a stubbed one across calls. */
+/** Any dep override means a test — or a caller with its own transport — is
+ *  driving this call directly, so the shared cache is bypassed rather than
+ *  silently mixing a real fetch's result with a stubbed one across calls. */
 function bypassesCache(deps: AiSettingsDeps): boolean {
   return deps.fetch !== undefined || deps.requestAuth !== undefined || deps.apiUrl !== undefined;
 }

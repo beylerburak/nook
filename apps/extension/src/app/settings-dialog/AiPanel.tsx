@@ -12,7 +12,19 @@ import { Switch } from "@astryxdesign/core/Switch";
 import { Text } from "@astryxdesign/core/Text";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { useToast } from "@astryxdesign/core/Toast";
-import { AI_BATCH_SIZE, AI_CURSOR_META_KEY, type AiCursor, type AiRunResult } from "../../../lib/ai-runner";
+import {
+  acceptTaxonomy,
+  announceAiStatusChange,
+  loadAiStatus,
+  requestClassificationRun,
+  requestTaxonomyProposals,
+  subscribeToAiStatus,
+  type AiStatus,
+  type ProposeOutcome,
+  type SummarizeStatus,
+  type TagProposal,
+  type TaxonomyProposal,
+} from "../../../lib/ai-client";
 import {
   TAXONOMY_LANGUAGES,
   loadAiSettings,
@@ -20,39 +32,28 @@ import {
   subscribeToAiSettings,
   type AiSettings,
 } from "../../../lib/ai-settings";
-import {
-  TAXONOMY_SAMPLE_SIZE,
-  acceptProposals,
-  isTagCoveredByCollection,
-  requestProposals,
-  type ProposalOutcome,
-  type TagProposal,
-  type TaxonomyProposal,
-} from "../../../lib/ai-taxonomy";
-import * as NookDB from "../../../lib/db";
-import type { Bookmark, PopupToBackgroundMessage } from "../../../lib/types";
 import { useNookHost, type NookHost } from "../host/NookHost";
 import { SettingsCard, SettingsRow } from "./settings-shared";
 
 /**
- * Settings → AI. Two independent features (see `docs/ai.md`): filing new
- * bookmarks into the collections and tags you already have, and proposing new
- * ones. Both are off by default.
+ * Settings → AI. Three independent features (see `docs/ai.md`): filing new
+ * bookmarks into the collections and tags you already have, proposing new ones,
+ * and summarising the pages long enough to need it. All are off by default.
  *
- * The settings this panel edits are an account preference (`GET`/`PUT
- * /api/ai/settings`), not a per-browser one, so the panel itself is the same
- * on both hosts. `SettingsDialog.visibleSections` only offers this section
- * when `host.user` is set — a classification is always an authenticated
- * server call, so there is nothing to configure while signed out — and the
- * guard below is a defensive fallback for the one render that can land after
- * a sign-out clears `host.user` but before the dialog switches away from this
- * section. What *does* still depend on the host is where a pass actually
- * runs: see `RUNS_IN_EXTENSION` and `StatusCard`.
+ * This panel is host-agnostic, and it now means it. A pass runs on Nook's
+ * server, so `host.kind` is not consulted anywhere below: the status rows, the
+ * **Run now** button and the whole taxonomy review flow work identically
+ * in the extension and in the web app, which is the one thing this panel could
+ * not do before. `SettingsDialog.visibleSections` still offers the section only
+ * when `host.user` is set — a pass is an authenticated server call, so there is
+ * nothing to configure while signed out — and the guard below is a
+ * defensive fallback for the one render that can land after a sign-out clears
+ * `host.user` but before the dialog switches away from this section.
  */
 export function AiPanel() {
   const host = useNookHost();
   const { settings, commit } = useAiSettings();
-  const { run, reload } = useAiRunSummary(settings);
+  const { status, isLoading, refresh } = useAiStatus(settings);
 
   if (!host.user) return <SignInRequired host={host} />;
 
@@ -96,35 +97,16 @@ export function AiPanel() {
 
       {settings.autoClassify ? <ThresholdCard settings={settings} commit={commit} /> : null}
 
-      <SummaryCard settings={settings} commit={commit} />
+      <SummaryCard settings={settings} status={status} commit={commit} />
 
-      <StatusCard settings={settings} run={run} onRun={reload} />
+      <StatusCard host={host} settings={settings} status={status} isLoading={isLoading} onRefresh={refresh} />
     </VStack>
   );
 }
 
 /**
- * Actually running a pass is still extension-only, even though the settings
- * that gate it now apply everywhere — the panel says so rather than offering a
- * control that quietly does nothing.
- *
- * The reasons are not stylistic. A pass is the service worker's 5-minute alarm
- * and the single-flight-guarded `runClassification()` behind it, and there is no
- * service worker on the web origin. `ai.taxonomy` (the accepted taxonomy's
- * sample titles, read only by that runner) and the run counters `StatusCard`
- * shows are still per-origin IndexedDB `meta` for the same reason — nothing
- * about them is a user-facing *setting*, so moving them server-side would add a
- * sync path for state that only one host ever reads. A taxonomy accepted from
- * the web would therefore never reach the classifier that reads it — while the
- * collections it creates *would* sync, and would arrive everywhere with no
- * evidence of what belongs in them, which is the part of the digest the
- * measurements in docs/ai-calibration.md say is worth 8.7 points of top-1.
- */
-const RUNS_IN_EXTENSION = "Runs in the Nook browser extension, where classification runs.";
-
-/**
- * Async panel work outlives the dialog: a proposal or a classification pass can
- * land after the user has closed Settings, and a state update then is a wasted
+ * Async panel work outlives the dialog: a status read or a proposal can land
+ * after the user has closed Settings, and a state update then is a wasted
  * render at best.
  */
 function useIsMounted(): () => boolean {
@@ -181,6 +163,86 @@ function useAiSettings(): { settings: AiSettings | null; commit(patch: Partial<A
   );
 
   return { settings, commit };
+}
+
+/** How often the status is re-read while a queue is draining. Fast enough that
+ *  the depth visibly falls, slow enough that watching it is not a request every
+ *  second for a batch that takes tens of seconds anyway. */
+const STATUS_POLL_MS = 4000;
+
+/**
+ * The panel's live view of `GET /api/ai/status`.
+ *
+ * Refreshed on mount, whenever the settings change (which includes a toggle
+ * flipped in this panel — `settings` is a fresh object on every load and every
+ * save), on the settings/status subscription, and on demand from the
+ * **Run now** button.
+ *
+ * -- why it polls --
+ *
+ * A pass is not a request this browser can hold open. `POST /api/ai/run`
+ * enqueues the account's eligible work and returns how much it queued; the work
+ * happens in a worker on the server, tens of seconds per batch. The panel's
+ * only way to show a queue draining is to re-read the depths and the run
+ * counters every few seconds, and to stop the moment both are empty — a panel
+ * that kept polling an idle account forever would be a background request per
+ * panel per interval, for no user benefit. The interval is keyed on the depth
+ * rather than being a permanent timer, which is what makes it stop.
+ *
+ * The timer is a `setInterval` in an effect whose dependency is the depth, so
+ * React tears it down on unmount and on every change of depth; and every read
+ * checks `useIsMounted` before setting state, so a read already in flight when
+ * the dialog closes cannot land on an unmounted component.
+ */
+function useAiStatus(settings: AiSettings | null): { status: AiStatus | null; isLoading: boolean; refresh(): void } {
+  const [status, setStatus] = useState<AiStatus | null>(null);
+  // True until the first read answers, so the card can say it is checking
+  // rather than claiming a state it has not read yet.
+  const [isLoading, setIsLoading] = useState(true);
+  const isMounted = useIsMounted();
+
+  const refresh = useCallback(() => {
+    void loadAiStatus().then((next) => {
+      if (!isMounted()) return;
+      setStatus(next);
+      setIsLoading(false);
+    });
+  }, [isMounted]);
+
+  useEffect(() => {
+    // The same "nook-db" channel a settings save announces on, so a toggle
+    // flipped in another tab — or a run requested there — refreshes the status
+    // here without this panel having to poll for it. Its own initial call is
+    // this panel's first read, which is why the effect below waits for the
+    // settings row rather than issuing a second one on mount.
+    return subscribeToAiStatus((next) => {
+      if (!isMounted()) return;
+      setStatus(next);
+      setIsLoading(false);
+    });
+  }, [isMounted]);
+
+  // Re-read when the account's settings change: turning a feature on is the
+  // moment a run is most likely to start, and the dots below are derived from
+  // the toggles as well as the server's own state. `settings` is a fresh object
+  // on every load and every save and stable in between, so this fires per change
+  // rather than per render.
+  useEffect(() => {
+    if (settings) refresh();
+  }, [refresh, settings]);
+
+  // Both queues, because both drain in the same worker: a pass that was
+  // summarising while nothing was left to classify still empties rows the panel
+  // is showing, and a timer keyed on the classification depth alone would stop
+  // re-reading in the middle of it.
+  const pending = (status?.pending ?? 0) + (status?.summarize.pending ?? 0);
+  useEffect(() => {
+    if (pending <= 0) return;
+    const timer = setInterval(refresh, STATUS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [pending, refresh]);
+
+  return { status, isLoading, refresh };
 }
 
 type ThresholdPatch = Partial<Pick<AiSettings, "collectionMinConfidence" | "tagMinNoul" | "maxTags" | "taxonomyLanguage">>;
@@ -312,28 +374,43 @@ function formatConfidence(value: number): string {
 }
 
 /**
- * Summaries: one toggle and what the library currently holds, per
- * docs/retrieval.md, "Summaries".
+ * Summaries, from the server's own count of what it has done.
  *
- * Read-only status on purpose, and the copy says so. A summary is prose the
- * model wrote and stored on the bookmark, so the number worth showing a user is
- * how many of their bookmarks have one — not how many requests were made.
+ * This card used to count the library here and read a last-pass date off the
+ * `ai.summary-run` meta key — a documented seam nothing has ever written
+ * (docs/retrieval.md, "Summaries"), so the counting could only produce an
+ * upper bound and the date read "Never" forever. The pass that fills summaries
+ * in runs on Nook's server now (docs/ai-summarize-contract.md), which is what
+ * makes both of these real numbers: `summarised` and `pending` are SQL counts
+ * over the account's records with the same length gate the pass applies, so the
+ * bound is gone and so is the hedge that used to have to explain it.
  *
- * "Outstanding" is an upper bound rather than a to-do count, and the row says
- * that: the length gate that decides what is worth summarising lives in
- * apps/api/src/summarize.ts, so the panel can only count what has none. On a
- * library that is mostly X posts that number is nearly the whole library, and
- * calling it a queue would be a promise Nook has no way to keep.
+ * The toggle's description carries the one thing nothing else in Settings does
+ * not: this is the first feature that sends page text to somebody else's model.
+ * Filing and taxonomy send titles, hostnames, a short preview and your notes;
+ * a summary sends the page. A user flipping this switch is handing their
+ * reading history to a third party and has to be able to read that on the
+ * switch, not in a doc.
  */
-function SummaryCard({ settings, commit }: { settings: AiSettings; commit(patch: Partial<AiSettings>): void }) {
-  const host = useNookHost();
-  const { counts, run } = useSummaryState();
+function SummaryCard({
+  settings,
+  status,
+  commit,
+}: {
+  settings: AiSettings;
+  status: AiStatus | null;
+  commit(patch: Partial<AiSettings>): void;
+}) {
+  // Filled by `readSummarizeStatus`, so this is `undefined` only when the read
+  // itself never landed — which is a different claim from a status that landed
+  // and found no summariser, and the rows below keep the two apart.
+  const summarise = status?.summarize;
 
   return (
     <SettingsCard title="Summaries">
       <SettingsRow
         title="Summarise long pages"
-        description="Writes a short summary on bookmarks whose page is longer than the preview in your library. Short posts and X threads are left alone — there is nothing to add to what you can already read. The summary is the model's words, not yours, and you can delete it like any other note."
+        description="Writes a one- or two-sentence summary, in the page's own language, on bookmarks long enough to need one — and Nook's server works through your library on its own, with the browser closed. This is the one feature that sends page text to a third party: up to 4,000 characters of the page, its title and your note, to whichever AI provider Nook's server is configured with (OpenAI or Google). Filing and taxonomy send only titles, hostnames and a short preview, and you can delete any summary afterwards."
         control={
           <Switch
             label="Summarise long pages"
@@ -345,39 +422,40 @@ function SummaryCard({ settings, commit }: { settings: AiSettings; commit(patch:
       />
       <SettingsRow
         title="In your library"
-        description={summaryStatusDescription(counts, Boolean(host.user), run.lastRunAt)}
+        description={summaryCountsDescription(settings.autoSummarize, summarise !== undefined)}
         control={
-          counts ? (
+          summarise ? (
             <HStack gap={2} align="center">
-              <Badge label={counts.summarised} />
+              <Badge label={summarise.summarised} />
               <Text type="supporting" color="secondary">
-                summarised
+                with a summary
               </Text>
               <Text type="supporting" color="secondary">
                 ·
               </Text>
-              <Badge label={counts.outstanding} />
+              <Badge label={summarise.pending} />
               <Text type="supporting" color="secondary">
-                none yet
+                waiting
               </Text>
             </HStack>
           ) : (
-            <Text type="supporting" color="secondary">
-              Counting…
-            </Text>
+            <Text color="secondary">—</Text>
           )
         }
       />
       <SettingsRow
         title="Last summary pass"
-        description={run.lastError ?? undefined}
+        description={summariseStateNote(summarise)}
         control={
-          run.lastRunAt ? (
+          summarise?.lastRunAt ? (
             <Text color="secondary">
-              <Timestamp value={run.lastRunAt} format="relative" isLive />
+              <Timestamp value={summarise.lastRunAt} format="relative" isLive />
             </Text>
           ) : (
-            <Text color="secondary">{counts ? "Never" : "Checking…"}</Text>
+            // "Never" is a claim about the account's history, so it is only
+            // printed when there was a status to say it from — the same rule the
+            // classification row in the status card follows.
+            <Text color="secondary">{summarise ? "Never" : "—"}</Text>
           )
         }
       />
@@ -386,196 +464,237 @@ function SummaryCard({ settings, commit }: { settings: AiSettings; commit(patch:
 }
 
 /**
- * SEAM — the pass that fills summaries in is not written yet.
+ * What the two counts mean, which depends on the toggle.
  *
- * The server half is (apps/api/src/summarize.ts, which reads `nook_records` and
- * returns summaries without writing them), and this card is the half that reads
- * them back. What is missing is the middle: the service-worker alarm, the batch
- * loop, and the client-side write of each returned summary onto its bookmark
- * through NookDB.updateBookmark — which is the write that has to happen here
- * rather than on the server, so that the summary goes out through the normal
- * sync path and lands on every device.
- *
- * `ai.summary-run` is where that pass's cursor goes. It is named after
- * AI_CURSOR_META_KEY so both features' run records sit together in `meta` and
- * are read the same way, and it is read here now — before anything writes it —
- * so the shape of the record is settled while the panel that has to render it
- * is in front of us. Until then "Last summary pass" reads Never, which is the
- * truth, and the status row above says a pass has not run rather than letting a
- * freshly-flipped toggle look like it did something.
+ * `pending` is the server's own candidate count, and the top-up that fills it is
+ * gated on `autoSummarize` so a queue can never report work that cannot drain —
+ * so while the feature is off it is zero however many pages are eligible, and
+ * "nothing left to do" would be a claim about a queue nobody filled. With it on,
+ * both numbers are the account's: the local count this replaced could only ever
+ * produce an upper bound, because it counted every record with no summary
+ * including the ones the 400-character gate would never accept, which is what
+ * this sentence used to have to admit.
  */
-const SUMMARY_RUN_META_KEY = "ai.summary-run";
-
-interface SummaryRun {
-  /** ISO of the last run that got past its cool-downs, as in `ai.cursor`. */
-  lastRunAt?: string;
-  /**
-   * Set when a pass stopped early or a request failed, as in `ai.cursor`.
-   *
-   * Deliberately no counters: how many bookmarks carry a summary is answered
-   * better by counting the library, which cannot drift from what the user
-   * actually has. This record only has to answer "did a pass run, and did it
-   * fail".
-   */
-  lastError?: string;
+function summaryCountsDescription(isOn: boolean, hasStatus: boolean): string | undefined {
+  if (!hasStatus) return undefined;
+  return isOn
+    ? "Nook's server counts these, so they are the account's real numbers rather than a guess. Bookmarks no longer than the preview in your library are left alone — there is nothing to add to what the row already shows."
+    : "Nothing is being summarised while this is off, so the waiting count is zero however many of your pages would qualify. Turn it on and Nook's server starts a pass on its own.";
 }
-
-/** What the panel reads back, with every field filled in — the same discipline
- *  as `readRunSummary` and `AiRunSummary` below, and the reason nothing here
- *  has to null-check a stored value. */
-interface SummaryRunSummary {
-  lastRunAt: string | null;
-  lastError: string | null;
-}
-
-/** A record from a future or hand-edited build may be missing anything at all,
- *  so nothing here is trusted. Mirrors `readRunSummary` below. */
-function readSummaryRun(stored: unknown): SummaryRunSummary {
-  const record = (stored && typeof stored === "object" ? stored : {}) as Record<string, unknown>;
-  return {
-    lastRunAt: typeof record.lastRunAt === "string" ? record.lastRunAt : null,
-    lastError: typeof record.lastError === "string" ? record.lastError : null,
-  };
-}
-
-/** The only two numbers the panel can honestly produce, both from the local
- *  library. `null` means the read has not answered, which is why every surface
- *  below has a "not yet" state rather than a zero it would be inventing. */
-interface SummaryCounts {
-  /** Live bookmarks carrying a non-empty `summary`. */
-  summarised: number;
-  /** Live bookmarks without one. An upper bound, not a queue — see SummaryCard. */
-  outstanding: number;
-}
-
-interface SummaryState {
-  counts: SummaryCounts | null;
-  run: SummaryRunSummary;
-}
-
-const NO_SUMMARY_RUN: SummaryRunSummary = {
-  lastRunAt: null,
-  lastError: null,
-};
 
 /**
- * Reads the library and the run record once, when the panel mounts.
+ * Why the last pass is not producing summaries, on the row a user reads to find
+ * out when one last ran.
  *
- * Mount is the granularity here rather than a shortcut: the settings dialog
- * mounts this panel fresh every time it is opened, so the counts are never
- * older than the dialog the user is looking at. What it does not cover is a pass
- * landing while the dialog stays open — the row would keep reporting the counts
- * it read. The fix is to join the "nook-db" channel, which is the same
- * subscription `subscribeToAiSettings` already opens; it is not worth adding
- * before the pass exists, since nothing writes the run record to notice.
- *
- * `getAllBookmarks` excludes soft-deleted rows already, which is the population
- * that matters — a tombstone's summary is not something a user is missing.
+ * The server's own error wins, because it is the specific thing that happened.
+ * Failing that, the missing-deploy sentence — the same words the status card's
+ * summarisation dot is drawing underneath, because two rows disagreeing about
+ * why a pass is not running would be this panel contradicting itself.
  */
-function useSummaryState(): SummaryState {
-  const [state, setState] = useState<SummaryState>({ counts: null, run: NO_SUMMARY_RUN });
-  useEffect(() => {
-    let active = true;
-    void Promise.all([NookDB.getAllBookmarks(), NookDB.getMeta<SummaryRun>(SUMMARY_RUN_META_KEY)]).then(
-      ([bookmarks, stored]) => {
-        if (!active) return;
-        const summarised = bookmarks.filter((bookmark) => typeof bookmark.summary === "string" && bookmark.summary !== "").length;
-        setState({ counts: { summarised, outstanding: bookmarks.length - summarised }, run: readSummaryRun(stored) });
-      },
-    );
-    return () => {
-      active = false;
-    };
-  }, []);
-  return state;
-}
-
-/** One sentence per state, and each is a different fact rather than a shorter
- *  version of the same one. */
-function summaryStatusDescription(
-  counts: SummaryCounts | null,
-  isSignedIn: boolean,
-  lastRunAt: string | null,
-): string {
-  if (!isSignedIn) {
-    return "Summaries are written by Nook's server, so a pass needs a signed-in account. Until you sign in, nothing is summarised.";
-  }
-  if (!counts) return "Counting the bookmarks that already have a summary.";
-  if (lastRunAt === null) {
-    return "No summary pass has run yet, so the toggle changes nothing on its own. Nook summarises a page only where it is longer than the preview, so many of the rest never need one.";
-  }
-  return `${counts.outstanding} bookmarks have no summary. Nook only summarises a page that is longer than the preview, so some of them never will.`;
+function summariseStateNote(summarise: SummarizeStatus | undefined): string | undefined {
+  if (!summarise) return undefined;
+  if (summarise.lastError) return summarise.lastError;
+  if (!canSummarise(summarise)) return NO_SUMMARISER;
+  return undefined;
 }
 
 type AiStatusId = "off" | "idle" | "unavailable" | "error";
 
+/** A missing summariser is a deploy, exactly as a missing classification key
+ *  is, and every row that has to say it says it in these words. */
+const NO_SUMMARISER =
+  "Nook's server has no summariser configured, so nothing is being summarised — that is a server setup thing, not a setting you can change here.";
+
+/** A read that never landed is not a state the server reported, and both passes
+ *  get the same sentence: this panel has been told nothing about either
+ *  deployment, so it cannot claim a key is missing. */
+const NO_STATUS = "Nook's server isn't answering, so there is no status to report. Anything you turn on above still applies.";
+
+/** The back-off window is the one thing a dot cannot carry: the queue is
+ *  non-empty, the pass is on, and the server is waiting out an upstream failure.
+ *  Without this the row would read "Idle" over a pass that is not going to run
+ *  for a while. */
+const BACKING_OFF = "Nook's server is waiting out a temporary failure, so the next pass runs a little later.";
+
 const STATUS_META: Record<AiStatusId, { label: string; variant: StatusDotVariant }> = {
   off: { label: "Off", variant: "neutral" },
   idle: { label: "Idle", variant: "success" },
-  // The server answers 503 when TYPESAFE_API_KEY is unset, and the runner
-  // cools off for an hour. That is a deploy away, not something the user can
-  // fix here, so it is a state to report rather than an error to raise.
+  // The server answers 503 when TYPESAFE_API_KEY is unset, and reports
+  // `available: false` / `run.isUnavailable` for the same thing. That is a
+  // deploy away, not something the user can fix here, so it is a state to
+  // report rather than an error to raise.
   unavailable: { label: "Unavailable", variant: "warning" },
   error: { label: "Needs attention", variant: "error" },
 };
 
 const STATUS_DESCRIPTION: Record<AiStatusId, string | undefined> = {
-  off: "Turn a feature on and Nook starts working through your library.",
+  off: "Turn filing on above and Nook's server starts working through your library.",
   idle: undefined,
   unavailable: "Nook's server has no AI key configured, so nothing is being classified.",
   error: undefined,
 };
 
-function StatusCard({ settings, run, onRun }: { settings: AiSettings; run: AiRunSummary; onRun(): void }) {
-  const host = useNookHost();
+/**
+ * The same four states, said in the summarisation pass's own terms. A separate
+ * record rather than a parameterised one because the two are different
+ * deployments: classification needs `TYPESAFE_API_KEY`, summarising needs the
+ * proposer `NOOK_AI_PROPOSER` names, and either can be configured without the
+ * other. A fifth state would have nothing to say that these two sentences do
+ * not.
+ */
+const SUMMARISE_STATUS_DESCRIPTION: Record<AiStatusId, string | undefined> = {
+  off: "Turn summarising on and Nook's server starts a pass over the pages long enough to need one.",
+  idle: undefined,
+  unavailable: NO_SUMMARISER,
+  error: undefined,
+};
+
+/**
+ * Which of the four states a pass is in, from its own half of the status read.
+ *
+ * Shared because "unavailable" has to mean the same thing in both rows: a
+ * missing key is a deploy rather than something the user did, and two rows
+ * disagreeing about it would be the panel contradicting itself.
+ */
+function passStatusId(canRun: boolean, lastError: string | null, isOn: boolean): AiStatusId {
+  if (lastError) return "error";
+  if (!canRun) return "unavailable";
+  return isOn ? "idle" : "off";
+}
+
+/**
+ * Whether a pass can run at all right now, per pass — which is why these take
+ * the half they need rather than the whole status. `available` and the pass's own
+ * cool-down are the same fact from two sides: the server can summarise at all,
+ * and the server is currently not. Either one is enough to say so.
+ */
+function canClassify(status: AiStatus | null): boolean {
+  return status ? status.available && !status.run.isUnavailable : false;
+}
+
+function canSummarise(summarise: SummarizeStatus): boolean {
+  return summarise.available && !summarise.isUnavailable;
+}
+
+/** The summarisation row's sentence: the state sentence, plus the one case a
+ *  state cannot express. */
+function summariseStatusDescription(summarise: SummarizeStatus | undefined, id: AiStatusId): string | undefined {
+  if (!summarise) return NO_STATUS;
+  // A missing summariser is the bigger fact and wins: a server that cannot
+  // summarise has nothing to back off from.
+  if (id === "unavailable") return NO_SUMMARISER;
+  if (summarise.isBackingOff && !summarise.lastError) return BACKING_OFF;
+  return SUMMARISE_STATUS_DESCRIPTION[id];
+}
+
+/**
+ * A dot and the label that carries its meaning, which is the only place colour
+ * is allowed to be a state.
+ *
+ * `isChecking` is the one state that is this panel's own rather than the
+ * server's: before the first read answers, claiming "Idle" or "Off" would be a
+ * status nobody observed, and "Unavailable" would be a deployment claim about a
+ * server that may be perfectly healthy. `isBusy` is the pulse's other job — a
+ * pass with a queue behind it, which is the only live signal the summarisation
+ * row has, its depth being a badge in the card above.
+ */
+function StatusMark({ id, isChecking, isBusy = false }: { id: AiStatusId; isChecking: boolean; isBusy?: boolean }) {
+  const meta = STATUS_META[id];
+  return (
+    <HStack gap={2} align="center">
+      {isChecking ? (
+        <>
+          <StatusDot variant="neutral" label="Checking" isPulsing />
+          <Text color="secondary">Checking…</Text>
+        </>
+      ) : (
+        <>
+          <StatusDot variant={meta.variant} label={meta.label} isPulsing={isBusy} />
+          <Text color="secondary">{meta.label}</Text>
+        </>
+      )}
+    </HStack>
+  );
+}
+
+/**
+ * The whole status surface, from one server read.
+ *
+ * These rows used to read the `ai.cursor` meta record the extension's runner
+ * wrote, which is why they were hidden on the web host: a key that only one
+ * host ever wrote is exactly the thing a confidently wrong "Never" next to a
+ * feature the connected extension may be running comes from. The numbers are
+ * the account's now, so both hosts render the same rows, and **Run now** asks
+ * the same server the extension's service worker used to ask.
+ *
+ * One row per pass, because a pass is a thing that can be on, unconfigured or
+ * broken on its own: they need different keys, they queue into different
+ * depths, and the run button covers both. The two rows are otherwise the same
+ * four states, drawn from the same helpers.
+ */
+function StatusCard({
+  host,
+  settings,
+  status,
+  isLoading,
+  onRefresh,
+}: {
+  host: NookHost;
+  settings: AiSettings;
+  status: AiStatus | null;
+  isLoading: boolean;
+  onRefresh(): void;
+}) {
   const toast = useToast();
   const isMounted = useIsMounted();
-  const [isRunning, setIsRunning] = useState(false);
-  const isOn = settings.autoClassify || settings.autoTaxonomy;
-  const status: AiStatusId = run.lastError
-    ? "error"
-    : run.isUnavailable
-      ? "unavailable"
-      : isOn
-        ? "idle"
-        : "off";
-  const meta = STATUS_META[status];
+  const [isQueuing, setIsQueuing] = useState(false);
+  const run = status?.run;
+  const summarise = status?.summarize;
+  // Each row's own toggle, not "any feature": taxonomy has no pass and no
+  // queue, so letting it light up a classification dot would be a claim about
+  // work the route never does.
+  const classifyId = passStatusId(canClassify(status), run?.lastError ?? null, settings.autoClassify);
+  const summariseId = passStatusId(summarise ? canSummarise(summarise) : false, summarise?.lastError ?? null, settings.autoSummarize);
+  const statusDescription = run ? STATUS_DESCRIPTION[classifyId] : NO_STATUS;
+  const passes = queuedPasses(settings);
+  // The run is an authenticated server call like every other route here, so the
+  // button carries a sign-in reason the way **Suggest taxonomy** does. Unreachable
+  // while the panel is mounted, because the guard at the top of AiPanel switches
+  // to the sign-in banner first, and kept for the one render that can race it.
+  const isSignedIn = Boolean(host.user);
 
   /**
-   * A pass on demand. Without it the only way to classify is to wait out the
-   * 5-minute alarm, and there is no way at all to find out whether the save you
-   * just made has been filed yet — the counters below only move when a pass has
-   * happened, so a user watching them has no idea whether to wait or to look
-   * elsewhere.
+   * A pass on demand, for both features the route covers. Without it the only
+   * way to get either one is to wait out the server's own schedule, and there is
+   * no way at all to find out whether the save you just made has been filed.
    *
-   * The work is the runner's, not the panel's: `CLASSIFY_NOW` asks the service
-   * worker to call the same `runClassification()` the alarm calls. That matters
-   * twice over — the pass needs the session and the batch loop the worker has,
-   * and `runClassification()` is single-flight-guarded, so a double-click
-   * joins the run already in flight instead of paying for the same batch twice.
+   * This can only *enqueue*, and the copy below says exactly that. The route
+   * deliberately does not run a batch inline — 25 classify calls take tens of
+   * seconds, which is not something to hold an HTTP request open for — so the
+   * honest report is how much went onto each queue and that the server is
+   * working through it. A toast claiming "18 filed" here would be a guess.
    */
-  const classifyNow = async () => {
-    setIsRunning(true);
+  const queueRun = async () => {
+    setIsQueuing(true);
     try {
-      const result = await sendClassifyNow();
-      // The runner wrote `ai.cursor`; re-read it so the row below reports the
-      // pass that just happened rather than the one before it.
-      onRun();
+      const result = await requestClassificationRun();
+      // Read the status again straight away: the queue depth is the one thing
+      // that proves the call did something, and the run's own counters will not
+      // move until the server's worker gets to the batch.
+      onRefresh();
       if (!isMounted()) return;
-      if (result.error) {
-        toast({ body: result.error, type: "error" });
-      } else {
-        toast({
-          body: result.processed === 0
-            ? "Nothing to classify."
-            : `${result.assigned} filed, ${result.skipped} left alone.`,
-        });
-      }
+      toast({
+        body: result === null ? "Could not queue a pass." : runQueuedBody(result.queued, result.summariesQueued),
+        ...(result === null ? { type: "error" as const } : {}),
+      });
     } catch (error) {
-      console.error("[Nook] Manual AI classification failed:", error);
-      if (isMounted()) toast({ body: "Could not start a classification pass.", type: "error" });
+      // `requestClassificationRun` is not supposed to throw (see
+      // lib/ai-client.ts); this is the guard that keeps a future break from
+      // becoming an unhandled rejection in a click handler.
+      console.error("[Nook] Could not queue an AI pass:", error);
+      if (isMounted()) toast({ body: "Could not queue a pass.", type: "error" });
     } finally {
-      if (isMounted()) setIsRunning(false);
+      if (isMounted()) setIsQueuing(false);
     }
   };
 
@@ -583,87 +702,141 @@ function StatusCard({ settings, run, onRun }: { settings: AiSettings; run: AiRun
     <SettingsCard title="Status">
       <SettingsRow
         title="Classification"
-        description={STATUS_DESCRIPTION[status]}
+        description={statusDescription}
+        control={<StatusMark id={classifyId} isChecking={isLoading && !run} />}
+      />
+      {/*
+        The second pass, on the same four states. Its queue gets the pulse on
+        this dot rather than a row of its own: the depth is already a badge in
+        the Summaries card, and a second "Waiting to be…" row would repeat it.
+      */}
+      <SettingsRow
+        title="Summarisation"
+        description={summariseStatusDescription(summarise, summariseId)}
+        control={<StatusMark id={summariseId} isChecking={isLoading && !summarise} isBusy={(summarise?.pending ?? 0) > 0} />}
+      />
+      {/*
+        Named for the pass they describe. "Last run" and "Last pass" were
+        unambiguous while there was one status row; with a summarisation row
+        above them they would read as that pass's history, which they are not —
+        the summary's own are in the Summaries card.
+      */}
+      <SettingsRow
+        title="Last classification run"
         control={
-          <HStack gap={2} align="center">
-            <StatusDot variant={meta.variant} label={meta.label} />
-            <Text color="secondary">{meta.label}</Text>
-            <Button
-              label="Classify now"
-              variant="secondary"
-              size="sm"
-              isLoading={isRunning}
-              isDisabled={isRunning || !isOn || host.kind !== "extension"}
-              tooltip={
-                host.kind !== "extension"
-                  ? RUNS_IN_EXTENSION
-                  : !isOn
-                    ? "Turn on a feature above first."
-                    : `Work through up to ${AI_BATCH_SIZE} unfiled bookmarks now, instead of waiting for the next pass.`
-              }
-              onClick={() => void classifyNow()}
-            />
-          </HStack>
+          run?.lastRunAt ? (
+            <Text color="secondary">
+              <Timestamp value={run.lastRunAt} format="relative" isLive />
+            </Text>
+          ) : (
+            // "Never" is a claim about the account's history, so it is only
+            // printed when there was a status to say it from.
+            <Text color="secondary">{run ? "Never" : "—"}</Text>
+          )
         }
       />
       {/*
-        `run` comes from `ai.cursor`, a per-origin IndexedDB `meta` key the
-        extension's runner writes after every tick (lib/ai-runner.ts) — it is
-        run *history*, not a setting, so it was never moved server-side (see
-        the comment on RUNS_IN_EXTENSION above). On the web host that key is
-        simply never written, so showing it here would render "Never" and
-        "0 filed, 0 skipped" next to a feature the connected extension may be
-        actively running — degrade to a pointer at the real numbers instead of
-        a confidently wrong zero.
+        The counter the doc cares about: a feature under-firing on non-English
+        content shows up here as a small "filed" beside a large "skipped",
+        rather than as a silent mislabel. `processed` and `tagged` stay out —
+        the run's decision log (`AiRunSummary.log`) keeps the per-decision detail
+        this row is a summary of.
       */}
-      {host.kind === "extension" ? (
-        <>
-          <SettingsRow
-            title="Last run"
-            control={
-              run.lastRunAt ? (
-                <Text color="secondary">
-                  <Timestamp value={run.lastRunAt} format="relative" isLive />
-                </Text>
-              ) : (
-                <Text color="secondary">Never</Text>
-              )
-            }
-          />
-          {/*
-            The counter the doc cares about: a feature under-firing on non-English
-            content shows up here as a small "filed" beside a large "skipped",
-            rather than as a silent mislabel. `processed` and `tagged` stay out —
-            `ai.log` keeps the per-decision detail this row is a summary of.
-          */}
-          <SettingsRow
-            title="Last pass"
-            description={run.lastError ?? "Bookmarks filed and left alone since the last pass."}
-            control={
-              <HStack gap={2} align="center">
-                <Badge label={run.assigned} />
-                <Text type="supporting" color="secondary">
-                  filed
-                </Text>
-                <Text type="supporting" color="secondary">
-                  ·
-                </Text>
-                <Badge label={run.skipped} />
-                <Text type="supporting" color="secondary">
-                  skipped
-                </Text>
-              </HStack>
-            }
-          />
-        </>
-      ) : (
+      <SettingsRow
+        title="Last classification pass"
+        description={run ? (run.lastError ?? "Bookmarks filed and left alone since the last pass.") : undefined}
+        control={
+          run ? (
+            <HStack gap={2} align="center">
+              <Badge label={run.assigned} />
+              <Text type="supporting" color="secondary">
+                filed
+              </Text>
+              <Text type="supporting" color="secondary">
+                ·
+              </Text>
+              <Badge label={run.skipped} />
+              <Text type="supporting" color="secondary">
+                skipped
+              </Text>
+            </HStack>
+          ) : (
+            <Text color="secondary">—</Text>
+          )
+        }
+      />
+      {/*
+        Only while there is something to wait for. This row is also what tells
+        the user the poll above is doing its job: a queue that is draining is
+        the whole reason the status is re-read every few seconds.
+      */}
+      {status && status.pending > 0 ? (
         <SettingsRow
-          title="Run history"
-          description="Classification runs in the Nook browser extension's background service worker. These toggles apply there as soon as it's connected to this account — open Settings → AI in the extension to see when it last ran and what it filed."
+          title="Waiting to be classified"
+          description="Nook's server is working through these now. This panel refreshes until the queue is empty."
+          control={
+            <HStack gap={2} align="center">
+              <StatusDot variant="accent" label="Classifying" isPulsing />
+              <Badge label={status.pending} />
+            </HStack>
+          }
         />
-      )}
+      ) : null}
+      <SettingsRow
+        title="Queue a pass now"
+        description="Starts a pass without waiting for Nook's server's next tick. The work happens there rather than in this browser, so the rows above fill in as it goes."
+        control={
+          <Button
+            label="Run now"
+            variant="secondary"
+            size="sm"
+            isLoading={isQueuing}
+            isDisabled={isQueuing || !isSignedIn || passes.length === 0}
+            tooltip={runTooltip(passes, isSignedIn, isQueuing)}
+            onClick={() => void queueRun()}
+          />
+        }
+      />
     </SettingsCard>
   );
+}
+
+/**
+ * The passes one click of **Run now** would queue. `POST /api/ai/run` gates each
+ * half on its own toggle, so a user with only `autoSummarize` on gets summaries
+ * queued and nothing else — which is why the button's copy names them rather
+ * than saying "run everything", and why the count of them is also what disables
+ * it.
+ */
+function queuedPasses(settings: AiSettings): string[] {
+  const passes: string[] = [];
+  if (settings.autoClassify) passes.push("your unfiled bookmarks for classification");
+  if (settings.autoSummarize) passes.push("the pages long enough to need a summary");
+  return passes;
+}
+
+/** Why the button cannot be pressed, or what pressing it would do. Every branch
+ *  is a reason a click cannot queue anything, except the last, which is the
+ *  promise the click does keep. */
+function runTooltip(passes: string[], isSignedIn: boolean, isQueuing: boolean): string {
+  if (!isSignedIn) return "Sign in to queue a pass.";
+  if (passes.length === 0) return "Turn on “File new bookmarks” or “Summarise long pages” first.";
+  if (isQueuing) return "Nook's server is queueing the pass now.";
+  return `Queues ${passes.join(" and ")}. Nook's server works through them in the background.`;
+}
+
+/**
+ * The toast for a queued pass, and the rule it has to keep: a queue depth is not
+ * a pass result. Each half is reported only when that half queued something, so
+ * a user with one toggle on is never told about work the route did not queue for
+ * them, and the sentence never claims anything was filed or written.
+ */
+function runQueuedBody(queued: number, summariesQueued: number): string {
+  const parts: string[] = [];
+  if (queued > 0) parts.push(`${queued} ${queued === 1 ? "bookmark" : "bookmarks"} to classify`);
+  if (summariesQueued > 0) parts.push(`${summariesQueued} ${summariesQueued === 1 ? "page" : "pages"} to summarise`);
+  if (parts.length === 0) return "Nothing to classify or summarise.";
+  return `Queued ${parts.join(" and ")}. Nook's server is working through them now.`;
 }
 
 function SignInRequired({ host }: { host: NookHost }) {
@@ -685,15 +858,20 @@ function SignInRequired({ host }: { host: NookHost }) {
 /**
  * "Suggest taxonomy" — the whole feature-2 flow in one row: ask the server what
  * to call the themes in this library, show the answer for review, and turn the
- * names the user keeps into real collections plus the record the runner reads
+ * names the user keeps into real collections plus the taxonomy in force
  * (docs/ai.md, "Taxonomy growth").
  *
+ * Everything the client used to own is the server's now. The sample is drawn
+ * from the account's own records, so this sends no library and holds no
+ * `Bookmark[]`; acceptance sends names only, and the server reads the account's
+ * existing lists, its own tags and the sample digests from the same store it
+ * classifies against.
+ *
  * States are reported where they happen rather than collected into one error
- * field, because the four ways this can go wrong need four different sentences:
- * a stale session, a server with no AI key, a throttled server, and a model that
- * declined — and the last one is not a failure at all. `__none__` is a valid
- * answer on the classify route, and "nothing new worth suggesting" is this
- * route's version of it: the proposer's job includes declining.
+ * field, because the ways this can go wrong need different sentences: a stale
+ * session, a server with no AI key, a throttled server, and a model that
+ * declined — and the last one is not a failure at all. "Nothing new worth
+ * suggesting" is this route's version of `__none__`.
  */
 type SuggestPhase = "idle" | "reading" | "review" | "accepting" | "done";
 
@@ -703,12 +881,18 @@ interface SuggestState {
   proposals: TaxonomyProposal[];
   /** The names still ticked. Default-checked, and the user may take any away. */
   accepted: string[];
-  /** Tag names the proposer suggested, in its order. */
+  /** Tag proposals in the server's order. */
   tags: TagProposal[];
-  /** The tag names still ticked. */
-  acceptedTags: string[];
-  /** The sample the proposal came from; the acceptance step needs its titles. */
-  sample: Bookmark[];
+  /**
+   * The user's own decision per tag name, and only for the tags they actually
+   * touched. A tag with no entry here takes its value from `coveredBy` every
+   * render, which is what keeps the default live.
+   */
+  tagChoice: Record<string, boolean>;
+  /** How many of the user's own bookmarks the proposal was drawn from. */
+  sampleSize: number;
+  /** Collections the account already has, so the review can say so. */
+  existingCollections: string[];
   note: SuggestNote | null;
 }
 
@@ -723,8 +907,9 @@ const IDLE_STATE: SuggestState = {
   proposals: [],
   accepted: [],
   tags: [],
-  acceptedTags: [],
-  sample: [],
+  tagChoice: {},
+  sampleSize: 0,
+  existingCollections: [],
   note: null,
 };
 
@@ -744,18 +929,62 @@ function SuggestTaxonomyAction({
   const isReading = state.phase === "reading";
   const isReviewing = state.phase === "review" || state.phase === "accepting";
   const isAccepting = state.phase === "accepting";
-  // A session and the toggle are the whole gate: both server routes are
-  // authenticated, and the feature ships off by default. A proposal already in
-  // flight is a third reason, so a second click cannot pay for a second call.
+  // A session and the toggle are the whole gate: the route is authenticated,
+  // and the feature ships off by default. A request already in flight is a
+  // third reason, so a second click cannot pay for a second call.
   const isBusy = isReading || isAccepting;
-  const isOff = !enabled || !host.user || host.kind !== "extension";
+  const isOff = !enabled || !host.user;
 
+  /**
+   * Whether a tag's checkbox is ticked, right now.
+   *
+   * A decision the user made by hand wins; otherwise the answer is "is a
+   * collection you are still accepting already covered this". The server says
+   * which collections those are (`coveredBy`), so this is not a stem comparison
+   * this panel has to re-derive — and it stays *live*, which is the point:
+   * unticking "Açık Kaynak Projeleri" re-ticks "açık kaynak", because from then
+   * on the tag is the only one left carrying the theme. A tag the user ticked or
+   * unticked themselves is pinned either way, so this cannot undo their call.
+   */
+  const isTagTicked = (tag: TagProposal): boolean => state.tagChoice[tag.name] ?? !isCoveredBy(tag, state.accepted);
+  const tickedTags = state.tags.filter(isTagTicked);
+
+  /**
+   * The collections just changed, so every tag the user has *not* ruled on has
+   * to be re-defaulted against them; the ones they did are left alone.
+   */
+  const acceptCollections = (values: string[]) =>
+    setState((previous) => {
+      const tagChoice = { ...previous.tagChoice };
+      for (const tag of previous.tags) {
+        const settled = previous.tagChoice[tag.name];
+        if (settled === undefined) continue;
+        if (isCoveredBy(tag, values)) delete tagChoice[tag.name];
+      }
+      return { ...previous, accepted: values, tagChoice };
+    });
+
+  /** Records only the tags whose value this click actually changed, so a click
+   *  on one tag does not silently pin the other nineteen. */
+  const acceptTags = (values: string[]) =>
+    setState((previous) => {
+      const tagChoice = { ...previous.tagChoice };
+      for (const tag of previous.tags) {
+        const wasTicked = previous.tagChoice[tag.name] ?? !isCoveredBy(tag, previous.accepted);
+        if (wasTicked === values.includes(tag.name)) delete tagChoice[tag.name];
+        else tagChoice[tag.name] = values.includes(tag.name);
+      }
+      return { ...previous, tagChoice };
+    });
   const ask = async () => {
     setState({ ...IDLE_STATE, phase: "reading" });
-    let outcome: ProposalOutcome;
+    let outcome: ProposeOutcome;
     try {
-      outcome = await requestProposals({ apiUrl: host.apiUrl, language });
+      outcome = await requestTaxonomyProposals({ apiUrl: host.apiUrl, language });
     } catch (error) {
+      // `requestTaxonomyProposals` answers with a value rather than rejecting
+      // (see lib/ai-client.ts); this is the guard that keeps a future break
+      // from becoming an unhandled rejection in a click handler.
       console.error("[Nook] Taxonomy proposal failed:", error);
       outcome = { kind: "failed", message: "Could not read your library to ask for suggestions." };
     }
@@ -776,47 +1005,50 @@ function SuggestTaxonomyAction({
       proposals: outcome.proposals,
       accepted: names,
       tags: outcome.tags,
-      // Except a tag that one of these very collections already speaks for. The
-      // proposer names a theme once and proposes it twice — "Açık Kaynak
-      // Projeleri" and "açık kaynak" — and that is one observation, not two. The
-      // tag is still offered, because a collection is exclusive and a tag is
-      // not, but it starts unticked rather than fighting its own collection by
-      // default.
-      acceptedTags: outcome.tags
-        .filter((tag) => !isTagCoveredByCollection(tag.name, names))
-        .map((tag) => tag.name),
-      sample: outcome.sample,
+      // No tag is pre-decided here, so every one of them takes its value from
+      // `coveredBy`: a tag one of these very collections already speaks for
+      // starts unticked. The proposer names a theme once and proposes it twice —
+      // "Açık Kaynak Projeleri" and "açık kaynak" — and that is one
+      // observation, not two. The tag is still offered, because a collection is
+      // exclusive and a tag is not, but it does not arrive fighting its own
+      // collection by default. A tag with no `coveredBy` (a server build that
+      // predates the field) is covered by nothing, so it starts ticked.
+      tagChoice: {},
+      sampleSize: outcome.sampleSize,
+      existingCollections: outcome.existingCollections,
       note: null,
     });
   };
 
   const accept = async () => {
-    const chosen = state.proposals.filter((proposal) => state.accepted.includes(proposal.name));
-    const chosenTags = state.tags.filter((tag) => state.acceptedTags.includes(tag.name));
-    if (chosen.length === 0 && chosenTags.length === 0) return;
+    const collections = state.proposals.filter((proposal) => state.accepted.includes(proposal.name)).map((proposal) => proposal.name);
+    // The definition rides along with the name. Everything else does not: the
+    // sample, the live collections and the library's own tags are all read from
+    // the account's records on the server at acceptance time, so a collection
+    // created in another tab a second ago cannot be duplicated and a tag the
+    // library already carries is not re-proposed. A tag's definition is the one
+    // thing the server cannot know — the proposer wrote it, this list is the only
+    // place it still exists, and it is the sole evidence a member-less tag gets
+    // when it is first offered to the model (docs/ai.md: 12 of 12 vocabulary
+    // entries put to use with definitions, against 10 of 12 without).
+    const tags = tickedTags.map((tag) => ({ name: tag.name, ...(tag.why ? { definition: tag.why } : {}) }));
+    if (collections.length === 0 && tags.length === 0) return;
     setState((previous) => ({ ...previous, phase: "accepting" }));
     try {
-      // Re-read the live collections rather than trusting the ones this panel
-      // was mounted with: a collection can be renamed or created in another tab
-      // between the proposal and the confirmation.
-      const existing = await NookDB.getAllLists();
-      // Likewise the library's own tags, so an accepted vocabulary never
-      // re-proposes a tag the user already has.
-      const existingTags = (await NookDB.getAllBookmarks()).flatMap((bookmark) =>
-        Array.isArray(bookmark.tags) ? bookmark.tags : [],
-      );
-      const result = await acceptProposals({
-        proposals: chosen,
-        samples: state.sample,
-        existing,
-        tags: chosenTags,
-        existingTags,
-      });
-      const added = result.created.length;
-      const tagged = result.addedTags.length;
-      toast({ body: summariseAccepted(added, tagged) });
+      const result = await acceptTaxonomy({ collections, tags });
+      if (result.kind !== "accepted") {
+        if (!isMounted()) return;
+        setState((previous) => ({ ...previous, phase: "review" }));
+        toast({ body: requestFailureNote(result).text, type: "error" });
+        return;
+      }
+      const { createdCollections, addedTags, dropped } = result;
+      toast({ body: summariseAccepted(createdCollections, addedTags) });
       if (!isMounted()) return;
-      setState({ ...IDLE_STATE, phase: "done", note: acceptedNote(added, tagged, result.dropped.length) });
+      // Acceptance changed the account's taxonomy, so the status surface (which
+      // reports it) is now stale on every host.
+      announceAiStatusChange();
+      setState({ ...IDLE_STATE, phase: "done", note: acceptedNote(createdCollections, addedTags, dropped) });
     } catch (error) {
       console.error("[Nook] Could not create the suggested taxonomy:", error);
       if (isMounted()) setState((previous) => ({ ...previous, phase: "review" }));
@@ -826,11 +1058,9 @@ function SuggestTaxonomyAction({
 
   const disabledReason = !host.user
     ? "Sign in to ask for suggestions."
-    : host.kind !== "extension"
-      ? RUNS_IN_EXTENSION
-      : !enabled
-        ? "Turn on “Suggest new categories and tags” first."
-        : undefined;
+    : !enabled
+      ? "Turn on “Suggest new categories and tags” first."
+      : undefined;
 
   return (
     <VStack gap={2} width="100%">
@@ -844,7 +1074,7 @@ function SuggestTaxonomyAction({
             size="sm"
             isLoading={isReading}
             isDisabled={isOff || isBusy}
-            tooltip={disabledReason ?? "Reads a sample of your unfiled bookmarks and proposes collection names and tags for it."}
+            tooltip={disabledReason ?? "Nook's server reads a sample of your unfiled bookmarks and proposes collection names and tags for it."}
             onClick={() => void ask()}
           />
         )}
@@ -857,7 +1087,7 @@ function SuggestTaxonomyAction({
         <HStack gap={2} align="center">
           <StatusDot variant="accent" label="Reading your library" isPulsing />
           <Text type="supporting" color="secondary">
-            Reading up to {TAXONOMY_SAMPLE_SIZE} unfiled bookmarks, spread across your whole library…
+            Nook's server is reading a sample of your unfiled bookmarks, spread across your whole library…
           </Text>
         </HStack>
       ) : null}
@@ -867,11 +1097,11 @@ function SuggestTaxonomyAction({
           {state.proposals.length > 0 ? (
             <CheckboxList
               label="New collections"
-              description={`Nook read ${state.sample.length} of your unfiled bookmarks. Untick anything you would rather not have.`}
+              description={collectionsReviewDescription(state.sampleSize, state.existingCollections)}
               hasDividers
               width="100%"
               value={state.accepted}
-              onChange={(values) => setState((previous) => ({ ...previous, accepted: values }))}
+              onChange={acceptCollections}
             >
               {state.proposals.map((proposal) => (
                 <CheckboxListItem
@@ -889,30 +1119,26 @@ function SuggestTaxonomyAction({
               description="Nook will start tagging new bookmarks with these. They begin empty and earn their first use the usual way — from something it is confident about."
               hasDividers
               width="100%"
-              value={state.acceptedTags}
-              onChange={(values) => setState((previous) => ({ ...previous, acceptedTags: values }))}
+              value={tickedTags.map((tag) => tag.name)}
+              onChange={acceptTags}
             >
               {state.tags.map((tag) => (
                 <CheckboxListItem
                   key={tag.name}
                   value={tag.name}
                   label={tag.name}
-                  description={
-                    isTagCoveredByCollection(tag.name, state.accepted)
-                      ? "A collection above already covers this."
-                      : tag.why
-                  }
+                  description={isCoveredBy(tag, state.accepted) ? "A collection above already covers this." : tag.why}
                 />
               ))}
             </CheckboxList>
           ) : null}
           <HStack justify="end" gap={2}>
             <Button
-              label={acceptLabel(state.accepted.length, state.acceptedTags.length)}
+              label={acceptLabel(state.accepted.length, tickedTags.length)}
               variant="primary"
               size="sm"
               isLoading={isAccepting}
-              isDisabled={state.accepted.length === 0 && state.acceptedTags.length === 0}
+              isDisabled={state.accepted.length === 0 && tickedTags.length === 0}
               onClick={() => void accept()}
             />
           </HStack>
@@ -931,6 +1157,24 @@ function SuggestTaxonomyAction({
   );
 }
 
+/** A tag counts as covered only by a collection that is still on the accept
+ *  list, so unticking a covering collection hands the theme back to the tag.
+ *  A tag with no `coveredBy` — a server build that predates the field — is
+ *  covered by nothing and therefore starts ticked. */
+function isCoveredBy(tag: TagProposal, acceptedNames: string[]): boolean {
+  return tag.coveredBy.some((name) => acceptedNames.includes(name));
+}
+
+/** What the review list can honestly say about the evidence behind it: the
+ *  server's own count of the bookmarks it read, and the collections it already
+ *  knows about, so a name that collides is visible here rather than silently
+ *  dropped at acceptance. */
+function collectionsReviewDescription(sampleSize: number, existingCollections: string[]): string {
+  const read = sampleSize === 1 ? "Nook read 1 of your unfiled bookmarks." : `Nook read ${sampleSize} of your unfiled bookmarks.`;
+  if (existingCollections.length === 0) return `${read} Untick anything you would rather not have.`;
+  return `${read} You already have ${existingCollections.join(", ")} — a name that matches one of those is left as it is.`;
+}
+
 function noteLabel(variant: StatusDotVariant): string {
   if (variant === "error") return "Failed";
   if (variant === "warning") return "Unavailable";
@@ -939,11 +1183,12 @@ function noteLabel(variant: StatusDotVariant): string {
 }
 
 /**
- * One sentence per outcome, and the two the calibration pushed hardest on:
- * an empty list is a legitimate answer, and a name the user already has is
- * dropped rather than duplicated.
+ * One sentence per outcome, and the one the calibration pushed hardest on: an
+ * empty list is a legitimate answer, not a failure — so it is reported apart
+ * from the four that are, because each of those needs the user to do something
+ * and this one needs them to wait.
  */
-function outcomeNote(outcome: ProposalOutcome): SuggestNote | null {
+function outcomeNote(outcome: ProposeOutcome): SuggestNote {
   switch (outcome.kind) {
     case "proposals":
       // The server answers 200 with empty arrays both when the model declined
@@ -954,34 +1199,50 @@ function outcomeNote(outcome: ProposalOutcome): SuggestNote | null {
         text: "Nothing new worth suggesting. The server also answers this way when no proposer is configured for it.",
       };
     case "nothing-to-read":
+      // The server's own sample, not this browser's library: it decides what it
+      // has to read, and a sample of nothing is what it says when it has
+      // nothing eligible.
       return { variant: "neutral", text: "There is nothing unfiled to read yet. Save a few bookmarks and try again." };
     case "signed-out":
-      return { variant: "warning", text: "Your session has expired. Sign in again to ask for suggestions." };
+    case "unavailable":
+    case "throttled":
+    case "failed":
+      return requestFailureNote(outcome);
+  }
+}
+
+/** The four failures the two server-calling features share, so **Suggest
+ *  taxonomy** and the acceptance step cannot drift into telling the same state
+ *  two different ways. */
+function requestFailureNote(outcome: { kind: "signed-out" | "unavailable" | "throttled" | "failed"; message?: string }): SuggestNote {
+  switch (outcome.kind) {
+    case "signed-out":
+      return { variant: "warning", text: "Your session has expired. Sign in again and try again." };
     case "unavailable":
       return {
         variant: "warning",
-        text: "Nook's server has no AI key configured, so it can't propose anything. Nothing is wrong with your library.",
+        text: "Nook's server has no AI key configured, so it can't do this. Nothing is wrong with your library.",
       };
     case "throttled":
       return { variant: "warning", text: "The server is rate limiting Nook. Try again in a minute or so." };
     case "failed":
-      return { variant: "error", text: outcome.message };
+      return { variant: "error", text: outcome.message ?? "Something went wrong." };
   }
 }
 
 /**
  * The one irreversible-feeling step in this feature, so it says plainly what was
- * created: these are ordinary collections, on this device and every synced one,
- * and the user can rename or delete any of them like any other.
+ * created: these are ordinary collections, on every device this account syncs
+ * to, and the user can rename or delete any of them like any other.
  */
-function acceptedNote(added: number, tags: number, dropped: number): SuggestNote {
-  if (added === 0 && tags === 0) {
+function acceptedNote(collections: number, tags: number, dropped: number): SuggestNote {
+  if (collections === 0 && tags === 0) {
     return {
       variant: "warning",
       text: "Nothing was added — every suggestion was something you already had.",
     };
   }
-  const collections = added === 0 ? "" : `Added ${added === 1 ? "1 collection" : `${added} collections`}.`;
+  const created = collections === 0 ? "" : `Added ${collections === 1 ? "1 collection" : `${collections} collections`}.`;
   const vocabulary = tags === 0
     ? ""
     : ` ${tags === 1 ? "1 tag is" : `${tags} tags are`} ready to be used.`;
@@ -990,7 +1251,7 @@ function acceptedNote(added: number, tags: number, dropped: number): SuggestNote
     : ` ${dropped === 1 ? "One you already had was" : `${dropped} you already had were`} left as it is.`;
   return {
     variant: "success",
-    text: `${collections}${kept}${vocabulary} Collections are real — rename or delete them any time.`.trim(),
+    text: `${created}${kept}${vocabulary} Collections are real — rename or delete them any time.`.trim(),
   };
 }
 
@@ -1011,97 +1272,4 @@ function summariseAccepted(collections: number, tags: number): string {
   if (collections === 0) return `${tagsLabel} ready to use.`;
   if (tags === 0) return `${collectionsLabel} added.`;
   return `${collectionsLabel} and ${tagsLabel} added.`;
-}
-
-/**
- * What the background pass did last time: the counters, last run and cool-down
- * fields of the runner's `ai.cursor` record, with "nothing yet" filled in. The
- * panel only reads that record; the pass itself is the service worker's.
- */
-interface AiRunSummary {
-  assigned: number;
-  skipped: number;
-  lastRunAt: string | null;
-  lastError: string | null;
-  /** True while the runner's no-AI-key cool-down is still in effect. */
-  isUnavailable: boolean;
-}
-
-const EMPTY_RUN: AiRunSummary = {
-  assigned: 0,
-  skipped: 0,
-  lastRunAt: null,
-  lastError: null,
-  isUnavailable: false,
-};
-
-function isFuture(iso: string | undefined): boolean {
-  if (iso == null) return false;
-  const until = new Date(iso).getTime();
-  return Number.isFinite(until) && until > Date.now();
-}
-
-/** A record from an older build may be missing counters, so fill rather than trust. */
-function readRunSummary(cursor: AiCursor | undefined): AiRunSummary {
-  return {
-    assigned: cursor?.assigned ?? 0,
-    skipped: cursor?.skipped ?? 0,
-    lastRunAt: cursor?.lastRunAt ?? null,
-    lastError: cursor?.lastError ?? null,
-    isUnavailable: isFuture(cursor?.unavailableUntil),
-  };
-}
-
-/**
- * The summary refreshes whenever the settings do: turning a feature on is the
- * moment a run is most likely to start, and the runner exposes no subscription
- * the panel could join. `reload` is the same read on demand, for the "Classify
- * now" button — a pass writes `ai.cursor` and nothing announces it.
- */
-function useAiRunSummary(settings: AiSettings | null): { run: AiRunSummary; reload(): void } {
-  const [run, setRun] = useState<AiRunSummary>(EMPTY_RUN);
-  const [nonce, setNonce] = useState(0);
-  useEffect(() => {
-    let active = true;
-    void NookDB.getMeta<AiCursor>(AI_CURSOR_META_KEY).then((cursor) => {
-      if (active) setRun(readRunSummary(cursor));
-    });
-    return () => {
-      active = false;
-    };
-  }, [settings, nonce]);
-  const reload = useCallback(() => setNonce((previous) => previous + 1), []);
-  return { run, reload };
-}
-
-/**
- * Asks the service worker for a pass, and gets the run itself back.
- *
- * `runClassification()` never rejects (see lib/ai-runner.ts), so a delivered
- * reply *is* the result — there is no separate success flag to check. The two
- * ways this can fail are chrome's: a message with no listener behind it (the
- * worker was torn down and did not wake) and a throw from the channel itself.
- * Both arrive as chrome.runtime.lastError rather than as exceptions, so they are
- * turned into one rejection here instead of being checked by hand at each call.
- */
-function sendClassifyNow(): Promise<AiRunResult> {
-  return new Promise((resolve, reject) => {
-    try {
-      const message: PopupToBackgroundMessage = { type: "CLASSIFY_NOW" };
-      chrome.runtime.sendMessage(message, (response: AiRunResult) => {
-        const lastError = chrome.runtime.lastError;
-        if (lastError) {
-          reject(new Error(lastError.message || "Nook's background service did not respond."));
-          return;
-        }
-        if (response === undefined) {
-          reject(new Error("Nook's background service did not respond."));
-          return;
-        }
-        resolve(response);
-      });
-    } catch (error) {
-      reject(error instanceof Error ? error : new Error(String(error)));
-    }
-  });
 }

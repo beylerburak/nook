@@ -4,6 +4,7 @@ import { cors } from "hono/cors";
 import { auth, allowedOrigins, allowSignUp, pool } from "./auth.js";
 import { parseSyncRequest, syncRecords } from "./sync.js";
 import {
+  aiAvailability,
   classifyBookmarkOutcome,
   jevAvailable,
   parseClassifyRequest,
@@ -11,9 +12,19 @@ import {
   proposeTaxonomy,
 } from "./ai.js";
 import { getAiUserSettings, parseAiUserSettingsPatch, saveAiUserSettingsPatch } from "./ai-settings.js";
+import { readAiStatus } from "./ai-store.js";
+import {
+  ProposerUnavailableError,
+  acceptTaxonomyForUser,
+  parseTaxonomyAcceptance,
+  parseTaxonomyProposeBody,
+  proposeTaxonomyForUser,
+  requestClassificationRun,
+  startAiWorker,
+} from "./ai-jobs.js";
 import { embedTexts, reconcileIndex } from "./embeddings.js";
 import { parseSearchRequest, searchBookmarks } from "./retrieval.js";
-import { parseSummarizeRequest, summarizeAvailability, summarizeRecords } from "./summarize.js";
+import { requestSummaryRun } from "./ai-summary.js";
 
 const app = new Hono();
 
@@ -106,6 +117,85 @@ app.put("/api/ai/settings", async (c) => {
   return c.json(await saveAiUserSettingsPatch(pool, session.user.id, patch));
 });
 
+// The four routes the classification pass moved in on (docs/ai-cloud-contract.md).
+// They are the whole remaining client surface of the feature: the settings routes
+// above are the toggles, these are the state and the actions, and there is no
+// longer a per-browser runner for either host to have to agree with.
+//
+// Same session guard as every other AI route, and it is a real guard rather than
+// ceremony: the queue, the run history and the accepted taxonomy are all
+// account-wide, so an unauthenticated read of any of them is a read of somebody
+// else's library.
+
+// One read for the whole Settings → AI status surface, so the panel cannot render
+// a half-updated state stitched from three endpoints — and `available` in it is the
+// same `aiAvailability().classify` the classify route's 503 is built from, so the
+// panel's dot and the route can never disagree.
+app.get("/api/ai/status", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  return c.json(await readAiStatus(pool, session.user.id));
+});
+
+// Enqueues and wakes the worker; it does not run a pass inline. 25 classify calls
+// take tens of seconds, and so do 25 summarisation calls, which is not something
+// to hold an HTTP request open for — so the response carries both queue depths
+// and a status the client re-reads as the work drains.
+//
+// One route for both features, because the work is the same shape and two buttons
+// would be two nearly identical controls. Each half is gated on its own toggle
+// *inside its own enqueue*, which is why an account with only one of them on gets
+// a real number for that one and a zero for the other rather than a lie.
+app.post("/api/ai/run", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  const { queued } = await requestClassificationRun(pool, session.user.id);
+  const { queued: summariesQueued } = await requestSummaryRun(pool, session.user.id);
+  return c.json({ queued, summariesQueued, status: await readAiStatus(pool, session.user.id) });
+});
+
+app.post("/api/ai/taxonomy/propose", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  let body;
+  try {
+    body = parseTaxonomyProposeBody(await c.req.json());
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Invalid request" }, 400);
+  }
+  // 503 for the same reason the classify route has one, and checked the same way:
+  // the client has to be able to tell "this server cannot do that" from "the model
+  // had nothing to say", or an unconfigured deployment renders as a broken
+  // feature. The typed error is caught as well, which is what keeps the invariant
+  // if the key is unset between this check and the call.
+  if (!aiAvailability().proposeTaxonomy) {
+    return c.json({ error: "AI taxonomy proposal is not configured" }, 503);
+  }
+  try {
+    return c.json(await proposeTaxonomyForUser(pool, session.user.id, body.language));
+  } catch (error) {
+    if (error instanceof ProposerUnavailableError) {
+      return c.json({ error: "AI taxonomy proposal is not configured" }, 503);
+    }
+    throw error;
+  }
+});
+
+app.put("/api/ai/taxonomy", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  let body;
+  try {
+    body = parseTaxonomyAcceptance(await c.req.json());
+  } catch (error) {
+    // 400 for a name that is not a name. The review list tells the user exactly
+    // what is about to be created, so quietly dropping one of the names they
+    // ticked would be the worst available answer.
+    return c.json({ error: error instanceof Error ? error.message : "Invalid request" }, 400);
+  }
+  return c.json(await acceptTaxonomyForUser(pool, session.user.id, body.collections, body.tags));
+});
+
 app.post("/api/search", async (c) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers });
   if (!session) return c.json({ error: "Unauthorized" }, 401);
@@ -130,22 +220,14 @@ app.post("/api/search", async (c) => {
   );
 });
 
-app.post("/api/summarize", async (c) => {
-  const session = await auth.api.getSession({ headers: c.req.raw.headers });
-  if (!session) return c.json({ error: "Unauthorized" }, 401);
-  let request;
-  try {
-    request = parseSummarizeRequest(await c.req.json());
-  } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "Invalid request" }, 400);
-  }
-  // 503, matching the classify route: the panel has to tell "this server has no
-  // summariser" from "there was nothing to summarise".
-  if (!summarizeAvailability().summarize) {
-    return c.json({ error: "AI summarisation is not configured" }, 503);
-  }
-  return c.json(await summarizeRecords(pool, session.user.id, request.ids));
-});
+// `POST /api/summarize` was removed with the pass that made it pointless. It
+// computed summaries and returned them for a caller that had to write them itself,
+// and its documented contract was "the server does not write `summary` anywhere,
+// and that is the design" — which is false now that `ai-summary.ts` writes it
+// through the shared conflict-safe path. A route that computes a summary and
+// silently discards it is a trap for the next reader, and there was no caller in
+// either host to preserve. `summarizeRecords` stays; the worker calls it.
+// (docs/ai-summarize-contract.md, "POST /api/summarize — removed".)
 
 app.onError((error, c) => {
   console.error(error);
@@ -187,4 +269,18 @@ async function reconcileEveryUser(): Promise<void> {
 // reconcile that reads before `nook_embeddings` exists just logs a failure.
 setTimeout(() => void reconcileEveryUser(), 30_000);
 setInterval(() => void reconcileEveryUser(), RECONCILE_INTERVAL_MS);
+
+// -- AI upkeep ------------------------------------------------------------
+
+// The AI worker's clock, and it is the same relationship the reconcile timer above
+// has with the index: a queue with no clock is a queue that only ever drains when
+// something else happens to wake it. Once a minute, because a pass is 25 requests
+// at concurrency 4 and the extension's 5-minute alarm was twelve times slower for
+// no reason other than an MV3 service worker's sleep schedule.
+//
+// The tick is per-minute where the reconciler is per-15-minutes because they are
+// different jobs: the reconciler only has to make an index eventually correct, while
+// the queue is what a user is watching drain. `startAiWorker` owns the
+// scheduling, and it never throws out of a tick — see apps/api/src/ai-jobs.ts.
+startAiWorker(pool);
 

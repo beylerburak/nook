@@ -7,14 +7,10 @@ import { ToastViewport } from "@astryxdesign/core/Toast";
 import { NookHostProvider, type NookHost } from "../src/app/host/NookHost";
 import { AiPanel } from "../src/app/settings-dialog/AiPanel";
 import { SettingsDialog } from "../src/app/settings-dialog/SettingsDialog";
-import { AI_TAXONOMY_META_KEY } from "../lib/ai-runner";
+import { _resetAiClientForTests } from "../lib/ai-client";
 import { DEFAULT_AI_SETTINGS, _resetAiSettingsCacheForTests, type AiSettings } from "../lib/ai-settings";
-import { saveCloudSession } from "../lib/cloud-sync";
+import { configureCloud, saveCloudSession } from "../lib/cloud-sync";
 import * as NookDB from "../lib/db";
-import type { AcceptedTaxonomy } from "../lib/ai-taxonomy";
-import type { BookmarkList } from "../lib/types";
-
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 // SettingsDialog renders SyncPanel's status through this hook; the AI panel
 // never reads it, but the module is in the import graph, so stub it the same
@@ -23,54 +19,160 @@ vi.mock("../src/app/host/useCloudStatus", () => ({
   useCloudStatus: () => null,
 }));
 
-const AI_SETTINGS_KEY = "ai.settings";
-const AI_CURSOR_KEY = "ai.cursor";
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-// -- settings server ------------------------------------------------------
+const AI_SETTINGS_KEY = "ai.settings";
+const CLOUD_ORIGIN = "https://nook.beyler.co";
+
+// -- the four AI routes ----------------------------------------------------
 //
-// Stands in for GET/PUT {apiUrl}/api/ai/settings, which `useAiSettings` (in
-// AiPanel.tsx) now calls instead of reading `ai.settings` straight out of
-// IndexedDB — see docs/ai.md, "Settings surface". `settings` starts at the
-// documented defaults, matching a brand-new account.
+// A pass runs on Nook's server now, so the panel's every read and write is an
+// HTTP call (docs/ai-cloud-contract.md). The old harness read `ai.cursor` out of
+// IndexedDB and answered "Classify now" over the chrome message channel; both
+// of those seams are gone, and everything below is one fetch router standing in
+// for GET/PUT /api/ai/settings, GET /api/ai/status, POST /api/ai/run, POST
+// /api/ai/taxonomy/propose and PUT /api/ai/taxonomy.
+
+/** Stands in for GET/PUT /api/ai/settings — the account's row. */
 class MockSettingsServer {
   settings: AiSettings = { ...DEFAULT_AI_SETTINGS };
   requests: Array<{ method: string; body?: unknown }> = [];
-  lastAuthorization: string | null = null;
 
   respond = (init: RequestInit | undefined): Response => {
-    this.lastAuthorization = (init?.headers as Record<string, string> | undefined)?.Authorization ?? null;
     const method = init?.method ?? "GET";
     const body = init?.body ? (JSON.parse(String(init.body)) as Partial<AiSettings>) : undefined;
     this.requests.push({ method, body });
     if (method === "PUT" && body) this.settings = { ...this.settings, ...body };
-    return new Response(JSON.stringify(this.settings), { status: 200, headers: { "Content-Type": "application/json" } });
+    return json(this.settings);
   };
 }
 
+/** Stands in for GET /api/ai/status. The body is deliberately partial-friendly:
+ *  `lib/ai-client.ts` fills every absent field, and a test should be able to
+ *  hand it whatever the real server would. */
+class MockStatusServer {
+  body: Record<string, unknown> = {};
+
+  respond = (): Response => json({ ...this.body });
+}
+
+/** A status body with everything filled in, so a test only has to state the
+ *  part it is about. */
+function status(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    available: true,
+    settings: { ...DEFAULT_AI_SETTINGS },
+    pending: 0,
+    taxonomy: { acceptedAt: null, collections: [], tags: [] },
+    run: {
+      processed: 0,
+      assigned: 0,
+      tagged: 0,
+      skipped: 0,
+      lastRunAt: null,
+      lastError: null,
+      isUnavailable: false,
+      isBackingOff: false,
+      log: [],
+    },
+    summarize: {
+      available: true,
+      model: "gpt-4o-mini",
+      pending: 0,
+      summarised: 0,
+      written: 0,
+      skipped: 0,
+      lastRunAt: null,
+      lastError: null,
+      isUnavailable: false,
+      isBackingOff: false,
+    },
+    ...overrides,
+  };
+}
+
+/** The summarise half on its own, for the tests that are about it. */
+function summariseStatus(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    available: true,
+    model: "gpt-4o-mini",
+    pending: 0,
+    summarised: 0,
+    written: 0,
+    skipped: 0,
+    lastRunAt: null,
+    lastError: null,
+    isUnavailable: false,
+    isBackingOff: false,
+    ...overrides,
+  };
+}
+
+function json(body: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+}
+
 let settingsServer: MockSettingsServer;
+let statusServer: MockStatusServer;
 
 /**
- * The taxonomy-proposal handler for the current test, set by `stubProposer`
- * below. A mutable slot rather than a wholesale `vi.stubGlobal("fetch", ...)`
- * per test, because the same global `fetch` now also has to answer the
- * settings server above — one test replacing all of `fetch` for its one
- * proposal call used to be harmless when settings lived in IndexedDB; now it
- * would silently break every toggle in the same test.
+ * Per-route handlers, as mutable slots rather than a wholesale
+ * `vi.stubGlobal("fetch", ...)` per test: one global fetch has to answer every
+ * route at once, because the panel's toggles and its status reads are live
+ * throughout any test that also drives a run or a proposal.
  */
-let proposerHandler: ((init: RequestInit | undefined) => Response) | null = null;
+type RouteReply = () => Response | Promise<Response>;
 
-/** Installed once per test as the global `fetch`, routing by path to whichever
- *  of the two servers above the request is actually for. */
+let statusHandler: RouteReply | null;
+let runHandler: RouteReply | null;
+let proposerHandler: RouteReply | null;
+let acceptHandler: RouteReply | null;
+let acceptBodies: unknown[];
+
+/** Every request the panel made, in order, whichever route it was for. */
+let fetchLog: Array<{ url: string; method: string; headers: Record<string, string>; credentials?: string }>;
+
 function installFetchRouter(): void {
   vi.stubGlobal("fetch", async (input: string, init?: RequestInit): Promise<Response> => {
+    fetchLog.push({
+      url: input,
+      method: init?.method ?? "GET",
+      headers: (init?.headers as Record<string, string>) ?? {},
+      ...(init?.credentials !== undefined ? { credentials: init.credentials } : {}),
+    });
     if (input.endsWith("/api/ai/settings")) return settingsServer.respond(init);
-    if (input.endsWith("/api/ai/propose-taxonomy")) {
-      if (proposerHandler) return proposerHandler(init);
-      return new Response(JSON.stringify({ collections: [], tags: [] }), { status: 200 });
+    if (input.endsWith("/api/ai/status")) {
+      // The one failure a status read has: a route that does not answer. The
+      // panel has to render that as "no status to report" rather than as zeros.
+      if (statusHandler) return statusHandler();
+      return statusServer.respond();
+    }
+    if (input.endsWith("/api/ai/run")) {
+      if (runHandler) return runHandler();
+      return json({ queued: 0, summariesQueued: 0, status: status() });
+    }
+    if (input.endsWith("/api/ai/taxonomy/propose")) {
+      if (proposerHandler) return proposerHandler();
+      return json({ sampleSize: 0, collections: [], tags: [], existingCollections: [] });
+    }
+    if (input.endsWith("/api/ai/taxonomy")) {
+      acceptBodies.push(init?.body ? JSON.parse(String(init.body)) : undefined);
+      if (acceptHandler) return acceptHandler();
+      return json({ createdCollections: 0, addedTags: 0, dropped: 0, taxonomy: { acceptedAt: null, collections: [], tags: [] } });
     }
     throw new Error(`Unexpected fetch in this test: ${input}`);
   });
 }
+
+function requestsTo(suffix: string) {
+  return fetchLog.filter((request) => request.url.endsWith(suffix));
+}
+
+// -- hosts ----------------------------------------------------------------
 
 function webHost(overrides: Partial<NookHost> = {}): NookHost {
   return {
@@ -95,23 +197,12 @@ function extensionHost(overrides: Partial<NookHost> = {}): NookHost {
   };
 }
 
-/**
- * The AI section is extension-only: the classification pass runs in the
- * extension's service worker and authenticates with the bearer token the
- * cloud-sync bridge writes, which the web host never has. So every test that
- * exercises the panel needs a connected extension, not the signed-in web host.
- */
-/**
- * The AI section is extension-only: the classification pass runs in the
- * extension's service worker and authenticates with the bearer token the
- * cloud-sync bridge writes, which the web host never has. So every test that
- * exercises the panel needs a connected extension, not the signed-in web host.
- */
+const signedIn = { id: "u1", name: "Ada Lovelace", email: "ada@example.com", createdAt: "2024-01-01T00:00:00.000Z" };
+
+/** A connected extension: `user` and no `account`, which is the shape the
+ *  section is actually gated on. */
 function aiHost(overrides: Partial<NookHost> = {}): NookHost {
-  return extensionHost({
-    user: { id: "u1", name: "Ada Lovelace", email: "ada@example.com", createdAt: "2024-01-01T00:00:00.000Z" },
-    ...overrides,
-  });
+  return extensionHost({ user: signedIn, ...overrides });
 }
 
 function fakeLibrary() {
@@ -131,13 +222,19 @@ let root: Root;
 beforeEach(async () => {
   NookDB._resetForTests();
   _resetAiSettingsCacheForTests();
+  _resetAiClientForTests();
   settingsServer = new MockSettingsServer();
+  statusServer = new MockStatusServer();
+  statusHandler = null;
+  runHandler = null;
   proposerHandler = null;
+  acceptHandler = null;
+  acceptBodies = [];
+  fetchLog = [];
   installFetchRouter();
-  // A bearer session by default: every route this panel calls (settings and,
-  // for the taxonomy tests below, proposals) is session-guarded now, and most
-  // of this file is about what a signed-in host does. The couple of tests that
-  // are specifically about a missing/expired session clear it explicitly.
+  // A bearer session by default: every AI route is session-guarded, and most of
+  // this file is about what a signed-in host does. The couple of tests that are
+  // specifically about a missing session clear it explicitly.
   await saveCloudSession("test-token", "user-1");
   container = document.createElement("div");
   document.body.append(container);
@@ -149,7 +246,10 @@ afterEach(async () => {
   act(() => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
+  configureCloud({ apiUrl: "https://nook.beyler.co", auth: "bearer" });
 });
+
+// -- harness ---------------------------------------------------------------
 
 function renderDialog(host: NookHost, overrides: Partial<Parameters<typeof SettingsDialog>[0]> = {}) {
   act(() => {
@@ -171,7 +271,8 @@ function renderDialog(host: NookHost, overrides: Partial<Parameters<typeof Setti
 }
 
 /**
- * Flush the panel's async reads of `ai.settings` and `ai.cursor`.
+ * Flushes the panel's async work: the settings read, the status read, and
+ * whatever they set.
  *
  * A fixed number of macrotasks was not enough. fake-indexeddb resolves an
  * `open()` over a variable number of turns, and how many depends on what else
@@ -183,16 +284,63 @@ async function settle() {
   await act(async () => {
     for (let i = 0; i < 20; i++) {
       await new Promise((resolve) => setTimeout(resolve, 0));
-      // A resolved read means the open settled and the transaction machinery is
-      // running; the panel's own reads queued behind ours then complete on the
-      // following turns.
       await NookDB.getMeta("ai.settle-probe");
     }
   });
 }
 
+/**
+ * Runs work and a trailing flush inside one act(), because an await outside
+ * act() is a window in which a pending panel update lands unwrapped — the read
+ * would be racing the very update under test.
+ */
+async function settled<T>(work: () => Promise<T>): Promise<T> {
+  let value: T;
+  await act(async () => {
+    value = await work();
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  return value!;
+}
+
 function hasText(text: string): boolean {
   return container.textContent?.includes(text) ?? false;
+}
+
+/** How many times a phrase is on screen, for the sentences that have to appear in
+ *  two rows at once. */
+function countText(text: string): number {
+  return (container.textContent?.split(text).length ?? 1) - 1;
+}
+
+/**
+ * One settings row's own text, found by its title. The rows are untitled
+ * containers in a stack, so a claim about a single row's copy — "this row says
+ * Never, that row says six days ago" — needs this rather than the whole panel's
+ * text, where both are on screen at once.
+ */
+function rowText(title: string): string {
+  const label = rowLabel(title);
+  return label.closest("li")?.textContent ?? "";
+}
+
+/**
+ * The colour one row's status dot is painted. The two states this panel has to
+ * keep apart are a deploy away and a failure, and they are told apart by colour
+ * as much as by label, so a test asserts the colour too.
+ */
+function rowDotVariant(title: string): string | undefined {
+  // Scoped to the dot's own class: a row's divider carries a data-variant of
+  // its own, and the dot is what the panel means.
+  return rowLabel(title).closest("li")?.querySelector(".astryx-status-dot")?.getAttribute("data-variant") ?? undefined;
+}
+
+function rowLabel(title: string): HTMLElement {
+  const label = [...container.querySelectorAll<HTMLElement>('[data-type="label"]')].find(
+    (element) => element.textContent?.trim() === title,
+  );
+  if (!label) throw new Error(`No settings row titled "${title}".`);
+  return label;
 }
 
 /** The section labels currently in the dialog's navigation, in order. */
@@ -249,106 +397,6 @@ function numberInputFor(text: string): HTMLInputElement {
 }
 
 /**
- * Runs a store read and a trailing flush inside one act(), because an await
- * outside act() is a window in which a pending panel update lands unwrapped —
- * the read would be racing the very update under test.
- */
-async function settled<T>(work: () => Promise<T>): Promise<T> {
-  let value: T;
-  await act(async () => {
-    value = await work();
-    for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
-  });
-  return value!;
-}
-
-function readMeta<T>(key: string): Promise<T | undefined> {
-  return settled(() => NookDB.getMeta<T>(key));
-}
-
-function readLists(): Promise<BookmarkList[]> {
-  return settled(() => NookDB.getAllLists());
-}
-
-/** The local read-through cache `loadAiSettings`/`saveAiSettings` write to —
- *  useful for asserting the offline/signed-out fallback still works. Most
- *  tests should read `settingsServer.settings` instead: that is the account's
- *  actual stored value now, the way a real deploy would judge "did the save
- *  work". */
-const readAiSettings = () => readMeta<Record<string, unknown>>(AI_SETTINGS_KEY);
-
-/** The extension host, signed in: the only host where an AI action can run. */
-/**
- * A library with something unfiled in it, plus the session the routes need.
- * Without both, `requestProposals` stops before the network and the row under
- * test never reaches the states this file is about.
- */
-async function seedLibrary(options: { taxonomy?: boolean; tagged?: string } = {}): Promise<void> {
-  await saveCloudSession("test-token", "user-1");
-  settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoTaxonomy: options.taxonomy ?? true };
-  await NookDB.putBookmark({
-    id: "b-1",
-    source: "web",
-    url: "https://example.com/tasarim-notlari",
-    title: "Tasarım notları ve CSS grid rehberi",
-    ...(options.tagged ? { tags: [options.tagged] } : {}),
-  });
-}
-
-/** Renders the dialog on the AI section and waits for its meta reads. */
-async function renderAiPanel(host: NookHost): Promise<void> {
-  renderDialog(host);
-  clickText("AI");
-  await settle();
-}
-
-/**
- * Mounts <AiPanel/> on its own, bypassing the dialog.
- *
- * The dialog now shows the AI section for any signed-in host (extension or
- * web) and switches away the moment `host.user` goes away (see
- * `SettingsDialog`'s "re-pick the requested section" effect), so
- * `AiPanel`'s own `!host.user` guard is not reachable through it at all —
- * only a race during that switch could ever hit it for real. This helper is
- * what exercises that guard directly.
- */
-async function renderAiPanelDirectly(host: NookHost): Promise<void> {
-  act(() => {
-    root.render(
-      <NookHostProvider host={host}>
-        <ToastViewport>
-          <AiPanel />
-        </ToastViewport>
-      </NookHostProvider>,
-    );
-  });
-  await settle();
-}
-
-/**
- * Stands in for POST /api/ai/propose-taxonomy, and records that it was called.
- * Sets `proposerHandler` rather than replacing all of `fetch` (installFetchRouter
- * already did that in `beforeEach`) — settings GET/PUT still has to work in a
- * test that also calls this, since the panel's toggles are live the whole time.
- */
-function stubProposer(body: unknown, status = 200): { calls: number } {
-  const state = { calls: 0 };
-  proposerHandler = () => {
-    state.calls++;
-    return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-  };
-  return state;
-}
-
-const PROPOSALS = {
-  collections: [
-    { name: "Tasarım", why: "Design systems, type and UI craft." },
-    { name: "Sistem ve Altyapı", why: "Servers, networking and deployment." },
-  ],
-  tags: [{ name: "ücretsiz" }],
-};
-
-/**
  * A control can be off in two ways: natively disabled, or `aria-disabled`
  * because it carries a tooltip (which Astryx does so the button stays
  * focusable and the explanation stays reachable).
@@ -368,11 +416,21 @@ function buttonFor(label: string): HTMLButtonElement {
   return match;
 }
 
+/**
+ * A control's explanation, which Astryx puts in a tooltip layer rather than in
+ * the control's own text: a disabled button stays focusable so the reason is
+ * reachable by keyboard. Read through the id `aria-describedby` points at, since
+ * every tooltip'd control on screen has a layer of its own and a scan for
+ * tooltip text would find the neighbours'.
+ */
+function tooltipFor(label: string): string {
+  const describedBy = buttonFor(label).getAttribute("aria-describedby");
+  return describedBy ? (document.getElementById(describedBy)?.textContent ?? "") : "";
+}
+
 function reviewCheckboxes(): HTMLInputElement[] {
   // The two feature Switches are checkboxes underneath (role="switch"), so the
   // review lists are scoped by the container class CheckboxList documents.
-  // There are two of them now — collections and tags — so this is every
-  // proposal checkbox in review order, not one list's worth.
   return [...container.querySelectorAll<HTMLInputElement>(".astryx-checkbox-list input[type='checkbox']")];
 }
 
@@ -391,7 +449,65 @@ function reviewCheckbox(label: string): HTMLInputElement {
   return box;
 }
 
+function readMeta<T>(key: string): Promise<T | undefined> {
+  return settled(() => NookDB.getMeta<T>(key));
+}
 
+/** The local read-through cache `loadAiSettings`/`saveAiSettings` write to —
+ *  most tests should read `settingsServer.settings` instead, which is the
+ *  account's actual stored value. */
+const readAiSettings = () => readMeta<Record<string, unknown>>(AI_SETTINGS_KEY);
+
+/** Renders the dialog on the AI section and waits for its reads. */
+async function renderAiPanel(host: NookHost): Promise<void> {
+  renderDialog(host);
+  clickText("AI");
+  await settle();
+}
+
+/**
+ * Mounts <AiPanel/> on its own, bypassing the dialog.
+ *
+ * The dialog shows the AI section for any signed-in host (extension or web) and
+ * switches away the moment `host.user` goes away (see `SettingsDialog`'s
+ * "re-pick the requested section" effect), so `AiPanel`'s own `!host.user` guard
+ * is not reachable through it at all — only a race during that switch could
+ * ever hit it for real. This helper is what exercises that guard directly.
+ */
+async function renderAiPanelDirectly(host: NookHost): Promise<void> {
+  act(() => {
+    root.render(
+      <NookHostProvider host={host}>
+        <ToastViewport>
+          <AiPanel />
+        </ToastViewport>
+      </NookHostProvider>,
+    );
+  });
+  await settle();
+}
+
+/** The proposal response, as the server sends it. */
+function stubProposer(body: unknown, responseStatus = 200): { calls: number } {
+  const state = { calls: 0 };
+  proposerHandler = () => {
+    state.calls++;
+    return json(body, { status: responseStatus });
+  };
+  return state;
+}
+
+const PROPOSALS = {
+  sampleSize: 200,
+  existingCollections: [],
+  collections: [
+    { name: "Tasarım", why: "Design systems, type and UI craft." },
+    { name: "Sistem ve Altyapı", why: "Servers, networking and deployment." },
+  ],
+  tags: [{ name: "ücretsiz", why: "Free to use.", coveredBy: [] }],
+};
+
+// -- section visibility ----------------------------------------------------
 
 describe("Settings → AI — section visibility", () => {
   // Each of these renders once and reads the section list after a flush. Two
@@ -426,10 +542,11 @@ describe("Settings → AI — section visibility", () => {
     expect(hasText("File new bookmarks into collections")).toBe(true);
   });
 
-  // AI settings are an account preference (GET/PUT /api/ai/settings) now, not a
-  // per-browser one, so a signed-in web user gets the exact same toggles a
-  // signed-in extension does — see docs/ai.md, "Settings surface".
-  it("shows the section on the web host when signed in, with the toggles live", async () => {
+  // A pass is an authenticated call to Nook's server on either host, so a
+  // signed-in web user gets the exact same section a signed-in extension does —
+  // and the whole point of this change is that it is now the same section, not
+  // the same toggles in front of a disabled panel.
+  it("shows the section on the web host when signed in, with everything live", async () => {
     renderDialog(webHost());
     await settle();
     expect(sectionLabels()).toContain("AI");
@@ -438,6 +555,8 @@ describe("Settings → AI — section visibility", () => {
     await settle();
     expect(hasText("File new bookmarks into collections")).toBe(true);
     expect(hasText("Suggest new categories and tags")).toBe(true);
+    expect(hasText("Last classification run")).toBe(true);
+    expect(isDisabled(buttonFor("Run now"))).toBe(true); // off: no pass is switched on
   });
 
   it("hides the section on the web host with no session", async () => {
@@ -457,8 +576,10 @@ describe("Settings → AI — section visibility", () => {
   });
 });
 
+// -- feature toggles -------------------------------------------------------
+
 describe("Settings → AI — feature toggles", () => {
-  it("persists autoClassify to ai.settings and survives a remount", async () => {
+  it("commits autoClassify through the settings route and survives a remount", async () => {
     renderDialog(aiHost());
     clickText("AI");
     await settle();
@@ -467,10 +588,14 @@ describe("Settings → AI — feature toggles", () => {
     act(() => switchFor("File new bookmarks into collections").click());
     await settle();
 
+    // The account's row is the source of truth now, not this browser's cache.
+    expect(settingsServer.settings.autoClassify).toBe(true);
     expect((await readAiSettings())?.autoClassify).toBe(true);
+    expect(settingsServer.requests.some((request) => request.method === "PUT")).toBe(true);
     expect(switchFor("File new bookmarks into collections").checked).toBe(true);
 
-    // Remount: the value has to come back off disk, not out of component state.
+    // Remount: the value has to come back off the server, not out of component
+    // state.
     act(() => root.unmount());
     root = createRoot(container);
     renderDialog(aiHost(), { initialSection: "ai" });
@@ -479,7 +604,7 @@ describe("Settings → AI — feature toggles", () => {
     expect(switchFor("File new bookmarks into collections").checked).toBe(true);
   });
 
-  it("persists autoTaxonomy independently of autoClassify", async () => {
+  it("commits autoTaxonomy independently of autoClassify", async () => {
     renderDialog(aiHost());
     clickText("AI");
     await settle();
@@ -487,9 +612,31 @@ describe("Settings → AI — feature toggles", () => {
     act(() => switchFor("Suggest new categories and tags").click());
     await settle();
 
-    const stored = await readAiSettings();
-    expect(stored?.autoTaxonomy).toBe(true);
-    expect(stored?.autoClassify).toBe(false);
+    expect(settingsServer.settings.autoTaxonomy).toBe(true);
+    expect(settingsServer.settings.autoClassify).toBe(false);
+  });
+
+  // The toggle is the account's row like the other two, and its description is
+  // now the only place in Settings that discloses what a summary sends: the pass
+  // runs on the server, so a user flipping this is handing their page text to a
+  // third-party model and has to be able to read that on the switch.
+  it("commits autoSummarize, and says on the switch what a summary sends", async () => {
+    renderDialog(aiHost());
+    clickText("AI");
+    await settle();
+
+    expect(hasText("with the browser closed")).toBe(true);
+    expect(hasText("4,000 characters of the page")).toBe(true);
+    expect(hasText("OpenAI or Google")).toBe(true);
+    // And what the other two send, so the size of this one is legible.
+    expect(hasText("Filing and taxonomy send only titles, hostnames and a short preview")).toBe(true);
+    // The old card's admission is gone: a pass does run.
+    expect(hasText("Nothing fills them in yet")).toBe(false);
+
+    act(() => switchFor("Summarise long pages").click());
+    await settle();
+
+    expect(settingsServer.settings.autoSummarize).toBe(true);
   });
 
   it("only shows the thresholds while autoClassify is on", async () => {
@@ -506,6 +653,8 @@ describe("Settings → AI — feature toggles", () => {
     expect(hasText("Max tags")).toBe(true);
   });
 });
+
+// -- thresholds ------------------------------------------------------------
 
 describe("Settings → AI — thresholds", () => {
   beforeEach(() => {
@@ -543,9 +692,9 @@ describe("Settings → AI — thresholds", () => {
     });
     await settle();
 
-    expect((await readAiSettings())?.collectionMinConfidence).toBe(0.95);
+    expect(settingsServer.settings.collectionMinConfidence).toBe(0.95);
     // The tag threshold is its own number: one drag must not move it.
-    expect((await readAiSettings())?.tagMinNoul).toBe(0.65);
+    expect(settingsServer.settings.tagMinNoul).toBe(0.65);
   });
 
   it("commits a stepped max-tags value", async () => {
@@ -560,7 +709,7 @@ describe("Settings → AI — thresholds", () => {
     act(() => increment.click());
     await settle();
 
-    expect((await readAiSettings())?.maxTags).toBe(6);
+    expect(settingsServer.settings.maxTags).toBe(6);
   });
 
   it("still renders a stored value the loader had to clamp", async () => {
@@ -591,109 +740,503 @@ describe("Settings → AI — thresholds", () => {
   });
 });
 
+// -- status ----------------------------------------------------------------
+
 describe("Settings → AI — status", () => {
-  it("reports the runner's last run and its counters", async () => {
+  it("renders the server's run history and its counters", async () => {
     settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
-    await NookDB.setMeta(AI_CURSOR_KEY, {
-      processed: 25,
-      assigned: 18,
-      tagged: 40,
-      skipped: 7,
-      lastRunAt: "2026-09-20T10:00:00.000Z",
+    statusServer.body = status({
+      run: {
+        processed: 25,
+        assigned: 18,
+        tagged: 40,
+        skipped: 7,
+        lastRunAt: "2026-09-20T10:00:00.000Z",
+        lastError: null,
+        isUnavailable: false,
+        isBackingOff: false,
+        log: [],
+      },
     });
 
-    renderDialog(aiHost());
-    clickText("AI");
-    await settle();
+    await renderAiPanel(aiHost());
 
-    expect(hasText("Last run")).toBe(true);
-    expect(hasText("Last pass")).toBe(true);
+    expect(hasText("Last classification run")).toBe(true);
+    expect(hasText("Last classification pass")).toBe(true);
     expect(hasText("18")).toBe(true);
     expect(hasText("7")).toBe(true);
+    // Idle: available, nothing wrong, a feature on.
+    expect(hasText("Idle")).toBe(true);
   });
 
-  it("surfaces a stored lastError", async () => {
-    await NookDB.setMeta(AI_CURSOR_KEY, {
-      processed: 3,
-      assigned: 0,
-      tagged: 0,
-      skipped: 3,
-      lastError: "Nook's AI key isn't configured.",
+  it("reports off when no feature is on", async () => {
+    statusServer.body = status();
+    await renderAiPanel(aiHost());
+    expect(hasText("Off")).toBe(true);
+  });
+
+  it("surfaces the run's own lastError", async () => {
+    statusServer.body = status({
+      run: { processed: 3, assigned: 0, tagged: 0, skipped: 3, lastRunAt: null, lastError: "Nook's AI key isn't configured.", isUnavailable: false, isBackingOff: false, log: [] },
     });
 
-    renderDialog(aiHost());
-    clickText("AI");
-    await settle();
+    await renderAiPanel(aiHost());
 
     expect(hasText("Nook's AI key isn't configured.")).toBe(true);
+    expect(hasText("Needs attention")).toBe(true);
   });
 
-  it("reports the feature unavailable while the no-AI-key cool-down holds", async () => {
-    await NookDB.setMeta(AI_CURSOR_KEY, {
-      processed: 0,
-      assigned: 0,
-      tagged: 0,
-      skipped: 0,
-      unavailableUntil: new Date(Date.now() + 60 * 60_000).toISOString(),
-    });
-
-    renderDialog(aiHost());
-    clickText("AI");
-    await settle();
-
+  // The server's own flag, not a client-side cool-down window read out of
+  // IndexedDB: a missing key is a deploy away, so it is a state to report
+  // rather than an error to raise.
+  it("reports unavailable when the server has no AI key", async () => {
+    statusServer.body = status({ available: false });
+    await renderAiPanel(aiHost());
     expect(hasText("Unavailable")).toBe(true);
     expect(hasText("Nook's server has no AI key configured")).toBe(true);
   });
 
-  it("reports idle once the cool-off has passed", async () => {
-    await NookDB.setMeta(AI_CURSOR_KEY, {
-      processed: 0,
-      assigned: 0,
-      tagged: 0,
-      skipped: 0,
-      unavailableUntil: new Date(Date.now() - 60_000).toISOString(),
+  it("reports unavailable while the run summary says a cooldown is in effect", async () => {
+    statusServer.body = status({
+      run: { processed: 0, assigned: 0, tagged: 0, skipped: 0, lastRunAt: null, lastError: null, isUnavailable: true, isBackingOff: false, log: [] },
     });
-
-    renderDialog(aiHost());
-    clickText("AI");
-    await settle();
-
-    expect(hasText("Unavailable")).toBe(false);
+    await renderAiPanel(aiHost());
+    expect(hasText("Unavailable")).toBe(true);
   });
 
-  // `ai.cursor` is per-origin IndexedDB `meta` the extension's runner writes —
-  // it was never moved server-side (docs/ai.md, "Settings surface"), so the web
-  // host has none of it and must not render a confident "Never"/"0 filed" next
-  // to a feature the connected extension may actually be running.
-  it("hides run-history counters on the web host and points at the extension instead", async () => {
+  it("shows the queue depth only while there is something waiting", async () => {
     settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
-    await NookDB.setMeta(AI_CURSOR_KEY, {
-      processed: 25,
-      assigned: 18,
-      tagged: 40,
-      skipped: 7,
-      lastRunAt: "2026-09-20T10:00:00.000Z",
-    });
+    statusServer.body = status({ pending: 0 });
+    await renderAiPanel(aiHost());
+    expect(hasText("Waiting to be classified")).toBe(false);
 
-    renderDialog(webHost());
-    clickText("AI");
+    // A queue that is draining is the whole reason the panel re-reads the
+    // status while the dialog is open.
+    statusServer.body = status({ pending: 12 });
+    act(() => {
+      root.unmount();
+    });
+    root = createRoot(container);
+    await renderAiPanel(aiHost());
+    expect(hasText("Waiting to be classified")).toBe(true);
+    expect(hasText("12")).toBe(true);
+  });
+
+  it("survives a status body that is missing everything", async () => {
+    // A hand-edited or future server build must not be able to crash the
+    // settings dialog, and an unread status must not be rendered as a confident
+    // "Never" or a 0.
+    statusServer.body = {};
+    await renderAiPanel(aiHost());
+    expect(hasText("Nook's server isn't answering")).toBe(false);
+    expect(hasText("Last classification run")).toBe(true);
+    expect(hasText("Never")).toBe(true);
+  });
+
+  // A read that never landed is not a state the server reported, so it gets the
+  // "unavailable" dot with a different sentence — and both passes get it, or the
+  // panel would contradict itself two cards apart.
+  it("reports a status read that never landed the same way for both passes", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true, autoSummarize: true };
+    statusHandler = () => json({ error: "boom" }, { status: 500 });
+
+    await renderAiPanel(aiHost());
+
+    expect(countText("Nook's server isn't answering")).toBe(2);
+    // Neither "no key is configured" claim: this panel has been told nothing
+    // about either deployment.
+    expect(hasText("has no summariser configured")).toBe(false);
+    expect(hasText("no AI key configured")).toBe(false);
+    // And no confident history either — a dash where a number or a date would be.
+    expect(hasText("Never")).toBe(false);
+  });
+
+  it("re-reads the status after a run is requested", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
+    statusServer.body = status();
+    runHandler = () => json({ queued: 4, summariesQueued: 0, status: status({ pending: 4 }) });
+
+    await renderAiPanel(aiHost());
+    const before = requestsTo("/api/ai/status").length;
+
+    act(() => buttonFor("Run now").click());
     await settle();
 
-    expect(hasText("Last run")).toBe(false);
-    expect(hasText("Last pass")).toBe(false);
-    expect(hasText("18")).toBe(false);
-    expect(hasText("Run history")).toBe(true);
-    expect(hasText("open Settings → AI in the extension")).toBe(true);
+    // The enqueue response's own status is not trusted: the panel re-reads, so
+    // the row reflects the server rather than this browser's guess.
+    expect(requestsTo("/api/ai/status").length).toBeGreaterThan(before);
+    expect(requestsTo("/api/ai/status").every((request) => request.method === "GET")).toBe(true);
   });
 });
 
+// -- summaries -------------------------------------------------------------
+
+describe("Settings → AI — summaries", () => {
+  // Both counts are SQL counts over the account's records with the same length
+  // gate the pass applies, so the old local count's upper bound — and the hedge
+  // that used to have to admit it — are gone rather than reworded.
+  it("reports the server's own counts, without the upper-bound hedge", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoSummarize: true };
+    statusServer.body = status({ summarize: summariseStatus({ summarised: 241, pending: 12 }) });
+
+    await renderAiPanel(aiHost());
+
+    expect(hasText("In your library")).toBe(true);
+    expect(hasText("241")).toBe(true);
+    expect(hasText("with a summary")).toBe(true);
+    expect(hasText("12")).toBe(true);
+    expect(hasText("waiting")).toBe(true);
+    expect(hasText("some of them never will")).toBe(false);
+    // No local counting pass to wait for, so no placeholder for one.
+    expect(hasText("Counting…")).toBe(false);
+  });
+
+  // With the toggle off the queue is empty by construction — the top-up that
+  // fills it is gated on the setting — so "nothing waiting" is not a claim
+  // about the library.
+  it("says the waiting count means nothing while the toggle is off", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoSummarize: false };
+    statusServer.body = status({ summarize: summariseStatus({ summarised: 241, pending: 0 }) });
+
+    await renderAiPanel(aiHost());
+
+    expect(hasText("however many of your pages would qualify")).toBe(true);
+    expect(hasText("these are the account's real numbers")).toBe(false);
+  });
+
+  it("renders the last pass as a live relative time, and Never when there has been none", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoSummarize: true };
+    statusServer.body = status({ summarize: summariseStatus({ lastRunAt: "2026-09-20T10:00:00.000Z" }) });
+
+    await renderAiPanel(aiHost());
+    expect(rowText("Last summary pass")).toMatch(/ago/);
+    expect(rowText("Last summary pass")).not.toContain("Never");
+
+    // "Never" is now a fact about the account rather than a placeholder for a
+    // pass that could not run, and it is only printed off a real read.
+    act(() => root.unmount());
+    root = createRoot(container);
+    statusServer.body = status();
+    await renderAiPanel(aiHost());
+    expect(rowText("Last summary pass")).toContain("Never");
+  });
+
+  it("surfaces the pass's own lastError, as an error rather than a deploy note", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoSummarize: true };
+    statusServer.body = status({ summarize: summariseStatus({ lastError: "Rate limited by the provider.", lastRunAt: "2026-09-20T10:00:00.000Z" }) });
+
+    await renderAiPanel(aiHost());
+
+    expect(rowText("Last summary pass")).toContain("Rate limited by the provider.");
+    // The dot says so too, in the error colour rather than the warning one a
+    // missing deploy gets.
+    expect(rowText("Summarisation")).toContain("Needs attention");
+    expect(rowDotVariant("Summarisation")).toBe("error");
+    expect(hasText("has no summariser configured")).toBe(false);
+  });
+
+  // A missing summariser is a deploy, exactly as a missing classification key
+  // is: a state to report in the same warning colour, not an error to raise and
+  // not something to blame on the user's library.
+  it("reports a server with no summariser as unavailable, distinctly from an error", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoSummarize: true };
+    statusServer.body = status({ summarize: summariseStatus({ available: false }) });
+
+    await renderAiPanel(aiHost());
+
+    expect(rowText("Summarisation")).toContain("Unavailable");
+    expect(rowText("Summarisation")).toContain("has no summariser configured");
+    expect(rowDotVariant("Summarisation")).toBe("warning");
+    // The same words on the row a user reads to find out when a pass last ran,
+    // so the card above and the status card below cannot disagree.
+    expect(rowText("Last summary pass")).toContain("has no summariser configured");
+    expect(rowText("Summarisation")).not.toContain("Needs attention");
+  });
+
+  it("keeps the two deployments apart: no classification key, summariser fine", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true, autoSummarize: true };
+    statusServer.body = status({ available: false, summarize: summariseStatus({ summarised: 4, lastRunAt: "2026-09-20T10:00:00.000Z" }) });
+
+    await renderAiPanel(aiHost());
+
+    expect(hasText("Nook's server has no AI key configured")).toBe(true);
+    expect(rowText("Summarisation")).not.toContain("has no summariser configured");
+    // And the summarise rows carry the account's real numbers anyway.
+    expect(rowText("In your library")).toContain("4");
+    expect(rowText("Last summary pass")).toMatch(/ago/);
+  });
+
+  // The one case a four-state dot cannot carry: the pass is on, the queue is not
+  // empty, and the server is waiting out an upstream failure. Reporting "Idle"
+  // alone would be a claim about a pass that is not going to run for a while.
+  it("names the back-off window the dot cannot express", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoSummarize: true };
+    statusServer.body = status({ summarize: summariseStatus({ isBackingOff: true, pending: 6 }) });
+
+    await renderAiPanel(aiHost());
+
+    expect(rowText("Summarisation")).toContain("waiting out a temporary failure");
+    expect(rowText("Summarisation")).toContain("Idle");
+    // A server with no summariser is the bigger fact and wins the sentence.
+    statusServer.body = status({ summarize: summariseStatus({ isBackingOff: true, available: false }) });
+    act(() => root.unmount());
+    root = createRoot(container);
+    await renderAiPanel(aiHost());
+    expect(rowText("Summarisation")).toContain("has no summariser configured");
+    expect(rowText("Summarisation")).not.toContain("waiting out a temporary failure");
+  });
+
+  // `summarize` is additive on the wire. An older build omits it, which reads as
+  // a server with no summariser — true of such a build — rather than a crash or
+  // a library nobody has ever summarised.
+  it("survives a server that does not send the summarise half at all", async () => {
+    const withoutSummarize = status();
+    delete withoutSummarize.summarize;
+    statusServer.body = withoutSummarize;
+
+    await renderAiPanel(aiHost());
+
+    expect(hasText("has no summariser configured")).toBe(true);
+    expect(hasText("In your library")).toBe(true);
+    expect(hasText("Never")).toBe(true);
+  });
+});
+
+// -- run now ---------------------------------------------------------------
+
+describe("Settings → AI — run now", () => {
+  async function seedClassify(): Promise<void> {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
+    statusServer.body = status();
+  }
+
+  it("POSTs to /api/ai/run and toasts the queued count, not a pass result", async () => {
+    await seedClassify();
+    runHandler = () => json({ queued: 3, summariesQueued: 0, status: status({ pending: 3 }) });
+
+    await renderAiPanel(aiHost());
+    act(() => buttonFor("Run now").click());
+    await settle();
+
+    expect(requestsTo("/api/ai/run")).toMatchObject([{ method: "POST" }]);
+    // The call can only enqueue. A toast claiming a pass happened would be
+    // reporting numbers this browser does not have — the old one said
+    // "18 filed, 7 left alone" straight off the service worker.
+    expect(hasText("Queued 3 bookmarks to classify. Nook's server is working through them now.")).toBe(true);
+    expect(container.textContent).not.toMatch(/\d+ filed, \d+ left alone\./);
+    // Summarising is off here, so the sentence must not mention it: the route
+    // gates each half on its own toggle and queued nothing for that one.
+    expect(hasText("to summarise")).toBe(false);
+  });
+
+  // One button, two passes, and the toast has to report the depths separately:
+  // a user with both on is owed both numbers, and neither of them is a result.
+  it("reports both queue depths without claiming either pass happened", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true, autoSummarize: true };
+    statusServer.body = status();
+    runHandler = () => json({ queued: 3, summariesQueued: 8, status: status() });
+
+    await renderAiPanel(aiHost());
+    act(() => buttonFor("Run now").click());
+    await settle();
+
+    expect(hasText("Queued 3 bookmarks to classify and 8 pages to summarise.")).toBe(true);
+    expect(hasText("Nook's server is working through them now.")).toBe(true);
+    // Nothing claims work was done: the old toast reported "18 filed, 7 left
+    // alone" straight off the service worker, and this call has no such numbers.
+    expect(container.textContent).not.toMatch(/\d+ (?:filed|summarised|written)/);
+  });
+
+  it("says so when neither queue got anything", async () => {
+    await seedClassify();
+    runHandler = () => json({ queued: 0, summariesQueued: 0, status: status() });
+
+    await renderAiPanel(aiHost());
+    act(() => buttonFor("Run now").click());
+    await settle();
+
+    expect(hasText("Nothing to classify or summarise.")).toBe(true);
+  });
+
+  it("reports a request that did not complete, and stays clickable", async () => {
+    await seedClassify();
+    runHandler = () => json({ error: "nope" }, { status: 500 });
+
+    await renderAiPanel(aiHost());
+    act(() => buttonFor("Run now").click());
+    await settle();
+
+    expect(hasText("Could not queue a pass.")).toBe(true);
+    expect(isDisabled(buttonFor("Run now"))).toBe(false);
+  });
+
+  // Neither pass has a queue of its own with the toggle off, so a click could
+  // only report "nothing" — which is a reason not to offer it.
+  it("is disabled when neither toggle is on", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoTaxonomy: true };
+    let calls = 0;
+    runHandler = () => {
+      calls++;
+      return json({ queued: 1, summariesQueued: 0, status: status() });
+    };
+
+    await renderAiPanel(aiHost());
+    // Taxonomy is on and still nothing to queue: it has no pass and no queue,
+    // so it must not be what lights the button up.
+    expect(isDisabled(buttonFor("Run now"))).toBe(true);
+    // And the button says which switches would give it something to do, rather
+    // than the generic "a feature" that would now be wrong.
+    expect(tooltipFor("Run now")).toContain("Turn on “File new bookmarks” or “Summarise long pages” first.");
+
+    act(() => buttonFor("Run now").click());
+    await settle();
+    expect(calls).toBe(0);
+  });
+
+  it("queues only the pass whose toggle is on, and does not claim the other", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoSummarize: true };
+    statusServer.body = status();
+    let sent: { queued: number; summariesQueued: number } | null = null;
+    runHandler = () => {
+      sent = { queued: 0, summariesQueued: 6 };
+      return json({ queued: sent.queued, summariesQueued: sent.summariesQueued, status: status() });
+    };
+
+    await renderAiPanel(aiHost());
+    const button = buttonFor("Run now");
+    expect(isDisabled(button)).toBe(false);
+    // The tooltip names the pass it would queue: a summary-only account must not
+    // be told to expect a classification.
+    expect(tooltipFor("Run now")).toContain("the pages long enough to need a summary");
+    expect(tooltipFor("Run now")).not.toContain("classification");
+
+    act(() => button.click());
+    await settle();
+
+    expect(sent).toEqual({ queued: 0, summariesQueued: 6 });
+    expect(hasText("Queued 6 pages to summarise.")).toBe(true);
+    // A toast promising classification on a summary-only account would be a
+    // claim the route did not make.
+    expect(hasText("to classify")).toBe(false);
+  });
+
+  // There is no service worker to ask and no single-flight guard to join now,
+  // so a second click is a second call: the control has to say so on its own.
+  it("is disabled while a request is in flight, and again once it lands", async () => {
+    await seedClassify();
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    runHandler = async () => {
+      await held;
+      return json({ queued: 1, summariesQueued: 0, status: status() });
+    };
+
+    await renderAiPanel(aiHost());
+    act(() => buttonFor("Run now").click());
+    await settle();
+
+    expect(isDisabled(buttonFor("Run now"))).toBe(true);
+
+    await settled(async () => {
+      release?.();
+      await held;
+    });
+    expect(isDisabled(buttonFor("Run now"))).toBe(false);
+  });
+});
+
+// -- both hosts ------------------------------------------------------------
+
+describe("Settings → AI — the web host", () => {
+  // The behaviour change this whole workstream exists for: the run history and
+  // the run actions used to be hidden here, because `ai.cursor` was a per-origin
+  // IndexedDB record the extension's runner wrote and the web origin never had.
+  // The status is the account's now, so both hosts render the same rows.
+  it("renders the status row and the run history, and classifies on demand", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
+    statusServer.body = status({
+      run: {
+        processed: 25,
+        assigned: 18,
+        tagged: 40,
+        skipped: 7,
+        lastRunAt: "2026-09-20T10:00:00.000Z",
+        lastError: null,
+        isUnavailable: false,
+        isBackingOff: false,
+        log: [],
+      },
+    });
+    const sent: string[] = [];
+    runHandler = () => {
+      sent.push("run");
+      return json({ queued: 2, summariesQueued: 0, status: status() });
+    };
+
+    await renderAiPanel(webHost());
+
+    expect(hasText("Last classification run")).toBe(true);
+    expect(hasText("Last classification pass")).toBe(true);
+    expect(hasText("18")).toBe(true);
+    expect(hasText("7")).toBe(true);
+    // Nothing points at the extension any more.
+    expect(hasText("Run history")).toBe(false);
+    expect(hasText("background service worker")).toBe(false);
+
+    expect(isDisabled(buttonFor("Run now"))).toBe(false);
+    act(() => buttonFor("Run now").click());
+    await settle();
+    expect(sent).toEqual(["run"]);
+    expect(hasText("Queued 2 bookmarks to classify.")).toBe(true);
+  });
+  it("proposes a taxonomy on the web host too", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoTaxonomy: true };
+    const proposer = stubProposer(PROPOSALS);
+
+    await renderAiPanel(webHost());
+
+    expect(isDisabled(buttonFor("Suggest taxonomy"))).toBe(false);
+    act(() => buttonFor("Suggest taxonomy").click());
+    await settle();
+
+    expect(proposer.calls).toBe(1);
+    expect(hasText("New collections")).toBe(true);
+  });
+
+  // The web app has no bearer token — it authenticates with the session cookie
+  // the browser attaches itself, which `cloudRequestAuth()` reports as
+  // `credentials: "include"`. That branch is the reason any of this works here.
+  it("authenticates with the cookie rather than a token", async () => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoTaxonomy: true };
+    configureCloud({ apiUrl: "https://nook.beyler.co", auth: "cookie" });
+    // A cookie-mode browser has an account bound but no token stored, which is
+    // exactly what `cloudRequestAuth()` reads.
+    await NookDB.setMeta(`cloud:${CLOUD_ORIGIN}:token`, null);
+    await NookDB.setMeta(`cloud:${CLOUD_ORIGIN}:owner`, "user-1");
+    stubProposer(PROPOSALS);
+
+    await renderAiPanel(webHost());
+    act(() => buttonFor("Suggest taxonomy").click());
+    await settle();
+
+    expect(hasText("New collections")).toBe(true);
+    const [proposal] = requestsTo("/api/ai/taxonomy/propose");
+    expect(proposal.headers.Authorization).toBeUndefined();
+    expect(proposal.credentials).toBe("include");
+  });
+});
+
+// -- suggest taxonomy ------------------------------------------------------
+
 describe("Settings → AI — suggest taxonomy", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
+  beforeEach(() => {
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoTaxonomy: true };
   });
 
   it("keeps the button disabled while the feature is off", async () => {
-    await seedLibrary({ taxonomy: false });
+    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoTaxonomy: false };
     const server = stubProposer(PROPOSALS);
 
     await renderAiPanel(aiHost());
@@ -705,25 +1248,25 @@ describe("Settings → AI — suggest taxonomy", () => {
   });
 
   it("offers it once the feature is on, and says what it will do", async () => {
-    await seedLibrary();
-    stubProposer(PROPOSALS);
+    const server = stubProposer(PROPOSALS);
 
     await renderAiPanel(aiHost());
 
     expect(isDisabled(buttonFor("Suggest taxonomy"))).toBe(false);
     expect(hasText("Reads a sample of your unfiled bookmarks")).toBe(true);
+    // Nothing is asked for until the user asks for it.
+    expect(server.calls).toBe(0);
   });
 
   it("shows each proposal with a checkbox, its reason, and ticked by default", async () => {
-    await seedLibrary();
     stubProposer(PROPOSALS);
 
     await renderAiPanel(aiHost());
     act(() => buttonFor("Suggest taxonomy").click());
     await settle();
 
-    // Two collections and one tag, all ticked: "ücretsiz" is not covered by
-    // either collection, so it starts on.
+    // Two collections and one tag, all ticked: "ücretsiz" is covered by
+    // nothing, so it starts on.
     const boxes = reviewCheckboxes();
     expect(boxes).toHaveLength(3);
     expect(boxes.every((box) => box.checked)).toBe(true);
@@ -732,18 +1275,37 @@ describe("Settings → AI — suggest taxonomy", () => {
     expect(hasText("Servers, networking and deployment.")).toBe(true);
     expect(hasText("New collections")).toBe(true);
     expect(hasText("New tags")).toBe(true);
+    // The sample size is the server's count of what it read, not a client-side
+    // Bookmark[] the panel happened to hold.
+    expect(hasText("Nook read 200 of your unfiled bookmarks.")).toBe(true);
     expect(buttonFor("Add 2 collections and 1 tag")).toBeTruthy();
   });
 
-  it("starts a tag unticked when a collection above already covers it", async () => {
+  it("names the collections the account already has in the review", async () => {
+    stubProposer({ ...PROPOSALS, existingCollections: ["Reading"] });
+
+    await renderAiPanel(aiHost());
+    act(() => buttonFor("Suggest taxonomy").click());
+    await settle();
+
+    expect(hasText("You already have Reading")).toBe(true);
+  });
+
+  it("starts a tag unticked when a collection above already covers it, and re-ticks it when that collection is unticked", async () => {
     // The proposer names one theme twice — "Açık Kaynak Projeleri" and "açık
     // kaynak" — and from its side those are one observation. The tag is still
     // offered, because a collection is exclusive and a tag is not, but it
-    // should not arrive fighting its own collection by default.
-    await seedLibrary();
+    // should not arrive fighting its own collection by default. The server says
+    // which collection covers it (`coveredBy`); unticking that collection is
+    // the moment the tag is the only name left carrying the theme.
     stubProposer({
+      sampleSize: 200,
+      existingCollections: [],
       collections: [{ name: "Açık Kaynak Projeleri", why: "Open source work." }],
-      tags: [{ name: "açık kaynak" }, { name: "ücretsiz" }],
+      tags: [
+        { name: "açık kaynak", why: "Open source.", coveredBy: ["Açık Kaynak Projeleri"] },
+        { name: "ücretsiz", why: "Free to use.", coveredBy: [] },
+      ],
     });
 
     await renderAiPanel(aiHost());
@@ -755,43 +1317,21 @@ describe("Settings → AI — suggest taxonomy", () => {
     expect(reviewCheckbox("ücretsiz").checked).toBe(true);
     expect(hasText("A collection above already covers this.")).toBe(true);
     expect(buttonFor("Add 1 collection and 1 tag")).toBeTruthy();
-  });
 
-  it("stores an accepted tag so the runner can offer it before it has members", async () => {
-    await seedLibrary();
-    stubProposer(PROPOSALS);
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Suggest taxonomy").click());
-    await settle();
-    act(() => buttonFor("Add 2 collections and 1 tag").click());
+    act(() => reviewCheckbox("Açık Kaynak Projeleri").click());
     await settle();
 
-    const record = await readMeta<AcceptedTaxonomy>(AI_TAXONOMY_META_KEY);
-    // The point of the whole exercise: a tag with no members is only useful if
-    // something will offer it as a question, and `ai.taxonomy.tags` is that.
-    expect(record?.tags).toEqual([{ name: "ücretsiz" }]);
-  });
-
-  it("does not re-propose a tag the library already uses", async () => {
-    await seedLibrary({ tagged: "ücretsiz" });
-    stubProposer(PROPOSALS);
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Suggest taxonomy").click());
-    await settle();
-    act(() => buttonFor("Add 2 collections and 1 tag").click());
-    await settle();
-
-    const record = await readMeta<AcceptedTaxonomy>(AI_TAXONOMY_META_KEY);
-    expect(record?.tags ?? []).toEqual([]);
-    // The label reflects only what was actually added.
-    expect(buttonFor("Suggest taxonomy")).toBeTruthy();
+    // Live, not a one-time default: the covering collection is gone, so the tag
+    // it covered is offered in its place and the reason comes back with it.
+    expect(reviewCheckbox("Açık Kaynak Projeleri").checked).toBe(false);
+    expect(reviewCheckbox("açık kaynak").checked).toBe(true);
+    expect(hasText("A collection above already covers this.")).toBe(false);
+    expect(hasText("Open source.")).toBe(true);
+    expect(buttonFor("Add 2 tags")).toBeTruthy();
   });
 
   it("reviews a tag-only proposal without a collection list", async () => {
-    await seedLibrary();
-    stubProposer({ collections: [], tags: [{ name: "tasarım sistemleri" }] });
+    stubProposer({ sampleSize: 12, existingCollections: [], collections: [], tags: [{ name: "tasarım sistemleri", coveredBy: [] }] });
 
     await renderAiPanel(aiHost());
     act(() => buttonFor("Suggest taxonomy").click());
@@ -802,9 +1342,14 @@ describe("Settings → AI — suggest taxonomy", () => {
     expect(buttonFor("Add 1 tag")).toBeTruthy();
   });
 
-  it("creates the collections and records the taxonomy the runner reads", async () => {
-    await seedLibrary();
-    stubProposer(PROPOSALS);
+  it("accepts the ticked names through PUT /api/ai/taxonomy, and nothing else", async () => {    stubProposer(PROPOSALS);
+    acceptHandler = () =>
+      json({
+        createdCollections: 2,
+        addedTags: 1,
+        dropped: 0,
+        taxonomy: { acceptedAt: "2026-09-26T00:00:00.000Z", collections: [], tags: [{ name: "ücretsiz" }] },
+      });
 
     await renderAiPanel(aiHost());
     act(() => buttonFor("Suggest taxonomy").click());
@@ -812,25 +1357,31 @@ describe("Settings → AI — suggest taxonomy", () => {
     act(() => buttonFor("Add 2 collections and 1 tag").click());
     await settle();
 
-    const lists = await readLists();
-    // Sorted before comparing: the lists store is keyed on a generated id, so
-    // its read order is the id order, not the order the proposals came in.
-    expect(lists.map((list) => list.name).sort()).toEqual(["Sistem ve Altyapı", "Tasarım"]);
+    // Names, plus each tag's definition and nothing else. The sample, the
+    // account's live lists and the library's own tags are read from
+    // `nook_records` on the server, which is both more correct and what makes a
+    // half-finished acceptance impossible. The definition is the exception and
+    // has to travel: the proposer wrote it, this review list is the last place it
+    // exists, and it is the only evidence a member-less tag gets when it is first
+    // offered to the model.
+    expect(acceptBodies).toEqual([
+      {
+        collections: ["Tasarım", "Sistem ve Altyapı"],
+        tags: [{ name: "ücretsiz", definition: "Free to use." }],
+      },
+    ]);
+    // The client writes nothing itself any more — the server owns both writes.
+    expect(await readMeta("ai.taxonomy")).toBeUndefined();
+    expect((await settled(() => NookDB.getAllLists())).length).toBe(0);
 
-    const record = await readMeta<AcceptedTaxonomy>(AI_TAXONOMY_META_KEY);
-    expect(record?.acceptedAt).toBeTruthy();
-    expect(record?.collections.map((entry) => entry.name)).toEqual(["Tasarım", "Sistem ve Altyapı"]);
-    // Real records, not just names: each one is a collection the user can open,
-    // rename or delete, which is what the confirmation has to make clear.
-    expect(typeof lists[0]?.id).toBe("string");
     expect(hasText("Added 2 collections.")).toBe(true);
     expect(hasText("1 tag is ready to be used.")).toBe(true);
     expect(hasText("Collections are real — rename or delete them any time.")).toBe(true);
   });
 
-  it("excludes a proposal the user unticked", async () => {
-    await seedLibrary();
+  it("accepts only what is still ticked", async () => {
     stubProposer(PROPOSALS);
+    acceptHandler = () => json({ createdCollections: 1, addedTags: 1, dropped: 0, taxonomy: { acceptedAt: null, collections: [], tags: [] } });
 
     await renderAiPanel(aiHost());
     act(() => buttonFor("Suggest taxonomy").click());
@@ -845,18 +1396,14 @@ describe("Settings → AI — suggest taxonomy", () => {
     act(() => buttonFor("Add 1 collection and 1 tag").click());
     await settle();
 
-    const lists = await readLists();
-    expect(lists.map((list) => list.name)).toEqual(["Sistem ve Altyapı"]);
-    const record = await readMeta<AcceptedTaxonomy>(AI_TAXONOMY_META_KEY);
-    expect(record?.collections.map((entry) => entry.name)).toEqual(["Sistem ve Altyapı"]);
-    // The unticked collection does not take the tag down with it.
-    expect(record?.tags).toEqual([{ name: "ücretsiz" }]);
+    expect(acceptBodies).toEqual([
+      { collections: ["Sistem ve Altyapı"], tags: [{ name: "ücretsiz", definition: "Free to use." }] },
+    ]);
   });
 
-  it("leaves a collection the user already has alone, and says so", async () => {
-    await seedLibrary();
-    await NookDB.putList({ id: "l1", name: "Tasarım" });
+  it("reports a name the account already had as left alone", async () => {
     stubProposer(PROPOSALS);
+    acceptHandler = () => json({ createdCollections: 1, addedTags: 1, dropped: 1, taxonomy: { acceptedAt: null, collections: [], tags: [] } });
 
     await renderAiPanel(aiHost());
     act(() => buttonFor("Suggest taxonomy").click());
@@ -864,16 +1411,11 @@ describe("Settings → AI — suggest taxonomy", () => {
     act(() => buttonFor("Add 2 collections and 1 tag").click());
     await settle();
 
-    const lists = await readLists();
-    expect(lists.filter((list) => list.name === "Tasarım")).toHaveLength(1);
-    expect(lists).toHaveLength(2);
     expect(hasText("Added 1 collection.")).toBe(true);
     expect(hasText("One you already had was left as it is.")).toBe(true);
-    expect(hasText("1 tag is ready to be used.")).toBe(true);
   });
 
   it("reports a server with no AI key as unconfigured, not as a failure", async () => {
-    await seedLibrary();
     stubProposer({ error: "AI classification is not configured" }, 503);
 
     await renderAiPanel(aiHost());
@@ -889,8 +1431,9 @@ describe("Settings → AI — suggest taxonomy", () => {
   });
 
   it("treats an empty proposal list as a legitimate answer", async () => {
-    await seedLibrary();
-    stubProposer({ collections: [], tags: [] });
+    // A real sample behind the empty answer: the model declined, or no proposer
+    // is configured. Both are answers, neither is a failure.
+    stubProposer({ sampleSize: 200, existingCollections: [], collections: [], tags: [] });
 
     await renderAiPanel(aiHost());
     act(() => buttonFor("Suggest taxonomy").click());
@@ -898,24 +1441,30 @@ describe("Settings → AI — suggest taxonomy", () => {
 
     expect(hasText("Nothing new worth suggesting.")).toBe(true);
     expect(reviewCheckboxes()).toHaveLength(0);
-    expect(await readLists()).toHaveLength(0);
+    expect(acceptBodies).toEqual([]);
+  });
+
+  it("says so when the server had nothing unfiled to read", async () => {
+    stubProposer({ sampleSize: 0, existingCollections: [], collections: [], tags: [] });
+
+    await renderAiPanel(aiHost());
+    act(() => buttonFor("Suggest taxonomy").click());
+    await settle();
+
+    expect(hasText("There is nothing unfiled to read yet.")).toBe(true);
+    expect(hasText("Nothing new worth suggesting.")).toBe(false);
+    expect(reviewCheckboxes()).toHaveLength(0);
   });
 
   it("asks for a session before it reads anything", async () => {
-    // The global beforeEach signs this browser in by default (most of this
-    // file needs that for the settings routes); this test is specifically
-    // about there being no session, so it clears the token cloudSession()
-    // reads. The panel still has yesterday's cached settings locally
-    // (autoTaxonomy: true), which is exactly the point: the toggle looking on
-    // is not what gates the request — the session is.
-    await NookDB.setMeta("cloud:https://nook.beyler.co:token", null);
+    // The global beforeEach signs this browser in by default (most of this file
+    // needs that for the AI routes); this test is specifically about there being
+    // no session, so it clears the token cloudRequestAuth() reads. The panel
+    // still has yesterday's cached settings locally (autoTaxonomy: true), which
+    // is exactly the point: the toggle looking on is not what gates the request
+    // — the session is.
+    await NookDB.setMeta(`cloud:${CLOUD_ORIGIN}:token`, null);
     await NookDB.setMeta(AI_SETTINGS_KEY, { ...DEFAULT_AI_SETTINGS, autoTaxonomy: true });
-    await NookDB.putBookmark({
-      id: "b-1",
-      source: "web",
-      url: "https://example.com/x",
-      title: "Tasarım notları ve CSS grid rehberi",
-    });
     const server = stubProposer(PROPOSALS);
 
     await renderAiPanel(aiHost());
@@ -925,161 +1474,5 @@ describe("Settings → AI — suggest taxonomy", () => {
 
     expect(server.calls).toBe(0);
     expect(hasText("Your session has expired.")).toBe(true);
-  });
-
-  it("says where it runs when the host has no service worker", async () => {
-    await seedLibrary();
-    const server = stubProposer(PROPOSALS);
-
-    await renderAiPanel(webHost());
-
-    expect(isDisabled(buttonFor("Suggest taxonomy"))).toBe(true);
-    // The toggle is the account's and is on (seedLibrary turned autoTaxonomy
-    // on server-side); the action is what cannot run here, and the button has
-    // to say so rather than look broken.
-    act(() => buttonFor("Suggest taxonomy").click());
-    await settle();
-    expect(server.calls).toBe(0);
-  });
-});
-
-describe("Settings → AI — classify now", () => {
-  /**
-   * The service worker's end of the channel. The handler is the real one in
-   * entrypoints/background/index.ts — this only stands in for the round trip,
-   * because a Node test cannot wake a service worker.
-   */
-  function stubBackground(reply: unknown, lastError?: string) {
-    const sent: Array<{ type: string }> = [];
-    vi.stubGlobal("chrome", {
-      runtime: {
-        lastError: lastError ? { message: lastError } : undefined,
-        sendMessage: (message: { type: string }, callback: (response: unknown) => void) => {
-          sent.push(message);
-          callback(reply);
-        },
-      },
-    });
-    return sent;
-  }
-
-  /** A background that holds the reply until the test releases it. */
-  function deferBackground() {
-    const sent: Array<{ type: string }> = [];
-    let pending: ((response: unknown) => void) | undefined;
-    vi.stubGlobal("chrome", {
-      runtime: {
-        lastError: undefined,
-        sendMessage: (message: { type: string }, callback: (response: unknown) => void) => {
-          sent.push(message);
-          pending = callback;
-        },
-      },
-    });
-    return {
-      sent,
-      release(response: unknown) {
-        pending?.(response);
-      },
-    };
-  }
-
-  async function seedClassify(): Promise<void> {
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS, autoClassify: true };
-  }
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("asks the service worker for a pass and reports what it did", async () => {
-    await seedClassify();
-    const sent = stubBackground({ processed: 25, assigned: 18, tagged: 40, skipped: 7 });
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Classify now").click());
-    await settle();
-
-    expect(sent).toEqual([{ type: "CLASSIFY_NOW" }]);
-    expect(hasText("18 filed, 7 left alone.")).toBe(true);
-  });
-
-  it("says so when a pass had nothing to do", async () => {
-    await seedClassify();
-    stubBackground({ processed: 0, assigned: 0, tagged: 0, skipped: 0 });
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Classify now").click());
-    await settle();
-
-    expect(hasText("Nothing to classify.")).toBe(true);
-  });
-
-  it("surfaces a pass that stopped early, rather than claiming it worked", async () => {
-    await seedClassify();
-    stubBackground({ processed: 0, assigned: 0, tagged: 0, skipped: 0, error: "Signed out — sign in again to resume classifying." });
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Classify now").click());
-    await settle();
-
-    expect(hasText("Signed out — sign in again to resume classifying.")).toBe(true);
-    expect(hasText("Nothing to classify.")).toBe(false);
-  });
-
-  it("reports a service worker that did not answer, and stays clickable", async () => {
-    await seedClassify();
-    const sent = stubBackground(undefined, "Could not establish connection.");
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Classify now").click());
-    await settle();
-
-    expect(sent).toEqual([{ type: "CLASSIFY_NOW" }]);
-    // The chrome-level detail goes to the console; the panel says what it
-    // could not do, the way "Could not start a sync." does in SyncPanel.
-    expect(hasText("Could not start a classification pass.")).toBe(true);
-    expect(isDisabled(buttonFor("Classify now"))).toBe(false);
-  });
-
-  it("is disabled until a feature is on", async () => {
-    settingsServer.settings = { ...DEFAULT_AI_SETTINGS };
-    const sent = stubBackground({ processed: 0, assigned: 0, tagged: 0, skipped: 0 });
-
-    await renderAiPanel(aiHost());
-    expect(isDisabled(buttonFor("Classify now"))).toBe(true);
-
-    act(() => buttonFor("Classify now").click());
-    await settle();
-    expect(sent).toEqual([]);
-  });
-
-  it("is disabled while a pass is in flight, and again once it lands", async () => {
-    await seedClassify();
-    const { release } = deferBackground();
-
-    await renderAiPanel(aiHost());
-    act(() => buttonFor("Classify now").click());
-    await settle();
-
-    // A second click while the first pass is still running must not invite
-    // another. The runner would join the run in flight rather than bill it
-    // twice, but the control has to say so.
-    expect(isDisabled(buttonFor("Classify now"))).toBe(true);
-
-    await settled(async () => release({ processed: 1, assigned: 1, tagged: 0, skipped: 0 }));
-    expect(isDisabled(buttonFor("Classify now"))).toBe(false);
-  });
-
-  it("is disabled on a host with no service worker to ask", async () => {
-    await seedClassify();
-    const sent = stubBackground({ processed: 1, assigned: 1, tagged: 0, skipped: 0 });
-
-    await renderAiPanel(webHost());
-
-    expect(isDisabled(buttonFor("Classify now"))).toBe(true);
-    act(() => buttonFor("Classify now").click());
-    await settle();
-    expect(sent).toEqual([]);
   });
 });

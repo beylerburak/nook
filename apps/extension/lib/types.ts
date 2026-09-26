@@ -1,7 +1,8 @@
 /**
  * Provenance of an automated decision, so the UI can tell the model's work
- * apart from the user's own. Written to `ai` by lib/ai-classify.ts; the data
- * it describes lives in `listId`/`listName`/`tags`, not here.
+ * apart from the user's own. Written to `ai` by Nook's server when it
+ * classifies a record; the data it describes lives in
+ * `listId`/`listName`/`tags`, not here.
  */
 export interface AiAttribution {
   /** Model version that made the decision, e.g. "jev-1.13.0". */
@@ -12,7 +13,7 @@ export interface AiAttribution {
   collectionConfidence?: number;
   /** noul score per applied tag name. Absent when no tag was added. */
   tagConfidence?: Record<string, number>;
-  /** ISO date the taxonomy in force was accepted (stamped by the runner, which owns `ai.taxonomy`). */
+  /** ISO date the taxonomy in force was accepted (stamped server-side, next to the accepted taxonomy itself). */
   taxonomyAt?: string;
 }
 
@@ -41,11 +42,27 @@ export interface Bookmark {
    * newest summary of this bookmark wins", and it is the whole reason for the
    * placement.
    *
-   * The model's words, not the user's. The server reads records and returns
-   * summaries but never writes this field (apps/api/src/summarize.ts): it goes
-   * through the normal sync path so every device gets it and the client owns
-   * the write. `null` and `""` both mean "no summary", so a cleared one is
-   * summarised again rather than merged as a permanent blank.
+   * The model's words, not the user's, and the server's to write: the
+   * summarisation pass runs there (apps/api/src/summarize.ts), stamps this
+   * field and bumps the record's version, so the change reaches every device on
+   * the ordinary sync pull and the server is simply the newest side of the merge
+   * above. It is the same write a classification already makes, for the same
+   * reason: the pass runs where the library is.
+   *
+   * `null` and `""` both mean "no summary", so a cleared one is summarised
+   * again on the next pass rather than merged as a permanent blank. That is
+   * the shipped semantic and it is deliberate: the field has to be clearable,
+   * and a pass that ran unattended with no way to say "not this one" is a
+   * feature nobody would leave switched on.
+   *
+   * The work list that decides what gets summarised is not the merge, and the
+   * two are easy to confuse. It hashes the *source* — title, description and
+   * note — and never this field, so a summary the server itself wrote can never
+   * present itself as a change in the text and suppress the next attempt. What
+   * keeps a cleared record eligible is that writing a summary deletes the
+   * attempt row the pass left behind (apps/api/src/ai-summary.ts); keeping that
+   * row would freeze the record for the retry window instead. See
+   * `docs/retrieval.md`, "Summaries".
    */
   summary?: string | null;
   note?: string;
@@ -66,8 +83,9 @@ export interface Bookmark {
    * AI provenance for the `listId`/`tags` above - who filed this, when, and how
    * confident they were. The real data is written to `listId`/`listName`/`tags`;
    * this is only the receipt, and `null` counts as "never classified" so that
-   * `ai == null` works as the once-only marker (lib/ai-classify.ts). The open
-   * index signature carries it through storage and sync with no schema change.
+   * `ai == null` is the once-only marker the server's eligibility rule reads.
+   * The open index signature carries it through storage and sync with no schema
+   * change.
    */
   ai?: AiAttribution | null;
   category?: string | null;
@@ -155,8 +173,6 @@ export type PopupToBackgroundMessage =
   | { type: "SAVE_ACTIVE_PAGE" }
   | { type: "REMOVE_BOOKMARK"; id: string }
   | { type: "UPDATE_BOOKMARK"; id: string; patch: BookmarkPatch }
-  // Runs one AI classification pass now, and replies with the AiRunResult.
-  | { type: "CLASSIFY_NOW" }
   // best-effort server sign-out, clear token, stop alarm; library untouched
   | { type: "CLOUD_SIGN_OUT" }
   // clear token + owner + sync state for THIS server, stop alarm; library untouched

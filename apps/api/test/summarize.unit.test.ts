@@ -12,7 +12,6 @@ import {
   buildSummaryPrompt,
   cleanSummary,
   isWorthSummarising,
-  parseSummarizeRequest,
   planSummaries,
   summarizeAvailability,
   summarizeRecords,
@@ -355,25 +354,6 @@ describe("planSummaries", () => {
     expect(summarySkipReason(articleRecord("a", { summary: "x" }))).toBe("already-summarised");
     expect(summarySkipReason(record({ description: TRUNCATED }, "t"))).toBe("too-short");
     expect(summarySkipReason({ ...articleRecord("d"), deletedAt: "2026-09-01T00:00:00.000Z" })).toBe("deleted");
-  });
-});
-
-// -- parseSummarizeRequest --
-
-describe("parseSummarizeRequest", () => {
-  it("accepts a list of ids and drops repeats", () => {
-    expect(parseSummarizeRequest({ ids: ["a", "b", "a"] })).toEqual({ ids: ["a", "b"] });
-  });
-
-  it("rejects what a 400 is for, and keeps the message safe to hand back", () => {
-    for (const body of [null, "ids", [], {}, { ids: "a" }, { ids: [1] }, { ids: [""] }, { ids: [{}] }]) {
-      expect(() => parseSummarizeRequest(body)).toThrow();
-    }
-    // 50 is the cap, so 51 is a client bug and 50 is not.
-    expect(() => parseSummarizeRequest({ ids: Array.from({ length: 51 }, (_, i) => `b${i}`) })).toThrow(
-      "Too many ids",
-    );
-    expect(parseSummarizeRequest({ ids: Array.from({ length: 50 }, (_, i) => `b${i}`) }).ids).toHaveLength(50);
   });
 });
 

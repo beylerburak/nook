@@ -9,41 +9,103 @@ toggled in Settings → AI.
 | **File into collections** | Every new bookmark is placed into one of your existing collections, or left alone. |
 | **Grow the taxonomy** | Suggests brand-new collection names and a tag vocabulary from your library, then files into those. |
 
-Both are off by default. Classification is a background pass; it never blocks
-saving a bookmark.
+Both are off by default. Classification is a background pass on Nook's server;
+it never blocks saving a bookmark, and it keeps going with the browser closed.
 
 ## How the pieces fit
 
+The pass used to run in the extension's MV3 service worker. It runs in `apps/api`
+now, and no decision changed on the way over: the model, the calibration, the
+thresholds and every measurement below are exactly what they were. What is new is
+the machinery around them — a durable queue, a durable memory of what has already
+been paid for, and a server-side writer that has to survive a concurrent sync.
+`docs/ai-cloud-contract.md` is the seam.
+
 ```
-extension + web (AiPanel.tsx is literally the same component on both hosts)
-  lib/ai-settings.ts    toggles + thresholds: GET/PUT /api/ai/settings, IndexedDB
-                         `meta` key `ai.settings` as a read-through cache only
-  src/app/settings-dialog/AiPanel.tsx    the whole settings surface
+apps/api  — the feature
+  src/ai-jobs.ts      the pass: enqueue, claim, batch, write, the tick, and the
+                      server half of the taxonomy routes
+  src/ai-summary.ts   the summarisation pass: the work list, the attempt
+                      memory, the batch, the writes — the same tick, on the
+                      same lease table, through the same write path
+  src/ai-classify.ts  PURE: build the request, apply a decision, build the patch
+  src/ai-taxonomy.ts  PURE: sampling, proposals, the accepted-taxonomy record,
+                      planning the BookmarkList rows
+  src/ai-store.ts     the account rows: run state + decision log for BOTH passes,
+                      the accepted taxonomy, the leases, readAiStatus
+  src/ai.ts           the Jev call and the proposer calls, the thresholds, the
+                      pure decision helpers
+  src/ai-settings.ts  the settings row: normalize, validate a PATCH, upsert
+  src/server.ts       the routes, session-guarded
+  src/sync.ts         enqueueClassification, beside enqueueIndexing
 
-extension only (the only host where a pass can run)
-  lib/ai-classify.ts    PURE: pick candidates, apply a decision, build the patch
-  lib/ai-runner.ts      queue: batches, concurrency, backoff, alarm + cooldown
-  lib/ai-taxonomy.ts    sampling, proposals, creating BookmarkList records
-  entrypoints/background/index.ts        the 5-minute alarm, and "Classify now"
-        |
-        |  GET/PUT /api/ai/settings       toggles + thresholds (both hosts)
-        |  POST /api/ai/classify          one bookmark  -> one decision
-        |  POST /api/ai/propose-taxonomy  library sample -> new taxonomy
-        v
-apps/api (the only place with secrets)
-  src/ai-settings.ts    the settings row: normalize, validate a PATCH, upsert
-  src/ai.ts             Jev + proposer calls, thresholds, pure decision helpers
-  src/server.ts         the four routes, session-guarded
+  the routes, all session-guarded:
+        GET  /api/ai/settings           toggles + thresholds, one account row
+        PUT  /api/ai/settings
+        POST /api/ai/classify           one bookmark -> one decision
+        POST /api/ai/propose-taxonomy   a library sample -> new taxonomy
+        --- the four the pass moved in on ---
+        GET  /api/ai/status             availability, settings, queue depth,
+                                         accepted taxonomy, run history, and
+                                         the summarisation half of all of it
+        POST /api/ai/run                queue the account's eligible
+                                         bookmarks and wake the worker;
+                                         returns both queue depths
+        POST /api/ai/taxonomy/propose   the server samples its own library
+        PUT  /api/ai/taxonomy           accept reviewed names: create the
+                                         lists, store the taxonomy
+
+  the tables, all one row per account unless noted:
+        nook_ai_jobs      the classification queue
+        nook_ai_state     run history for BOTH passes, and two lease columns
+        nook_ai_taxonomy  the accepted taxonomy
+        nook_ai_decided   every id a decision has been bought for
+        nook_ai_summaries every id a summary has been *attempted* on and got
+                          nothing — see "The job queue"
 ```
 
-`lib/ai-classify.ts` and `lib/ai-taxonomy.ts` are deliberately free of `fetch`,
-IndexedDB and `chrome.*` — every decision they make is unit-testable with no
-browser. `ai-runner.ts` and the impure half of `ai-taxonomy.ts` take their
-`fetch` and clock as injectable dependencies for the same reason.
+Summarisation is the second pass through this machinery, and it is shared rather
+than parallel on purpose. `nook_ai_state` holds both run records — the
+classification counters and a `summarize` sub-record beside them, because
+`unavailableUntil` and `backoffUntil` mean the same two things for both passes.
+The per-minute tick drives both, classification first and summarisation after it,
+sequentially so the instantaneous rate against one proposer stays bounded.
+`applyServerWrite` guards both writes, on the same advisory lock a sync takes.
+And there are **two lease columns**, `lease_until` and `summary_lease_until`,
+because one shared lease at a 60-second tick would have the two passes starving
+each other for it — they write different fields, and the advisory lock already
+serialises the writes that could actually conflict.
 
-Writes go through `NookDB.updateBookmark(id, patch)`, which stamps `updatedAt`
-and fires `notifyChange()`. Cloud sync and cross-context refresh then take care
-of themselves — there is no separate sync path for AI.
+The extension's remaining jobs are bookmark capture, toasts, and sync with the
+server. **Classification is not one of them** — there is no runner, no alarm, no
+cursor and no `chrome.*` call anywhere in the feature, and the service worker no
+longer knows it exists. What it has is `lib/ai-client.ts`: four authenticated
+HTTP calls, in the same shape as its sibling `lib/ai-settings.ts`, and a panel
+that is the same component on both hosts. Summarisation is the same now, which it
+was not a release ago: it has its own pass file on the server and no code in the
+extension at all.
+
+The four new routes, in one line each:
+
+| route | what it is for |
+| --- | --- |
+| `GET /api/ai/status` | one read for the whole status surface, so the panel cannot render a state stitched from three endpoints |
+| `POST /api/ai/run` | "Run now": top both queues up and wake the worker, reporting each depth separately. It does **not** run a pass inline — 25 calls take tens of seconds, which is not something to hold an HTTP request open for |
+| `POST /api/ai/taxonomy/propose` | propose collections and tags. The server samples its own library, so the client sends no sample at all |
+| `PUT /api/ai/taxonomy` | accept the names that were kept: real `BookmarkList` records *and* the accepted taxonomy, in one transaction |
+
+`ai-classify.ts` and `ai-taxonomy.ts` are still pure — free of `fetch`, of `pg`
+and of a clock they do not inject — and now that they are the only two files in
+the graph that decide what lands on a real user's record, that is the property
+worth keeping rather than the reason it was originally drawn. Not one decision
+changed on the way over: the fields `toClassifyRequest` reads are exactly the
+ones `POST /api/sync` has always carried, so the server builds the same request
+out of `nook_records` with nothing re-sent at save time.
+
+A decision is written to `nook_records` and reaches every device through the
+ordinary sync pull, and a summary is written through the same transaction and
+travels the same way. See "The write path" below for why that is the delicate
+part and "Merge semantics" for why it needed no new merge rule.
 
 ## The model
 
@@ -83,7 +145,10 @@ question does not need:
 `summary` is the truncated `shortDescription`. The full `description` is never
 sent. Bookmarks whose state carries **less than 40 characters** of text skip the
 request entirely: media-only bookmarks reduce to a bare emoji or an author
-handle, and 39 of a real 1,061-bookmark library fall under that line.
+handle, and 39 of a real 1,061-bookmark library fall under that line. The floor
+is a per-bookmark cost guard, and where it is applied matters a great deal more
+than it looks — see the 2026-09-27 entry in "Progress notes" for how the
+extension's runner got this wrong.
 
 Then, in **one** request:
 
@@ -147,7 +212,267 @@ bookmarks.filter((b) => b.ai == null && b.listId == null)
 ```
 
 `listId == null` means a manual assignment is never overwritten. `ai == null`
-means each bookmark is billed at most once, ever.
+means each bookmark is billed at most once, ever — the record itself is the
+memory for a pass that acted, and `nook_ai_decided` is the memory for one that
+deliberately filed nothing and so left no mark at all. See "The job queue".
+
+The rule is evaluated twice, and the second time is the one that matters: the
+pass selects candidates from a read taken at the start, and the write path
+re-checks it on the row it re-reads inside the lock. See "The write path".
+
+## The job queue
+
+This is the substance of the move. The old runner had a queue too, but it was a
+capped list of ids in a browser's IndexedDB and it had an alarm to drain it.
+
+### Why a queue at all
+
+A bookmark is queued when it syncs. `POST /api/sync` is where the server already
+sees every bookmark, which is the same reason the client needed no code at all to
+get an embedding index — see "How the index gets built" in
+[retrieval.md](./retrieval.md). The argument is that one layer over: a save is
+queued for classification the moment it lands, on any device, with nothing to
+install and nothing to configure. The extension needed an alarm and a cursor for
+exactly this, and still missed bookmarks saved while its worker was asleep.
+
+The enqueue is one statement, and it carries the `autoClassify` guard *inside*
+the INSERT rather than reading the setting first — a sync should not pay an extra
+round trip for one boolean, and the decision has to be the newest one anyway: a
+user who turns the toggle off should stop accumulating queue rows immediately,
+not after the next tick.
+
+It is also fire-and-forget, detached after the COMMIT, for the three reasons
+`syncRecords` already gives its indexing hook: a change that is not yet queued is
+still a saved change, the advisory lock has already been released by the COMMIT,
+and a throw here would fall into the sync's catch and ROLLBACK something already
+committed — telling the client it conflicted with its own previous attempt,
+forever. The consequence is the good one: a lost insert costs a delay, not a
+bookmark, because the top-up refills.
+
+### The claim is the deletion
+
+`claimJobs` is a single `DELETE ... RETURNING`. **The row *is* the claim** — no
+`done` column, no per-job lease, no attempt counter, and no second statement to
+mark anything.
+
+That is not a simplification, it is the recovery mechanism. A process that dies
+between the claim and the write has left the bookmark still eligible, still
+absent from `nook_ai_decided`, and therefore re-enqueued by the next top-up, so
+the work comes back by itself and nothing has to be told about the crash. The
+absence of a "failed" state is deliberate: a row with `attempts` and a `state`
+column is the design that *loses* work, because a bookmark marked failed and
+never retried is one the model was never asked about and the queue will never ask
+about again.
+
+This is the same argument `reconcileIndex` makes about the embedding queue
+dropping jobs, and it is the same reason `nook_embeddings` has no foreign key to
+`nook_records`: a derived row may legitimately lag the authoritative data, and
+the reconciliation pass is the backstop.
+
+### `nook_ai_decided`, and the money it saves
+
+The old runner kept "we already bought a decision for this" in `ai.cursor`, as a
+list of ids capped at **2,000**. The cap existed for a real reason: a decision
+that assigned nothing writes nothing to the record, so `ai == null` is not
+memory of it, and the id list was the only record that the answer existed. The
+leak was in the cap. Past 2,000 the oldest ids were dropped, and because
+candidates are taken newest-first, those came back only once everything newer was
+resolved — so on a library of a few thousand undecided bookmarks, every one of
+the oldest was re-bought forever, continuously, because nothing about them ever
+changed. That is not a rounding error on the cost figure; it is a permanent
+re-bill of a fixed slice of the library, and the document used to leave it
+implicit.
+
+Server-side the memory is a table, `nook_ai_decided`, unbounded and durable at
+roughly 60 bytes a row. The leak is closed because the thing that leaked was the
+cap, not the idea.
+
+It is deliberately **not** a field on `nook_records`. Writing one would stamp
+`updatedAt` and take `nextval('nook_sync_version_seq')`, which is a version bump
+and a no-op change pushed through `/api/sync` to every device, resurfacing the
+bookmark in the dashboard as freshly edited. That is exactly the harm the capped
+cursor existed to avoid, and it would have happened 2,000 times instead of once.
+Nothing in the decided table is synced, and nothing in it is a fact about the
+bookmark — it is a fact about our own spending.
+
+An id is remembered whether or not the decision filed anything, and an id the
+pool never got to (because the batch stopped first) is deliberately *not*
+remembered: that bookmark still deserves its one classification.
+
+The price of not capping it is a table that only ever grows, so `pruneDecided`
+drops the rows whose bookmark is gone or tombstoned — a row nothing will ever
+read again. It runs on the reconciler's 15-minute cadence, not on every tick,
+because a minute is far too often to answer a question that is not urgent.
+
+### `nook_ai_summaries`, and why it is not `nook_ai_decided`
+
+Summarisation has no queue and a different kind of memory. There is nothing to
+insert: a candidate is a candidate at every moment, so the pass reads the next 25
+off `nook_records` newest-first and takes them, and what it keeps is
+`nook_ai_summaries` — one row per bookmark that was **attempted and produced
+nothing**, carrying a sha256 of the prompt's own text, when the attempt happened,
+and which of two retry windows applies. **The rule itself, the hash and the
+deletion semantics are in [retrieval.md](./retrieval.md)'s "Summaries" section**;
+this is only the part that belongs next to `nook_ai_decided`.
+
+It cannot be that table. `nook_ai_decided` is a **permanent** "we already bought
+a decision for this" marker and permanence is exactly right there, because a
+classification may only be bought once ever. A summary is a field the user is
+allowed to clear, so a marker that outlived the summary would make it
+undeletable in the only sense that matters: the user clears it and it never comes
+back. Re-billing a cleared summary is a fraction of a cent; an un-clearable
+summary is a bug that looks like a haunting. So a written summary **deletes** its
+row, and only a decline or a failure leaves one.
+
+Cost, since this is the document that carries the money: at `gpt-4o-mini` a
+summary is **≈$0.00026 a bookmark** against classification's **$0.000062** — about
+4×, bounded by the library rather than by the tick, and **≈$0.43** for a full pass
+over 5,000 bookmarks of which about a third clear the gate. There is deliberately
+no spend cap, for the reason embeddings and classification have none either. And
+it is the first feature here that sends **page text** to a third party — up to
+4,000 characters of the description, the title and the note, where taxonomy sends
+titles and hostnames and classification sends titles, a 300-character preview,
+notes, hostnames and an author handle. The toggle says so on its own face, which
+is the only place it is worth saying.
+
+### The rate, and why a 12× faster tick is not a cost problem
+
+25 bookmarks per minute, against the extension's 25 per 5-minute alarm.
+
+The total is unchanged, because cost is per bookmark and not per tick. A
+classification is a measured **1,466 input tokens** at `$42` per billion, and
+5,000 bookmarks is **$0.31**, once. A 1,000-bookmark library costs the same
+~$0.06 whether it clears in **roughly 40 minutes** or in **roughly 3.5 hours**.
+It just feels like a feature instead of a background chore.
+
+The reason the faster tick is safe rather than reckless is `nook_ai_decided`.
+With the old capped cursor, 12 passes an hour would have multiplied a permanent
+re-billing leak by 12.
+
+### The tick and its ceiling
+
+`AI_TICK_INTERVAL_MS` is 60 seconds, overridable with `NOOK_AI_TICK_MS` and
+floored at a second so a typo cannot turn the worker into a spin loop. The first
+run is delayed 30 seconds, because the container may still be applying
+`schema.sql` and a tick that reads before `nook_ai_jobs` exists only logs a
+failure — the same reason the embedding reconciler waits 30 seconds for its
+first run.
+
+Each tick considers at most 50 accounts, ordered by how much work each has, and
+works them **one at a time**. That is a bound on how long one tick may take, not
+on the request rate: the instantaneous rate is `CLASSIFY_CONCURRENCY` (4,
+unchanged) however many accounts are waiting, and that is the number the
+upstream's 1,200 requests/minute limit is about. Concurrency across accounts
+would buy a few minutes on a 50-account deployment and cost a rate limit.
+
+Every 15 minutes the same tick reconciles instead of topping up: a larger top-up
+(500) plus the prune. Large enough to be a backstop rather than a refill — a
+library that has been offline for a week is filled in a few ticks instead of
+hundreds. The reconciler's exclusions are SQL and are the same ones the ordinary
+top-up runs on, deliberately: a reconciler that read the library and planned in
+JS would be a second implementation of a rule that has to be identical to the
+first, and the two would drift.
+
+A pass is gated, in order: the lease, `autoClassify`, the cooldowns, and then —
+before anything expensive happens — an empty queue. An empty queue returns
+*before* the library is read, because the option builders need the whole library
+and once a minute forever is a lot of ticks with nothing in them.
+
+The cooldowns are two windows, not three, and both are conditions of the
+*deployment and the upstream*: no `TYPESAFE_API_KEY` gets a quiet hour, and a
+rate limit or an unreachable model gets an exponential backoff from 60 seconds to
+30 minutes. The extension's third window — a 30-minute park after a 401 — is
+gone, because it was a client and a 401 meant only a re-sign-in in that browser
+could fix it. A pass here holds no session and cannot be signed out.
+
+### The lease
+
+Two api replicas must not run a pass for one account. `acquireRunLease` is one
+conditional upsert on `nook_ai_state.lease_until`, released in a `finally` so a
+failed pass does not park the feature for the length of the lease.
+`NOOK_AI_LEASE_SECONDS` sets it, 120 by default: enormous next to a real pass (25
+requests at concurrency 4, a few seconds of work) and small next to an outage.
+
+What the lease protects is the expensive half — the duplicated library read, the
+duplicated option build, and two passes fighting over `nook_ai_state`. It is not
+what prevents a double charge; the claim in `nook_ai_jobs` is. A lease that
+expires early costs a second pass finding an empty queue and a slightly stale
+counter, not a second bill.
+
+It also keeps the enqueue out of the pass's way. `enqueueClassification` is a
+single statement outside the advisory lock, so saving a bookmark is never queued
+behind a running pass; and where a pass and a sync genuinely do collide — the
+write — they serialise through the same lock rather than through one of them
+holding an HTTP request open, which is the arrangement that would have deadlocked
+or timed out.
+
+## The write path
+
+### The problem
+
+The server now writes a record a client may be editing at the same instant. The
+old runner wrote through the client's own `NookDB.updateBookmark(id, patch)`,
+so the two writers were the same writer and this could not happen. It is the one
+new hazard the move created, and it is why `applyClassificationPatch` is the
+most delicate function in the feature. `docs/ai-cloud-contract.md` has the
+mechanics; the reasoning is here because the contract cannot carry it.
+
+Since summarisation arrived, the transaction itself lives in **`applyServerWrite`**
+and `applyClassificationPatch` is one of its two callers — the other writes
+`summary` through the same lock, the same re-read and the same version bump
+([retrieval.md](./retrieval.md)'s "The write path"). Everything below describes
+that one function, so each of these comments now guards two features instead of
+one, which is why none of them was shortened in the extraction.
+
+### The lock
+
+`applyClassificationPatch` takes `pg_advisory_xact_lock(hashtext(user_id))` —
+**the same lock `syncRecords` takes**, on the same key.
+
+That identity is the whole reason a decision cannot interleave with a sync's
+read-check-write. A sync reads a record's version, compares it to the client's
+base version, and upserts, all under that lock. So either the decision lands
+first and the sync sees a bumped version and answers with a conflict the client
+resolves by merging the newer side, or the sync lands first and the decision's
+re-read sees the human's change. There is no in-between.
+
+A *different* lock key would be worse than no lock at all: it would serialise
+the two subsystems against nobody and then let both write.
+
+### The re-check
+
+Eligibility — `ai == null && listId == null` — is re-evaluated on the freshly
+read row, not on the candidate the pass read at the start. A human who filed a
+bookmark while the request was in flight wins, and the model is never asked
+about it twice.
+
+It is the same rule as the original eligibility guard above, now enforced at the
+only moment it can be violated. Before the move the guard was enough, because
+the write could not land between the read and the write. Now it is not enough on
+its own, and that gap is the entire risk of a server-side writer.
+
+### The recompute
+
+The patch is rebuilt against the fresh row rather than applying one computed at
+the start of the pass. Tags are a union, so a tag the user added in the
+meantime has to survive; applying the earlier patch to the fresh row would
+overwrite it with a `tags` array built from a record that no longer exists.
+
+### Why nothing in the merge layer changed
+
+The patch only ever carries `listId`, `listName`, `tags` and `ai`, and the
+recompute makes `tags` a union — which is already exactly what `mergeBookmarks`
+does, including taking `ai` from the same side it takes the assignment from. The
+"Merge semantics" section below is therefore still correct as written, and is
+the rule this relies on rather than a restatement of it.
+
+Only `updatedAt` and `version` are genuinely new, and that is the point: they
+are what make the change reach every device through the ordinary sync pull, and
+what make `mergeBookmarks`'s newer-wins resolve in the server's favour. They
+are also why a no-op write would be a real cost. `patchChangesSomething` gates
+the write, because bumping the version of a record whose content did not change
+would push a no-op change to every device and resurface the bookmark in the
+dashboard as freshly edited, for nothing.
 
 ## Non-English content
 
@@ -194,33 +519,44 @@ Jev cannot invent names, so the generator does:
 
 ```
 200 unfiled bookmarks, sampled with a deterministic stride
-  -> POST /api/ai/propose-taxonomy   (a cheap text LLM — gpt-4o-mini or gemini-2.5-flash)
+  -> POST /api/ai/taxonomy/propose   (a cheap text LLM — gpt-4o-mini or gemini-2.5-flash)
   -> preview in Settings: checkboxes + a one-line "why" per proposal
   -> you accept; real BookmarkList records are created
-  -> meta["ai.taxonomy"] records each accepted name with its sample titles
-  -> the normal engine runs; the new collections are just more options
+  -> nook_ai_taxonomy records each accepted name with its sample titles
+  -> the next pass runs; the new collections are just more options
 ```
 
 Trigger: the **Suggest taxonomy** button in the panel, plus the `autoTaxonomy`
-toggle that gates it.
+toggle that gates it. The sample, the existing collections and the library's own
+tags are all read from `nook_records` on the server, so the client sends no
+library at all and cannot be wrong about which bookmarks were read.
 
 The proposer returns **two** vocabularies, and both are offered for review:
 
 - **Collections**, which become real `BookmarkList` records. They are exclusive:
   one bookmark, one collection.
-- **Tags**, stored as a flat vocabulary in `ai.taxonomy.tags` — see below.
+- **Tags**, stored as a flat vocabulary in the accepted taxonomy's `tags` — see
+  below.
+
+Acceptance is one transaction on the server: the list rows and the taxonomy row
+are written together, which the extension could not do. There, the collections
+were created in IndexedDB and the taxonomy was a separate meta write, so a
+failure between them left a collection the runner knew nothing about. Its comment
+explained that the lists had to be written *before* the record because the two
+were separate writes and only one could be undone. That ordering constraint is
+gone, and what replaces it is that neither can be half-done.
 
 ### Tags that have no members yet
 
-This is the part that is easy to get wrong. The runner builds its tag questions
+This is the part that is easy to get wrong. The pass builds its tag questions
 from the tags bookmarks *already* carry, so **a proposed tag with no members
 could never be offered by any code that existed** — the first version of this
 feature generated them, parsed them, and dropped them on the floor.
 
-The fix is one field. `ai.taxonomy.tags` holds names nothing carries yet, and
-`buildTagOptions` appends them after the library's real tags, capped at 20
-questions. A new tag then earns its first member the ordinary way — the model is
-asked `Does this saved item belong under the tag "yazılım geliştirme"?` and
+The fix is one field. The accepted taxonomy's `tags` holds names nothing carries
+yet, and `buildTagOptions` appends them after the library's real tags, capped at
+20 questions. A new tag then earns its first member the ordinary way — the model
+is asked `Does this saved item belong under the tag "yazılım geliştirme"?` and
 answers at full price, under the same threshold as any other tag. Once one
 bookmark takes it, it is a real tag and the stored entry is redundant.
 
@@ -318,19 +654,41 @@ interface AiAttribution {
 }
 ```
 
-Progress lives in the IndexedDB `meta` store, which survives
-`wipeLocalLibrary()` — these are run-history and device preferences, like
-appearance. Settings themselves are the one exception: `ai.settings` is now a
-read-through *cache* of the account-wide row `GET`/`PUT /api/ai/settings`
-serves (`apps/api/src/ai-settings.ts`, `nook_ai_settings` table) — see
-"Settings surface" below.
+Progress lived in the extension's IndexedDB `meta` store, under four keys. All
+four are account rows now, plus two that had no key to begin with — the
+classification queue and the summarisation attempt memory, neither of which had a
+runner to own a cursor:
 
-| key | holds |
-| --- | --- |
-| `ai.settings` | cache of the server's toggles and thresholds, for the offline/signed-out fallback |
-| `ai.taxonomy` | accepted taxonomy: `collections` (name + sample titles each) and `tags` (names with no members yet) — extension-only, never moved server-side (the runner that reads it is extension-only too) |
-| `ai.cursor` | processed ids, counters, last run, cooldown windows — extension-only run history |
-| `ai.log` | last 200 decisions, for the confidence histogram — extension-only run history |
+| table | holds | what it was |
+| --- | --- | --- |
+| `nook_ai_jobs` | the classification queue: one row per bookmark awaiting a decision, deleted by the pass that claims it | new — a browser had an alarm and a cursor instead |
+| `nook_ai_state` | counters, last run, the two cooldown windows and a 200-entry ring buffer of decisions for classification, the same counters under a `summarize` sub-record for summarisation; plus `lease_until` and `summary_lease_until`, the two columns deliberately *outside* the jsonb | `ai.cursor` + `ai.log`, two per-origin `meta` keys, which is why the web host could show neither |
+| `nook_ai_taxonomy` | the accepted taxonomy: `collections` (name + sample titles each) and `tags` (names with no members yet, each with its definition) | `ai.taxonomy`, a per-origin `meta` key, which is why a taxonomy accepted on the web could never reach the runner |
+| `nook_ai_decided` | every id a decision has been bought for, including the ones that filed nothing. Unbounded, durable, and never synced | the tail of `ai.cursor`'s capped id list — and the money the cap leaked. See "The job queue" |
+| `nook_ai_summaries` | every id a summary was **attempted** on and got nothing, with a sha256 of the prompt's own text and which retry window applies. A written summary deletes its row | nothing — the summarise pass had no runner, so it had no memory to migrate |
+| `nook_ai_settings` | toggles and thresholds, one account row | `ai.settings`, moved before this one; `lib/ai-settings.ts` still keeps a short-lived local cache under that key name, but the row is the source of truth |
+
+The 200-entry log is a ring buffer, not a growing log: it is carried on the wire
+as `AiRunSummary.log` for a confidence histogram, and the panel currently draws
+the run's own filed-vs-skipped row instead. 200 is what the histogram wants and
+what the panel's summary is a summary of.
+
+`lease_until` and `summary_lease_until` are columns rather than fields of `data`
+on purpose: a lock you read, merge and write back through jsonb is a lock two
+replicas can both take. They are two columns rather than one because the two
+passes would starve each other for a shared lease at a 60-second tick, and they
+write different fields — see "How the pieces fit".
+
+Only one key survives in the extension, and it is a cache: `ai.settings`, the
+short-lived local mirror of the account row the panel renders instantly from and
+falls back to when signed out. Nothing else about this feature is per-origin any
+more, which is the whole reason the panel is no longer host-shaped.
+
+`AiAttribution` on `Bookmark` is unchanged as a *synced* field, but the
+direction of the write inverted: it used to be written by whichever device ran
+the pass, and it is now written by the server, reaching every device through the
+ordinary sync pull. It is also a field the server must be able to leave alone —
+see "The write path".
 
 ## Merge semantics
 
@@ -351,33 +709,59 @@ Attribution and assignment therefore never disagree.
 
 ## Settings surface
 
-Settings → AI requires a signed-in session and nothing else — it shows on
-**either host** now, extension or web, because the toggles and thresholds it
-edits are an account preference, not a browser one:
+Settings → AI requires a signed-in session and nothing else, and it is the
+**same panel on both hosts** — `AiPanel.tsx` no longer branches on `host.kind` to
+decide what is enabled.
 
-- A classification is an authenticated server call either way, so the section
-  needs `host.user` (`SettingsDialog.visibleSections`), same as before.
-- `ai.settings` used to live in per-origin IndexedDB `meta`, which is why a
-  toggle flipped in the web app had no effect: the extension's service worker
-  — the only place a pass runs — never read the web origin's storage. It is
-  now `GET`/`PUT /api/ai/settings` (`apps/api/src/ai-settings.ts`,
-  `nook_ai_settings`, one row per account), so both hosts read and write the
-  same record. `lib/ai-settings.ts` still keeps a short-lived local cache
-  (`AI_SETTINGS_META_KEY`, IndexedDB `meta`) so the panel has something to
-  show instantly and something to fall back to offline or signed out, but that
-  cache is not the source of truth any more.
+That used to need two paragraphs of explanation, and the reason is worth keeping
+because the fix is not obvious. There was a time when the section was gated on
+`host.kind === "extension"`, because a pass only ran in the extension's service
+worker, and the toggles it edited lived in per-origin IndexedDB `meta` — so the
+web app showed working-looking switches that nothing read. The first half of
+that was fixed by moving the settings onto an account row: `GET`/`PUT
+/api/ai/settings`, `apps/api/src/ai-settings.ts`, `nook_ai_settings`, one row
+per account. `lib/ai-settings.ts` still keeps a short-lived local cache
+(`AI_SETTINGS_META_KEY`) so the panel has something to show instantly and
+something to fall back to offline or signed out, but the cache is not the source
+of truth.
 
-What is still extension-only is *running* a pass: `lib/ai-runner.ts` is only
-called from the extension's service worker (`entrypoints/background/index.ts`),
-so `AiPanel.tsx`'s **Classify now** button, the taxonomy review flow, and the
-run-history rows ("Last run", "Last pass") are disabled — or, for run
-history, hidden — on the web host, with a tooltip/row explaining where they
-do work. `ai.taxonomy` and the run counters (`ai.cursor`, `ai.log`) stay
-per-origin `meta` for the same reason: they are run history the runner reads
-back, not a setting, so there is nothing for the web host to do with them.
+The second half needed the pass itself to move, and that is what this section
+now says. **The queue, the run history and the accepted taxonomy are account
+rows too** — `nook_ai_jobs`, `nook_ai_state`, `nook_ai_taxonomy` — so the
+run-history rows ("Last run", "Last pass", "Waiting to be classified"), the
+**Run now** button and the whole taxonomy review flow are the account's numbers
+rather than one browser's, and they work identically in the extension and in the
+web app. There is no longer a "where does this actually run?" tooltip because
+there is no longer a "this host" to run on.
 
-The panel carries two toggles, three thresholds, a status row, a **Classify now**
-button, and the taxonomy review flow. See `AiPanel.tsx`.
+Two things that are still true, and both are about the panel rather than the
+pass:
+
+- A classification is an authenticated server call, so the section needs
+  `host.user` (`SettingsDialog.visibleSections`). Signed out, it offers a
+  sign-in banner instead.
+- **Run now can only enqueue.** The route wakes a worker rather than running a
+  batch inline, so the toast reports how many were queued for each pass and the
+  panel then re-reads the status every few seconds while `pending` is above
+  zero. A toast claiming "18 filed" would be a guess, and the copy says so
+  instead of implying it.
+
+The panel carries three feature toggles, three thresholds, a status card with a
+row per pass, the **Run now** button, and the taxonomy review flow. The button
+used to be **Classify now** and covers both passes now, each half gated on its own
+toggle, so it says which passes a click would queue and is disabled when neither
+toggle is on.
+
+The Summaries card is the part of the panel this document used to have to
+apologise for, and it no longer does. Its toggle was a real field that nothing
+acted on, and its two rows counted a local library nothing summarised and dated
+a last pass nothing wrote; both rows are now server counts — `summarised` and
+`pending` are SQL counts over the account's records with the same 400-character
+gate the pass applies, so the upper bound and the hedge that had to explain it
+are both gone. The toggle's own description carries the one thing nothing else
+in Settings does not: this is the first feature that sends page text to a third
+party. See [retrieval.md](./retrieval.md)'s "Summaries" for the pass behind those
+numbers.
 
 ## Configuration
 
@@ -387,6 +771,8 @@ button, and the taxonomy review flow. See `AiPanel.tsx`.
 | `NOOK_AI_PROPOSER` | api | `openai` or `gemini` — which service names the new collections and tags |
 | `NOOK_AI_MODEL` | api | which model, when the proposer is OpenAI. Defaults to `gpt-4o-mini` |
 | `OPENAI_API_KEY` / `GEMINI_API_KEY` | api, `.env`, `compose.yaml` | the proposer's key |
+| `NOOK_AI_TICK_MS` | api | how often the classification worker looks for work. Defaults to 60,000; floored at 1,000 so a typo cannot turn it into a spin loop |
+| `NOOK_AI_LEASE_SECONDS` | api | how long a pass may hold the account lease. Defaults to 120 |
 
 ## Testing
 
@@ -395,16 +781,24 @@ button, and the taxonomy review flow. See `AiPanel.tsx`.
 | `apps/api/test/ai.unit.test.ts` | question building, decision thresholds, response parsing, the text-length floor, throttling — pure, no network |
 | `apps/api/test/ai-settings.unit.test.ts` | normalizing a stored row, validating a PATCH — pure, no database |
 | `apps/api/test/ai-settings.integration.test.ts` | defaults for a new account, patch-merges-onto-existing, per-account isolation, cascade delete — needs `NOOK_TEST_DATABASE_URL`, self-skips otherwise |
-| `apps/extension/tests/ai-classify.test.ts` | candidate selection, patch building, manual-assignment protection |
+| `apps/api/test/ai-classify.unit.test.ts` | reading a `nook_records` row as a bookmark, eligibility, candidate selection, request building from raw jsonb, the patch and its union of tags, the `Noul`/definition asymmetry, `patchChangesSomething`, Turkish-aware name folding |
+| `apps/api/test/ai-taxonomy.unit.test.ts` | deterministic stride sampling and its eligibility, the accepted-taxonomy record and the digest behind each collection, the cap, collision handling, `BookmarkList` planning, the stem overlap test, reading the proposer's body |
+| `apps/api/test/ai-jobs.unit.test.ts` | the queue (claim as one DELETE, the enqueue's inline `autoClassify`, the top-up's exclusions), the pass (the pool stopping on a neutral, the 40-character floor *not* stopping it, the gates, the lease, the two cooldowns, never rejecting), the write path (the advisory lock and `FOR UPDATE`, the eligibility re-check, the union recompute, tombstones, degrading rather than throwing), and the two taxonomy route bodies |
+| `apps/api/test/ai-store.unit.test.ts` | normalizing a run-state row out of anything, the log ring buffer, resolving a cooldown against a clock, and `readAiStatus` composing the whole surface |
+| `apps/api/test/ai-summary.unit.test.ts` | the work list (a content hash over the source text that excludes `summary`, an unchanged record inside the decline window still parked, a changed hash re-admitted), the outcome-to-window table, the pass (writing through `applyServerWrite`, deleting the attempt row on a write, upserting it on a decline, refusing a write whose guard fails on the fresh row, a lease held by someone else), the `autoSummarize` gate, and the status counts |
+| `apps/extension/tests/ai-client.test.ts` | the four calls: the signed-out gate before any request, bearer vs cookie auth, the status mapping, defensive reading of every response, the "nothing to read" vs "declined" distinction, sending a tag definition back with its name, and the status subscription |
 | `apps/extension/tests/ai-settings.test.ts` | server fetch/cache/fallback: offline, signed-out, a failed save, cross-context invalidation |
-| `apps/extension/tests/ai-runner.test.ts` | batching, toggle off, session required, cooldowns, the neutral-placeholder guard |
-| `apps/extension/tests/ai-taxonomy.test.ts` | deterministic stride sampling, collision handling, BookmarkList creation |
-| `apps/extension/tests/settings-ai-panel.test.tsx` | toggles, thresholds, proposal review, the signed-in gate (both hosts), and the extension-only run actions |
+| `apps/extension/tests/settings-ai-panel.test.tsx` | toggles, thresholds, the status card, **Run now**, proposal review, the signed-in gate — and, explicitly, that the status rows, on-demand classification and the taxonomy flow all work on the web host with cookie auth |
 | `apps/extension/tests/cloud-merge.test.ts` | attribution travels with the assignment |
+
+`apps/extension/tests/ai-classify.test.ts`, `ai-runner.test.ts` and
+`ai-taxonomy.test.ts` are gone with the files they covered; the first two have
+`apps/api/test/ai-classify.unit.test.ts` and `ai-taxonomy.unit.test.ts` in their
+place, and the runner's job is now `ai-jobs.unit.test.ts` plus `ai-store`.
 
 ## Contract
 
-Exact shapes. Do not drift — these are the seams between the four pieces.
+Exact shapes. Do not drift — these are the seams between the workspaces.
 
 ```ts
 // apps/extension/lib/types.ts
@@ -444,11 +838,17 @@ export interface AiSettings {
 ```
 
 ```ts
-// POST /api/ai/classify
+// POST /api/ai/classify — still the seam between the decision layer and the
+// model, and still the route whose neutral 200 is shaped exactly like a
+// decision. Nothing in either client calls it any more; the worker calls
+// classifyBookmarkOutcome() in-process, which is exactly what the route did.
 interface ClassifyRequest {
   bookmark: { id: string; title?: string; summary?: string; note?: string; site?: string; author?: string };
   collections: Array<{ id: string; name: string; samples: string[] }>;
-  tags: Array<{ name: string; samples: string[] }>;
+  // `samples` is carried on the wire and is always empty for a tag: see the
+  // Noul/Choice asymmetry above. A member-less accepted tag carries `definition`
+  // instead, and that one *is* sent.
+  tags: Array<{ name: string; samples: string[]; definition?: string }>;
   settings: { collectionMinConfidence: number; tagMinNoul: number; maxTags: number };
 }
 interface ClassifyResponse {
@@ -465,7 +865,8 @@ interface ClassifyResponse {
   usage?: { inputTokens: number; outputTokens: number };
 }
 
-// POST /api/ai/propose-taxonomy
+// POST /api/ai/propose-taxonomy — likewise the proposer's own route. The
+// client-facing proposal route is /api/ai/taxonomy/propose below.
 interface ProposeTaxonomyRequest {
   sample: Array<{ title: string; site: string }>;
   existingCollections: string[];
@@ -477,6 +878,82 @@ interface ProposeTaxonomyResponse {
   tags: Array<{ name: string }>;
 }
 ```
+
+Both of those routes remain, and both remain session-guarded. Neither is
+client-facing now: the pass is in the same process as the model call, so it calls
+`classifyBookmarkOutcome` and `proposeTaxonomy` from `apps/api/src/ai.ts`
+directly rather than over HTTP. The panel reaches the feature through the four
+routes below.
+
+### The four routes the pass moved in on
+
+Exact shapes in [ai-cloud-contract.md](./ai-cloud-contract.md); summarised here
+because `AiPanel.tsx` and `ai-client.ts` are written against them.
+
+```ts
+// GET /api/ai/status -> AiStatusResponse
+//   available: boolean; settings: AiUserSettings; pending: number;
+//   taxonomy: AcceptedTaxonomy; run: AiRunSummary; summarize: SummarizeStatus
+// The two cooldown stamps are resolved to booleans on the wire (isUnavailable,
+// isBackingOff): "when" is a thing only the worker acts on, and "is it in effect
+// now" is the only thing a panel can render. 401 (no session) and 200.
+
+interface SummarizeStatus {
+  /** Whether a summariser is configured: NOOK_AI_PROPOSER plus its key. */
+  available: boolean;
+  /** The model a call would use, defaults included. */
+  model: string;
+  /** Candidates waiting to be summarised. SQL count, gate applied. */
+  pending: number;
+  /** Live records carrying a non-empty summary. */
+  summarised: number;
+  written: number;
+  skipped: number;
+  lastRunAt: string | null;
+  lastError: string | null;
+  isUnavailable: boolean;
+  isBackingOff: boolean;
+}
+
+// POST /api/ai/run <- {} (body ignored)
+//   -> { queued: number; summariesQueued: number; status: AiStatusResponse }
+//   Tops both work lists up and wakes the worker. It does NOT run a pass inline.
+//   Each half is gated on its own toggle, so a user with one of them on gets only
+//   that one — and a queue depth is not a pass result. 401 and 200.
+
+// POST /api/ai/taxonomy/propose <- { language?: TaxonomyLanguage }
+//   -> { sampleSize: number; collections: {name, why}[];
+//        tags: {name, why?, coveredBy: string[]}[];
+//        existingCollections: string[] }
+//   The server samples its own library, so the client sends no sample.
+//   401, 400 (malformed body / unknown language), 503 (no proposer configured), 200.
+
+// PUT /api/ai/taxonomy <- { collections: string[]; tags: {name, definition?}[] }
+//   -> { createdCollections: number; addedTags: number; dropped: number;
+//        taxonomy: AcceptedTaxonomy }
+//   Names only — the sample, the existing lists and the library's own tags are
+//   read from nook_records at acceptance time. A tag's definition travels with
+//   its name because the server cannot reconstruct it. 401, 400, 200.
+```
+
+`SummarizeStatus` is additive, so a panel written against the old surface keeps
+working by ignoring it, and it comes from the same seam as the rest of the file:
+[ai-summarize-contract.md](./ai-summarize-contract.md). `POST /api/summarize`,
+which used to sit beside these and returned summaries for a caller to write, is
+**gone** — its documented contract was that the server never writes `summary`, and
+that is no longer true. `summarizeRecords` survives in-process; the reasons are
+in [retrieval.md](./retrieval.md).
+
+The duplicated wire types on this seam are the ones
+[ai-cloud-contract.md](./ai-cloud-contract.md) defines and
+`apps/extension/lib/ai-client.ts` re-declares by hand: `AiLogEntry`,
+`AiRunSummary`, `AcceptedTaxonomy`, `AiStatus`, `TaxonomyProposal`,
+`TagProposal`, `AcceptedTagInput`, plus the two discriminated outcomes
+(`ProposeOutcome`, `AcceptResult`) that exist only on the client so the panel can
+render a different sentence per failure. The api workspace has no dependency on
+the extension and these seams are not worth a cross-package coupling, so they are
+kept in step by hand like every other duplicated wire type in this file — this
+document is what makes them agree.
 
 `__none__` is a reserved `Choice` option key for "no collection fits". It is an
 implementation detail of `buildClassificationQuestions`, not part of the wire
@@ -602,3 +1079,148 @@ decision rules** — a calibration result may have already been measured.
   classification queue itself is still extension-only. That is unchanged by
   this entry and is a bigger seam than a settings move — see "How the pieces
   fit".
+- **2026-09-27 — the classification pass moved to the server.** The runner, the
+  queue, the processed-id cursor, the accepted taxonomy and the cooldowns all
+  moved to `apps/api` (`ai-jobs.ts`, `ai-store.ts`, plus the ported
+  `ai-classify.ts` / `ai-taxonomy.ts`); the `nook-ai-classify-periodic` and
+  `nook-ai-classify-soon` alarms, the `CLASSIFY_NOW` message and every call
+  site in the service worker are gone. What the extension kept of this feature
+  is `lib/ai-client.ts` and the settings panel, and the reason it kept exactly
+  that is that everything else in it is now an account row or a table the server
+  already writes. Both halves of the limitation the entry above left open are
+  closed: a taxonomy accepted on the web reaches the classifier, because the
+  classifier reads `nook_ai_taxonomy` rather than a per-origin IndexedDB key; and
+  an account with no extension installed at all can classify, because the queue
+  is fed by the sync hook rather than by an alarm that needs a browser to be
+  open. A pass now continues with every browser closed. See "How the pieces
+  fit", "The job queue" and "The write path"; the wire shapes are in
+  [ai-cloud-contract.md](./ai-cloud-contract.md).
+- **2026-09-27 — the 40-character floor was a bug, not a neutral case.** This is
+  the important one, and it only became visible once the pass was reading the
+  library itself. `classifyBookmarkOutcome` returns the neutral
+  `UNAVAILABLE_MODEL` placeholder for a bookmark whose state text is under
+  `MIN_CLASSIFIABLE_CHARS` — a *per-bookmark cost guard*, and a legitimate
+  answer, not a failure. The deleted `ai-runner.ts:514` treated that same
+  `model === "unavailable"` as a terminal `unhealthy` and **stopped the whole
+  pool**. So one bare X post, one emoji, one author handle silently ended the
+  pass and burned the rest of the batch, and this document's own numbers say how
+  likely that was: 39 of a real 1,061-bookmark library are under the line, 15
+  are under 20, and the *newest* saves are the most likely to be one. The
+  runner was collapsing three unrelated conditions into a single check — a
+  missing key, a genuine upstream failure, and a legitimate skip — and a client
+  cannot tell them apart, because all three are the same 200.
+  Server-side they are separable and now are: the floor is applied to the
+  request *before* any call is dispatched, an under-floor candidate is counted as
+  skipped and remembered in `nook_ai_decided` (we have read it, it will never be
+  worth another look), and the batch carries on. A genuine `UNAVAILABLE_MODEL`
+  still stops the pool, which is now the only thing that does. This is the
+  check introduced in the 2026-09-25 entry above, extended by the 2026-09-26
+  entry that made `model: "unavailable"` a non-decision rather than a confidence-0
+  verdict: **the check was right and its scope was wrong.** A client could not
+  fix it, and "do not move this check back into the response handling" is written
+  into the code beside the fix, because it is exactly the kind of thing that
+  gets "simplified" into existence — with a symptom that looks like nothing at
+  all rather than like an error: a classification feature that quietly files
+  nothing on a library full of tweets.
+- **2026-09-27 — `nook_ai_decided`, and the money the cap was leaking.** The
+  old runner's memory of "we already bought a decision for this" was a list of
+  ids in `ai.cursor`, capped at **2,000** — and a cap on that list leaks money,
+  because a decision that assigned nothing writes nothing to the record, so the
+  id list was the only memory of it. Past the cap the oldest ids were dropped,
+  and candidates are taken newest-first, so those came back only once everything
+  newer was resolved: on a library of a few thousand undecided bookmarks every
+  one of the oldest was re-bought forever, because nothing about them ever
+  changed. The document used to leave that implicit. The memory is a table now,
+  unbounded and durable, and the leak is closed because the thing that leaked was
+  the cap rather than the idea. It is deliberately not a field on
+  `nook_records`: a write would bump the version, push a no-op change to every
+  device and resurface the bookmark as freshly edited — the exact harm the
+  capped cursor existed to avoid, 2,000 times instead of once. The table is not
+  in [ai-cloud-contract.md](./ai-cloud-contract.md); it is in `schema.sql`, with
+  the argument.
+- **2026-09-27 — tag definitions travel on acceptance.** The contract originally
+  said the acceptance body carries **names only**, on the reasoning that
+  everything else can be read from `nook_records` at acceptance time. That is
+  true of the sample, the existing lists and the library's own tags, and it is
+  false of a tag's definition: the proposer wrote it, the review list is the
+  last place it exists, and `buildTagOptions` cannot invent it. This document's
+  own measurement is what caught it — definitions put **12 of 12** vocabulary
+  entries to use against **10 of 12** for bare names, at 24% more input tokens —
+  so dropping it on the way in is a measured regression. `definition` is optional
+  on the body — a proposer that returned no `why` still yields a usable tag, just
+  one asked about by bare name — so what the contract requires is that the client
+  sends it back whenever it has one, not that it is mandatory. The asymmetry is
+  worth stating honestly rather than papering over: a *collection*'s `why` is
+  genuinely lost on acceptance, and provably does not matter, because it only
+  ever rendered in the review list and the digest that backs an accepted option
+  is derived from the library, not from the sentence.
+- **2026-09-27 — `autoClassify` gates the queue, not just the pass.** The
+  `autoClassify` guard is read *inside* the enqueue statement, on both the sync
+  hook and the top-up, which is the behaviour a user expects from a toggle: a
+  queue that fills while the switch is off and drains the moment it is on,
+  rather than a backlog that lands all at once. The second half of that is
+  honesty on the panel's side. `pending` is shown as a number of bookmarks the
+  server is working through, and with the guard in the enqueue it can never be a
+  queue that cannot drain — a row that arrived before the toggle was turned off
+  is not something the user can see or clear, and a count of those would be a
+  number nobody could act on.
+- **2026-09-27 — summarisation was not moved, and does not work.** Unchanged by
+  this migration, and recorded here so the absence is not mistaken for an
+  oversight. `autoSummarize` is still a real field of the account's settings row
+  and the toggle still saves it, but **nothing runs it**: `POST /api/summarize`
+  has no caller in either host, and the panel's local-library counting and its
+  `ai.summary-run` seam are gone — the two rows that counted a library nothing
+  summarises and dated a "last pass" nothing wrote are removed rather than
+  reworded, because a row that can only ever report a constant is noise and a
+  number is a claim. The card and the toggle stay, and its description says
+  plainly that nothing fills summaries in yet. It is the same seam it was before
+  the move and it is still the next one; [retrieval.md](./retrieval.md)'s
+  "Summaries" section should be read with that in mind, since it describes work
+  that is measured but unwired.
+- **2026-09-27 — summarisation runs now, and the entry above ("summarisation was
+  not moved, and does not work") is superseded.** Read this one instead of it.
+  `autoSummarize` was a real field of the account's settings row, a switch in
+  Settings → AI on both hosts, and a preference nothing had ever acted on: there
+  was no pass, and the panel's `ai.summary-run` cursor was a documented seam
+  nothing wrote. It runs on Nook's server now, **on** the machinery above rather
+  than beside it — the same per-minute tick, the same `nook_ai_state` for run
+  history, the same `applyServerWrite`, and a second lease column so the two
+  passes cannot starve each other for one. The work list is a read rather than a
+  queue, and its rule is the one in [retrieval.md](./retrieval.md): no summary,
+  past the 400-character gate, and either nothing was ever attempted on this
+  exact text or the last attempt was long enough ago to be worth repeating.
+  "Exact text" is a sha256 over `title`, `description` and `note` and
+  **deliberately not over `summary`**, and that exclusion is the mechanism rather
+  than a detail: a hash over the record would move on every write, so a write
+  could present itself as a change in the source and the memory would never
+  suppress anything. `nook_ai_summaries` is deliberately **not** `nook_ai_decided`
+  — a permanent "already tried" marker is right for a decision that may be bought
+  once ever and wrong for a field the user is allowed to clear, because it would
+  make a summary undeletable, which is worse than re-billing it. So a written
+  summary **deletes** its row, and only a refusal or a failure keeps one, on one
+  of two windows: a model that read the text and declined gets **7 days**
+  (`NOOK_AI_SUMMARY_DECLINE_MS`), a call that failed gets **30 minutes**
+  (`NOOK_AI_SUMMARY_RETRY_MS`). Five of the seven skip reasons are not attempts
+  and leave no row at all, so a description that later grows past 400 characters
+  is picked up on the very next tick rather than a week later. **The one honest
+  cost of the design is a latency:** the candidate query cannot compute the hash —
+  Postgres has no sha256 for text without an extension, and doing it in SQL would
+  mean re-implementing the prompt's field order and caps in a second language — so
+  it filters on the short window only, and a note you edited is summarised again
+  once its attempt is 30 minutes old rather than instantly. The opposite
+  approximation would park that note for seven days, which is a visible bug, and
+  newest-first ordering means a fresh save is never the thing that waits.
+  `POST /api/summarize` is **removed**: its documented contract was "the server
+  does not write `summary` anywhere", and a route that computes summaries and
+  discards them is a trap for the next reader. `POST /api/ai/classify` and
+  `POST /api/ai/propose-taxonomy` stay, and stay session-guarded — the asymmetry is
+  deliberate, because those are the model calls the pass makes and the pass is in
+  the same process as the model. Cost, on the record: **≈$0.00026 a bookmark**
+  against classification's **$0.000062**, so about 4×, **≈$0.43** over 5,000
+  bookmarks a third of which clear the gate, bounded by the library rather than by
+  the tick, and with no spend cap because embeddings and classification have none
+  either. And it is the first feature here that sends **page text** to a third
+  party — up to 4,000 characters of the description, the title and the note, where
+  taxonomy sends titles and hostnames — which is why the toggle now carries that
+  sentence on its own face rather than leaving it to a document.
+

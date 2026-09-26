@@ -15,8 +15,9 @@
  * one failure that must never happen is an empty library in place of the list
  * the user was reading a second ago.
  *
- * Pure and dependency-injected like lib/ai-runner.ts: `fetch` and a clock are
- * arguments, so every branch here runs in a plain Node test with no network.
+ * Pure and dependency-injected the way every other server-backed module here
+ * is: `fetch` and a clock are arguments, so every branch runs in a plain Node
+ * test with no network.
  */
 
 import { cloudApiUrl, cloudSession } from "./cloud-sync";

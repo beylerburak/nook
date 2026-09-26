@@ -112,6 +112,28 @@ raw-SQL, zero-dependency style of this repo is a better fit than a new Postgres
 image. pgvector arrives when the library is big enough for it to matter, as an
 index on a column that already exists.
 
+### The summarisation pass's own memory is server-side too
+
+Summarising adds two more pieces of server-side state, and neither is synced,
+which is the same rule as the vector: a fact about our own requests is not the
+bookmark.
+
+- `nook_ai_summaries` — one row per bookmark that was **attempted and produced
+  nothing**, holding a sha256 of the prompt's own text, when the attempt
+  happened, and which of the two retry windows applies to it. It is not a queue
+  and it is deliberately not a field on `nook_records`: a written summary
+  *deletes* its row, so a record carrying a summary holds no memory of having
+  been asked, and that is what keeps a cleared one re-summarisable. Rows whose
+  bookmark is gone are pruned on the reconciler's cadence.
+- `nook_ai_state.summary_lease_until` — the pass's lease, beside the
+  classification pass's `lease_until`. Two columns rather than one: a shared
+  lease at a 60-second tick would have the two passes starving each other for
+  it, they write different fields, and the advisory lock the write path takes
+  already serialises the writes that could genuinely conflict.
+
+Every table and column the pass uses is enumerated in the "Storage" table of
+[ai.md](./ai.md); the rule these two serve is in "Summaries" above.
+
 ### The content hash must cover the embedded text, not the record
 
 `updatedAt` changes when a tag is edited, a note is added, a sync lands — none of
@@ -226,6 +248,228 @@ model in the taxonomy flow. Summarisation uses the configured proposer service.
   **no web capture passes it**, the longest being 251 characters, so the article
   case this was written for cannot be tested here.
 
+### A pass now runs, on the server
+
+All of the above used to describe a capability with no runner. It has one now, on
+the same machinery as classification in [ai.md](./ai.md) — the same per-minute
+tick, the same account-row lease machinery (a second column beside the first, so
+the two passes cannot starve each other), the same conflict-safe write, the same
+account row for run history. **"The job queue" in that document is where the
+machinery is described**; this section is only about what is specific to
+summarising. The work list, the tick, the lease and the write path are all
+shared, and none of them was written twice to accommodate a second pass.
+
+Three things about where the work comes from:
+
+- **The work list is a read, not a queue.** There is nothing to insert: a
+  candidate is a candidate at every moment, so the pass asks `nook_records` for
+  the next 25, newest first, and takes them. Classification needs a table because
+  a decision is bought once and the queue row is how that is enforced. Here the
+  record itself is the claim and the attempt table is the memory of what has
+  already been asked about.
+- **The tick is once a minute** — the same `NOOK_AI_TICK_MS` clock as
+  classification — and a pass continues with **every browser closed**, which is
+  the point of having moved at all. A bookmark that clears the gate is summarised
+  within a minute or two of landing, with nothing installed and nothing awake.
+- **The toggle gates the work list, inside the query.** `autoSummarize` is read
+  in the same statement that finds the candidates, for the same reason
+  `autoClassify` is read inside the classification enqueue: the decision has to
+  be the newest one, and the number the panel shows can then never be a queue
+  that cannot drain. Turned off, "waiting" is zero however many pages would
+  qualify, and the copy on that row says so instead of showing a count nobody
+  could act on.
+
+### The work list, and what it remembers
+
+> A live bookmark is a candidate when it has no summary, its `description` clears
+> the existing length gate, and either **nothing has ever been attempted on this
+> exact text** or **the last attempt was long enough ago to be worth repeating**.
+
+That is the `planEmbeddingWork` discipline already in
+`apps/api/src/embeddings.ts` — hash the text you send, not the record — applied
+to prose instead of vectors. The 400-character gate, `isWorthSummarising` and
+`summarySkipReason` are the existing, tested rules, reused unchanged; the
+arithmetic above still holds and the gate is still what it was.
+
+"Exact text" is a **sha256 content hash over `title`, `description` and `note`**
+— the three fields the prompt actually reads. Not the record, and **not
+`summary`**, and that exclusion is the mechanism rather than a detail: a hash
+taken over the record would move every time a summary landed on it, so every
+write would present itself as a change in the source and the memory would never
+suppress anything. Hashing the prompt's own text makes it answer exactly one
+question, which is *have we already asked about this?* — the only question it is
+there to answer.
+
+The two directions are different, on purpose:
+
+- **Writing a summary never makes the record a candidate again.** The hash does
+  not move, so our own write cannot chase itself.
+- **Editing your note does.** The hash moves, the record is a candidate again,
+  and that is right: you changed what you saved, and the summary on the record is
+  now of something else.
+
+### Clearing a summary still works
+
+`apps/extension/lib/types.ts` says `null` and `""` both mean "no summary", so a
+cleared one is summarised again rather than merged as a permanent blank. That is
+deliberate, it is unchanged, and an unattended pass depends on it — a feature
+that puts back a summary the user deleted an hour ago is a bug that looks like a
+haunting.
+
+It is worth being precise about the two mechanisms, because they are easy to
+conflate and only one of them is what makes the delete work:
+
+- **The hash** stops our own write from looking like a change in the source. It
+  is a statement about whether *the text* changed.
+- **Deleting the attempt row when a summary is written** is what keeps a cleared
+  summary re-summarisable. The row is written only for an attempt that produced
+  nothing, and a written summary deletes it, so a record that has a summary
+  carries no memory of having been asked. Keeping the row instead would freeze
+  the record for the length of the retry window: the user clears it and nothing
+  happens for half an hour, or for a week. Same haunting, with a delay.
+
+**The second one is the one that matters for the user**, because it is the whole
+difference between "clear it and the server starts again" and "clear it and the
+server ignores you". The hash is what keeps the bookkeeping honest; the deleted
+row is what keeps the promise.
+
+The hash is deliberately *not* re-checked at the write. It does not need to be: a
+concurrent edit does not falsify a statement about what we asked, and it makes
+the *next* pass re-ask, which is the next pass's job.
+
+### Two retry windows, not one
+
+`nook_ai_summaries` is one row per bookmark that was **attempted and produced
+nothing**, and it stores which of two windows applies to it. They are two
+different answers, and conflating them is the expensive mistake:
+
+- **The model declined** (`empty-output`, stored as `declined`): it read the text
+  and had nothing to say about it. The text does not change on its own and the
+  same question gets the same empty answer at full price, so this is not a retry
+  policy at all — it is the bill. **`NOOK_AI_SUMMARY_DECLINE_MS`, 7 days by
+  default.**
+- **The call failed** (`failed`: a transport error, a 429, a dropped socket):
+  nothing was learned about the text, and this is emphatically not the model's
+  opinion of it. **`NOOK_AI_SUMMARY_RETRY_MS`, 30 minutes by default** — the same
+  short window a throttled classification call gets.
+
+Five of the seven skip reasons are **not attempts** and leave no row at all:
+`too-short`, `already-summarised`, `not-found`, `deleted`, `unavailable`. No call
+was made, so there is nothing to remember, and a row would *invent* a memory. The
+case that matters is `too-short`: a 380-character description is refused by the
+gate, and if refusing it left a row behind then a record the user later extended
+past 400 characters would sit unexamined for a week. `unavailable` is the same
+argument at the scale of the account — the pass-level cooldown already parks the
+whole account for an hour, and a per-record row for every candidate would only
+hide a deployment state behind dozens of identical rows.
+
+The window is measured from the **attempt**, not from when the work was noticed,
+which is why the row is written on the outcome rather than at top-up time. Rows
+whose bookmark is gone or tombstoned are pruned on the reconciler's 15-minute
+cadence, beside `pruneDecided` and for the same reason.
+
+### The one honest limitation: an edited note waits
+
+The candidate query can only see the **short** window. Postgres has no sha256 for
+text without an extension, and computing one in SQL would mean re-implementing
+the prompt's own field order, its per-field caps and its `shortDescription`
+fallback in a second language — a second copy of a rule that has to be identical
+to the first, drifting invisibly the moment a cap moved. So the query excludes a
+record whose attempt is inside the short window and leaves the rest to the plan,
+which does have the hash.
+
+**The consequence: a bookmark whose note you edited is summarised again once its
+last attempt is `NOOK_AI_SUMMARY_RETRY_MS` old — up to 30 minutes — rather than
+instantly.** It is not instant and should not be described as instant.
+
+The direction is the safe one. The opposite approximation — filtering on the long
+window in SQL so the query could see declines too — would park an edited note for
+**seven days**, and "I rewrote the note and the summary never caught up" is a
+visible bug. Thirty minutes of latency on a background pass is not. It is also
+bounded: the work list is ordered newest-first, so a fresh save is at the front
+of the next tick's read and is never the thing that waits. The price of this
+choice is one extra SELECT per declined record per tick, which is a read and not
+a request.
+
+### The write path, and the argument it overturned
+
+Summaries are written through `applyServerWrite` — the same extracted mechanism,
+the same `pg_advisory_xact_lock` a sync takes, the same `FOR UPDATE`, the same
+re-check of the caller's guard on the row re-read inside the lock, the same
+version bump. See "The write path" in [ai.md](./ai.md). There is exactly one
+difference inside it: a summary is a replacement rather than a union, so its
+patch is the same whatever the fresh row says, where a classification patch has
+to be recomputed from that row so a tag the user added in the meantime survives.
+The guard is still there, and it is what catches a summary that arrived from
+another device or another replica while the call was in flight.
+
+`apps/api/src/summarize.ts` carried a long comment arguing that the server must
+**not** write `summary` anywhere, and that argument has been overturned rather
+than deleted — the file walks through what happened to it, reason by reason. The
+short version: **the rule that made all four of those reasons fit together was
+that the client owns the write, so the device which asks holds the record the
+merge is computed over**, and that stopped being true the moment the pass stopped
+running in the extension's service worker. The one durable part of the old
+argument — that a summary is user-visible prose the user is allowed to clear — is
+still true, and it is exactly what the work-list rule above is built around. The
+deletion hazard the old comment was reaching for is now handled by re-reading the
+row under a lock rather than by not writing at all, which is a stronger answer
+than the one it replaced.
+
+### Cost, and what leaves the machine
+
+**This is the first feature in the product that sends page text to a third
+party.** Taxonomy sends titles and hostnames. Classification sends titles, a
+300-character preview, notes, hostnames and an author handle. A summary sends up
+to **4,000 characters of the page's own text**, plus the title and your note, to
+whichever provider `NOOK_AI_PROPOSER` names — OpenAI or Google. That is a
+materially larger surface than anything else in Settings → AI, and the settings
+copy says so **on the toggle itself** rather than in a document: a user flipping
+that switch is handing over their reading history, and that sentence belongs
+where the switch is, next to the two other things the row tells them (it acts on
+its own, with the browser closed, and any summary can be deleted afterwards).
+
+Cost, at `gpt-4o-mini` ($0.15/1M in, $0.60/1M out): a call is roughly 1,000–1,300
+input tokens and about 100 output, so **≈$0.00026 a bookmark** — about **4×** the
+$0.000062 a classification call costs, and **bounded by the library rather than by
+the tick**, because the cost is per bookmark and not per pass. A full pass over
+5,000 bookmarks with about a third of them clearing the gate is **≈$0.43**. This
+library is much cheaper than that shape, and the two numbers are not in
+contradiction: the measured pass in the cost table above is **$0.028** over its
+241 gate-passing records, $0.0001153 a record, because those are X posts averaging
+roughly 1,100 user-prompt characters — about 486 prompt tokens a record — while
+the figure above is sized for the 4,000-character cap the prompt allows
+([retrieval-measurements.md](./retrieval-measurements.md)). The per-bookmark
+number is the worst case, and the one to size a bill against.
+
+**There is deliberately no spend cap, and no per-account budget.** Embeddings and
+classification have none either, and a cap introduced for one feature and not for
+the others is a worse surprise than the bill it prevents — the user would find
+out by hitting it. The controls are the batch (`NOOK_AI_SUMMARY_BATCH`, 25 a
+pass, clamped to the per-call ceiling of 50) and the decline memory, which is
+what stops a library of long X posts being re-bought every half hour forever. The
+documented per-bookmark cost is the rest of the disclosure.
+
+### The route that is gone
+
+**`POST /api/summarize` was removed.** Its documented contract was *"the server
+does not write `summary` anywhere, and that is the design"*, and after this
+change that sentence is false. A route that computes summaries and hands them
+back for somebody else to write, with no caller in either host to preserve it, is
+a trap for the next reader. `summarizeRecords` survives — the worker calls it
+in-process. `MAX_IDS_ACCEPTED` (50) is unchanged and is now the worker's per-pass
+ceiling rather than a route's framing, which is the same number for the same
+reason: one pass is one window of work, not a library.
+
+`POST /api/ai/classify` and `POST /api/ai/propose-taxonomy` **remain**, and both
+remain session-guarded, and neither is called by either client any more. That
+asymmetry is deliberate rather than tidiness: those two routes are the model calls
+the pass makes, the pass is in the same process as the model, and a route for
+each would be a second way in that nothing uses. `POST /api/ai/run` is the one
+button, it gates each half on its own toggle, and it now returns both queue
+depths — `queued` and `summariesQueued` — so the toast reports what was queued
+and never claims that either pass happened.
+
 ### The preamble, and why it was a prompt problem
 
 Forbidding the obvious labels changed nothing: **53 of 57 outputs (93%) still
@@ -267,11 +511,19 @@ A top-level field gets its own newer-wins merge, which is the right rule for
 | --- | --- |
 | `NOOK_EMBEDDING_MODEL` | default `text-embedding-3-small` |
 | `NOOK_EMBEDDING_DIM` | default `768`; free to lower, since truncation is not re-billed |
-| `NOOK_SUMMARY_MODEL` | default: the configured `NOOK_AI_MODEL` / `gpt-4o-mini` |
+| `NOOK_SUMMARY_MODEL` | the summariser's **own per-feature override, and it still wins**; with it unset the call uses the configured `NOOK_AI_MODEL`, and failing that `gpt-4o-mini` |
+| `NOOK_AI_PROPOSER` | `openai` or `gemini` — which service the summariser and the taxonomy proposer call. `NOOK_AI_PROPOSER` plus its key is also what the status row's `available` reports, so a missing key reads as a deployment rather than as an error |
 | `OPENAI_API_KEY` | already present, shared by the proposer and the embedder |
+| `NOOK_AI_SUMMARY_BATCH` | bookmarks summarised per pass. Defaults to 25, and clamped to the per-call ceiling of 50 so an over-eager value is refused rather than silently truncating every pass |
+| `NOOK_AI_SUMMARY_RETRY_MS` | how long a **failed** call is remembered before that text may be asked about again. Defaults to 30 minutes |
+| `NOOK_AI_SUMMARY_DECLINE_MS` | how long a text the model **declined** is remembered. Defaults to 7 days |
 
 Every one optional. With none of them the search route reports the index as
-unavailable and the client keeps its local pass; summaries stay off.
+unavailable and the client keeps its local pass; and with no proposer configured
+the status row reports `available: false`, the panel says the server has no
+summariser, and a pass makes no model call at all rather than reporting summaries
+that were never bought. The tick interval and the lease are shared with the
+classification pass and are in [ai.md](./ai.md)'s Configuration table.
 
 ## Tests
 
@@ -280,8 +532,10 @@ unavailable and the client keeps its local pass; summaries stay off.
 | `apps/api/test/embeddings.unit.test.ts` | text extraction, folding, hashing, batching, degradation — no network |
 | `apps/api/test/retrieval.unit.test.ts` | RRF, lexical term handling, filters, empty library — no network, no DB |
 | `apps/api/test/summarize.unit.test.ts` | prompt shape, the length gate, stripping preambles — no network |
+| `apps/api/test/ai-summary.unit.test.ts` | the work list and what it remembers, the two retry windows, the pass and its write — no network, no DB |
 | `apps/extension/tests/retrieval.test.ts` | debounce, local-then-server ordering, signed-out and offline fallbacks |
 | `apps/extension/tests/cloud-merge.test.ts` | `summary` merges independently of `ai` |
+| `apps/extension/tests/settings-ai-panel.test.tsx` | the summary status rows, the unavailable-versus-error states, and the third-party disclosure on the toggle |
 
 ## Progress notes
 

@@ -2,9 +2,9 @@
 // `loadAiSettings`/`saveAiSettings` talk to GET/PUT /api/ai/settings rather
 // than an IndexedDB `meta` key. This file covers the client half of that —
 // the fetch, the offline/signed-out fallback to the local cache, and the
-// short-lived in-memory cache the default (no-deps) path keeps so a burst of
-// calls (e.g. `aiIsArmable()` in entrypoints/background/index.ts, once per
-// saved bookmark) doesn't turn into one request each.
+// short-lived in-memory cache the default (no-deps) path keeps so the bursts of
+// calls a settings dialog makes (one per mount, one per cross-context
+// notification) don't turn into a request each.
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -155,8 +155,8 @@ describe("loadAiSettings", () => {
     expect(first.autoClassify).toBe(true);
 
     // A second call inside the window must not fetch again, even though the
-    // "server" has since changed — this is exactly what protects a burst of
-    // `aiIsArmable()` calls from becoming a request each.
+    // "server" has since changed — this is what keeps a settings dialog that
+    // re-reads on every mount and every notification from being a request each.
     server.stored = { ...DEFAULT_AI_SETTINGS, autoClassify: false };
     const second = await loadAiSettings({ now: () => clock });
     expect(second.autoClassify).toBe(true);

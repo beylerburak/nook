@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { enqueueClassification } from "./ai-jobs.js";
 import { enqueueIndexing } from "./embeddings.js";
 
 export type RecordKind = "bookmark" | "list";
@@ -261,6 +262,30 @@ export async function syncRecords(
     // failure, retry, and be told it conflicted with its own previous attempt,
     // forever (docs/retrieval.md, "How the index gets built").
     enqueueIndexing(pool, userId, applied.filter((record) => record.kind === "bookmark"));
+    // The same three reasons apply, for the same reasons: after the COMMIT,
+    // because a bookmark that has landed is a bookmark the user can see and a
+    // queue row that is not there yet is a classification that has not been
+    // bought; outside the advisory lock, which the COMMIT has already released;
+    // and wrapped, for the same reason as above — a throw from here would fall
+    // into the catch below and ROLLBACK a change that is already committed, and
+    // the client would be told it conflicted with its own previous attempt,
+    // forever. `void`, and `enqueueClassification` never rejects: the detached
+    // await is the only thing standing between a queue insert and an unhandled
+    // rejection, which on a server is a dead process.
+    //
+    // Why a sync is the right place to enqueue at all: the server already sees
+    // every bookmark through this route, which is exactly why the client needed
+    // no code to get an embedding index (docs/retrieval.md, "How the index gets
+    // built"). It is the same argument one layer over — a save is queued for
+    // classification the moment it lands, on any device, with no client code at
+    // all. The worker picks the queue up on its next tick; anything it misses is
+    // the top-up's job, which is why losing this insert costs a delay and not a
+    // bookmark.
+    void enqueueClassification(
+      pool,
+      userId,
+      applied.filter((record) => record.kind === "bookmark").map((record) => record.id),
+    );
     const hasMore = result.rows.length > 500;
     const changes = result.rows.slice(0, 500);
     return {
